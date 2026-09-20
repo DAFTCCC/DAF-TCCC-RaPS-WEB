@@ -375,6 +375,7 @@ window.addEventListener('raps-cloud-identity', event => {
 });
 
 window.addEventListener('online', () => syncAll({silent:true}));
+window.addEventListener('raps-class-sync-complete', () => syncAll({silent:true}));
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => syncAll({silent:true}), {once:true});
