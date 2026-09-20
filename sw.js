@@ -1,5 +1,5 @@
-const CACHE_NAME = 'tccc-eval-web-v3-1-3-web-1-membership-starts-at-1';
-const VERSION = '3.1.3-web.1';
+const CACHE_NAME = 'tccc-eval-web-v3-1-4-web-1-admin-reactivate-delete-1';
+const VERSION = '3.1.4-web.1';
 const SHELL = [
   './', './index.html',
   `./styles.css?v=${VERSION}`, `./version.js?v=${VERSION}`,
