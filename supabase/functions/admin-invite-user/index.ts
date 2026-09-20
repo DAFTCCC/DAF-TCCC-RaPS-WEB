@@ -31,7 +31,10 @@ Deno.serve(async (req) => {
 
   const { data: authData, error: authError } = await userClient.auth.getUser();
   const caller = authData?.user;
-  if (authError || !caller) return json({ error: 'Unauthorized' }, 401);
+  if (authError || !caller) {
+    console.error('invite-auth-failed', authError?.message || 'No caller');
+    return json({ code:'INVITE_AUTH', error:'Unauthorized' }, 401);
+  }
 
   const { data: callerMemberships, error: membershipError } = await adminClient
     .from('memberships')
@@ -49,7 +52,8 @@ Deno.serve(async (req) => {
   });
 
   if (membershipError || !callerMembership) {
-    return json({ error: 'Enterprise Admin access required' }, 403);
+    console.error('invite-admin-check-failed', membershipError?.message || 'No active enterprise membership');
+    return json({ code:'INVITE_ADMIN', error:'Enterprise Admin access required' }, 403);
   }
 
   let body: any;
@@ -62,26 +66,26 @@ Deno.serve(async (req) => {
   const majcomId = body?.majcom_id || null;
 
   const roles = new Set(['evaluator','program_manager','majcom_manager','enterprise_admin']);
-  if (!email || !email.includes('@')) return json({ error: 'Valid email required' }, 400);
-  if (!roles.has(role)) return json({ error: 'Invalid role' }, 400);
+  if (!email || !email.includes('@')) return json({ code:'INVITE_EMAIL', error:'Valid email required' }, 400);
+  if (!roles.has(role)) return json({ code:'INVITE_ROLE', error:'Invalid role' }, 400);
 
   if ((role === 'evaluator' || role === 'program_manager') && !baseId) {
-    return json({ error: 'A base is required for this role' }, 400);
+    return json({ code:'INVITE_SCOPE', error:'A base is required for this role' }, 400);
   }
   if (role === 'majcom_manager' && !majcomId) {
-    return json({ error: 'A MAJCOM is required for this role' }, 400);
+    return json({ code:'INVITE_SCOPE', error:'A MAJCOM is required for this role' }, 400);
   }
   if (role === 'enterprise_admin' && (baseId || majcomId)) {
-    return json({ error: 'Enterprise Admin must not be scoped to a base or MAJCOM' }, 400);
+    return json({ code:'INVITE_SCOPE', error:'Enterprise Admin must not be scoped to a base or MAJCOM' }, 400);
   }
 
   if (baseId) {
     const { data: base } = await adminClient.from('bases').select('id').eq('id', baseId).maybeSingle();
-    if (!base) return json({ error: 'Base not found' }, 400);
+    if (!base) return json({ code:'INVITE_SCOPE', error:'Base not found' }, 400);
   }
   if (majcomId) {
     const { data: majcom } = await adminClient.from('majcoms').select('id').eq('id', majcomId).maybeSingle();
-    if (!majcom) return json({ error: 'MAJCOM not found' }, 400);
+    if (!majcom) return json({ code:'INVITE_SCOPE', error:'MAJCOM not found' }, 400);
   }
 
   const siteUrl = Deno.env.get('RAPS_SITE_URL') || '';
@@ -95,7 +99,11 @@ Deno.serve(async (req) => {
   });
 
   if (inviteError || !inviteData?.user) {
-    return json({ error: inviteError?.message || 'Unable to invite user' }, 400);
+    console.error('invite-email-failed', inviteError?.message || 'Unable to invite user');
+    return json({
+      code:'INVITE_EMAIL_SEND',
+      error: inviteError?.message || 'Unable to invite user'
+    }, 400);
   }
 
   const userId = inviteData.user.id;
@@ -131,7 +139,9 @@ Deno.serve(async (req) => {
 
   if (insertError) {
     try { await adminClient.auth.admin.deleteUser(userId); } catch {}
+    console.error('invite-membership-failed', insertError.message);
     return json({
+      code:'INVITE_MEMBERSHIP',
       error: 'The invitation could not be completed because the RaPS role was not assigned. No active account was retained.',
       detail: insertError.message
     }, 500);
