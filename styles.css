@@ -487,10 +487,10 @@ body.cloudActivationLocked{overflow:hidden}
 
 /* v3.4.0 Enterprise Operations */
 .enterpriseOperationsDashboard{border-color:rgba(72,163,120,.55)}
-.enterpriseToolbar{display:grid;grid-template-columns:minmax(160px,190px) minmax(170px,210px) minmax(210px,1fr) minmax(150px,180px) auto minmax(240px,1fr);gap:10px;align-items:end;padding:12px 14px;border-bottom:1px solid var(--line)}
+.enterpriseToolbar{display:grid;grid-template-columns:minmax(160px,190px) minmax(170px,210px) minmax(220px,1fr) minmax(150px,180px);gap:10px;align-items:end;padding:12px 14px 8px}
 .enterpriseToolbar label{display:grid;gap:5px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
 .enterpriseToolbar select{width:100%;min-height:44px;background:#101b24;color:#f2f7fa;border:1px solid #3d4d59;border-radius:8px;padding:8px}
-.enterpriseDashboardMessage{align-self:center;color:var(--muted);font-size:11px;line-height:1.4}
+.enterpriseRefreshBar{display:flex;align-items:center;gap:12px;padding:8px 14px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}.enterpriseRefreshBtn{min-width:210px;white-space:nowrap}.enterpriseDashboardMessage{align-self:center;color:var(--muted);font-size:11px;line-height:1.4;flex:1;min-width:240px}
 .enterpriseDashboardMessage.success{color:#b8efc5}.enterpriseDashboardMessage.working{color:#cfe9f9}.enterpriseDashboardMessage.error{color:#ffc1c4}.enterpriseDashboardMessage.offline{color:#ffe3a0}
 .enterpriseInlineHelper{padding:0 0 10px}
 .enterpriseDashboardFoot{padding-bottom:13px}
@@ -498,6 +498,12 @@ body.cloudActivationLocked{overflow:hidden}
 .enterpriseFlag{display:inline-block;border-radius:999px;padding:4px 8px;font-size:10px;font-weight:900;border:1px solid transparent}
 .enterpriseFlag.attention{background:#5b2528;color:#ffd2d3;border-color:#8a3b40}
 .enterpriseFlag.watch{background:#544117;color:#ffebb8;border-color:#836b2e}
-@media(max-width:1180px){.enterpriseToolbar{grid-template-columns:repeat(3,minmax(0,1fr))}.enterpriseToolbar .enterpriseDashboardMessage{grid-column:1/-1}}
-@media(max-width:760px){.enterpriseToolbar{grid-template-columns:1fr 1fr}.enterpriseToolbar .action{width:100%}.enterpriseToolbar .enterpriseDashboardMessage{grid-column:1/-1}}
-@media(max-width:520px){.enterpriseToolbar{grid-template-columns:1fr}.enterpriseToolbar .enterpriseDashboardMessage{grid-column:auto}}
+@media(max-width:1180px){.enterpriseToolbar{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.enterpriseToolbar{grid-template-columns:1fr 1fr}.enterpriseRefreshBar{align-items:stretch}.enterpriseRefreshBtn{width:100%;min-width:0}.enterpriseDashboardMessage{min-width:0}}
+@media(max-width:520px){.enterpriseToolbar{grid-template-columns:1fr}.enterpriseRefreshBar{display:grid;grid-template-columns:1fr}}
+
+.enterpriseMajcomGroupRow td{background:#102532;border-top:2px solid rgba(86,166,211,.45);border-bottom:1px solid rgba(86,166,211,.35);padding:10px 12px!important}
+.enterpriseMajcomGroupRow td span{font-size:12px;font-weight:950;letter-spacing:.06em;color:#d8edf8}
+.enterpriseMajcomGroupRow td small{margin-left:10px;color:var(--muted);font-size:10px;font-weight:700}
+.enterpriseMajcomRepeat{color:#9fb7c6;font-weight:800}
+#enterpriseBaseFilter optgroup{font-weight:900}
