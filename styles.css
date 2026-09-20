@@ -446,3 +446,11 @@ body.cloudAuthLocked{overflow:hidden}
 .cloudActivationGate{z-index:10050}
 .cloudPasswordRule{font-size:10px;color:#9fb1bf;line-height:1.4}
 body.cloudActivationLocked{overflow:hidden}
+
+
+.adminRowActions{
+  display:flex;
+  flex-wrap:wrap;
+  gap:.4rem;
+  align-items:center;
+}
