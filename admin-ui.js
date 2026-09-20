@@ -35,7 +35,7 @@ function inject() {
   area.insertAdjacentHTML('beforeend', `
     <section id="enterpriseAdminCard" class="card managementCard enterpriseAdminCard hidden">
       <div class="cardHead"><span>Enterprise User Administration</span><span>Role + organizational scope</span></div>
-      <p class="helper">Create RaPS accounts by invitation, assign scoped access, and deactivate memberships. Authentication stays in Supabase; RaPS never stores administrator passwords or service-role credentials in the browser.</p>
+      <p class="helper">Create RaPS accounts by invitation, assign scoped access, deactivate or reactivate memberships, and permanently delete unused accounts. Authentication stays in Supabase; RaPS never stores administrator passwords or service-role credentials in the browser.</p>
 
       <div id="adminMessage" class="adminMessage" aria-live="polite"></div>
 
@@ -162,6 +162,7 @@ function renderTable() {
   }
 
   const currentUser = window.RAPS_CLOUD?.user?.id;
+  const deleteRendered = new Set();
   wrap.innerHTML = `
     <div class="analyticsTableWrap">
       <table class="analyticsTable adminTable">
@@ -170,6 +171,9 @@ function renderTable() {
           ${rows.map(m => {
             const p = profileById.get(m.user_id) || {};
             const selfEnterprise = m.user_id === currentUser && m.role === 'enterprise_admin' && activeNow(m);
+            const userHasAnyActive = catalog.memberships.some(x => x.user_id === m.user_id && activeNow(x));
+            const showDelete = !userHasAnyActive && m.user_id !== currentUser && !deleteRendered.has(m.user_id);
+            if (showDelete) deleteRendered.add(m.user_id);
             return `<tr>
               <td><b>${esc(p.display_name || p.email || m.user_id)}</b><div><small>${esc(p.email || '')}</small></div></td>
               <td>${esc(ROLE_LABELS[m.role] || m.role)}</td>
@@ -177,7 +181,10 @@ function renderTable() {
               <td><span class="statusPill ${activeNow(m) ? 'pass' : 'trash'}">${activeNow(m) ? 'ACTIVE' : 'INACTIVE'}</span></td>
               <td>${activeNow(m)
                 ? `<button class="ghost small danger" data-admin-deactivate="${esc(m.id)}" ${selfEnterprise ? 'disabled title="You cannot deactivate your own active Enterprise Admin membership here."' : ''}>Deactivate</button>`
-                : '<span class="rowSub">Inactive</span>'}</td>
+                : `<div class="adminRowActions">
+                    <button class="ghost small" data-admin-reactivate="${esc(m.id)}">Reactivate</button>
+                    ${showDelete ? `<button class="ghost small danger" data-admin-delete-user="${esc(m.user_id)}" data-admin-delete-label="${esc(p.display_name || p.email || m.user_id)}">Delete Account</button>` : ''}
+                   </div>`}</td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -186,6 +193,12 @@ function renderTable() {
 
   wrap.querySelectorAll('[data-admin-deactivate]').forEach(btn => {
     btn.addEventListener('click', () => deactivateMembership(btn.dataset.adminDeactivate));
+  });
+  wrap.querySelectorAll('[data-admin-reactivate]').forEach(btn => {
+    btn.addEventListener('click', () => reactivateMembership(btn.dataset.adminReactivate));
+  });
+  wrap.querySelectorAll('[data-admin-delete-user]').forEach(btn => {
+    btn.addEventListener('click', () => deleteAccount(btn.dataset.adminDeleteUser, btn.dataset.adminDeleteLabel || 'this account'));
   });
 }
 
@@ -328,6 +341,70 @@ async function deactivateMembership(id) {
   }
   setMessage('Membership deactivated.', 'success');
   await loadAdminData();
+}
+
+async function reactivateMembership(id) {
+  if (!isEnterprise() || !id) return;
+  if (!confirm('Reactivate this RaPS membership? This role/scope will authorize access again immediately.')) return;
+
+  const client = window.RAPS_SUPABASE;
+  setMessage('Reactivating membership…', 'working');
+  const { error } = await client.from('memberships').update({
+    active:true,
+    starts_at:new Date().toISOString(),
+    ends_at:null
+  }).eq('id',id);
+
+  if (error) {
+    setMessage(`Reactivate failed: ${error.message}`, 'error');
+    return;
+  }
+  setMessage('Membership reactivated.', 'success');
+  await loadAdminData();
+}
+
+async function deleteAccount(userId, label) {
+  if (!isEnterprise() || !userId) return;
+  if (userId === window.RAPS_CLOUD?.user?.id) {
+    setMessage('You cannot delete the account you are currently signed in with.', 'error');
+    return;
+  }
+
+  const confirmation = prompt(
+    `Permanently delete ${label}?\n\nOnly unused accounts with no RaPS operational history can be deleted. This removes the Supabase login and cannot be undone.\n\nType DELETE to continue.`
+  );
+  if (confirmation !== 'DELETE') {
+    if (confirmation !== null) setMessage('Account deletion cancelled. Type DELETE exactly to confirm.', 'error');
+    return;
+  }
+
+  const client = window.RAPS_SUPABASE;
+  setMessage(`Checking whether ${label} can be safely deleted…`, 'working');
+
+  try {
+    const { data, error } = await client.functions.invoke('admin-manage-user', {
+      body: { action:'delete_account', user_id:userId }
+    });
+    if (error) throw error;
+    if (data?.error) throw new Error(data.error + (data.detail ? ` · ${data.detail}` : ''));
+    setMessage(`${label} was permanently deleted.`, 'success');
+    await loadAdminData();
+  } catch (error) {
+    let detail = error?.message || String(error);
+    try {
+      if (error?.context && typeof error.context.clone === 'function') {
+        const response = error.context.clone();
+        const body = await response.json().catch(() => null);
+        if (body?.error) detail = body.error;
+        if (body?.detail) detail += ` · ${body.detail}`;
+        if (body?.code) detail = `[${body.code}] ${detail}`;
+      }
+    } catch (parseError) {
+      console.warn('Unable to parse account-management error body', parseError);
+    }
+    console.error('RaPS account deletion failed', error);
+    setMessage(`Delete failed: ${detail}`, 'error');
+  }
 }
 
 window.addEventListener('raps-cloud-identity', () => loadAdminData());
