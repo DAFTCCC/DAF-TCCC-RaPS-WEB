@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#08131d">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://bplevsfvpwrkgafizvao.supabase.co wss://bplevsfvpwrkgafizvao.supabase.co;">
 <link rel="icon" type="image/png" href="assets/icon-192.png">
 <link rel="apple-touch-icon" href="assets/icon-192.png">
 <link rel="stylesheet" href="styles.css?v=3.0.1-web.1">
@@ -23,7 +23,7 @@
     <div class="safetyHeadlineGrid" aria-label="Key safeguards">
       <div><strong>TRAINING USE ONLY</strong><span>Not clinical decision support or an operational casualty record.</span></div>
       <div><strong>NO PHI/CUI</strong><span>Do not enter protected medical, operational, classified, or controlled information.</span></div>
-      <div><strong>DATA STORED LOCALLY</strong><span>Working records stay on this device unless you explicitly export them.</span></div>
+      <div><strong>LOCAL RECORDS + CLOUD IDENTITY</strong><span>Evaluation records remain local in this phase; authorized user identity and role are verified through Supabase.</span></div>
     </div>
     <details class="safetyDetails">
       <summary>View Safeguards</summary>
@@ -39,7 +39,7 @@
     </details>
     <label class="safetyAckRow"><input id="safetyAck" type="checkbox"><span>I understand the safeguards and will use this tool only for authorized TCCC training/evaluation.</span></label>
     <button id="safetyEnterBtn" class="action primary safetyEnter" type="button" disabled>Acknowledge &amp; Continue</button>
-    <p class="safetyFinePrint">Acknowledgment is required once per app session. No acknowledgment or application data is transmitted by this version.</p>
+    <p class="safetyFinePrint">Acknowledgment is required once per app session. This phase transmits authentication and role/scope queries to Supabase; evaluation records remain local until cloud sync is enabled in a later phase.</p>
   </div>
 </div>
 <div id="homeView" class="view">
@@ -49,7 +49,7 @@
       <div class="eyebrow">TACTICAL COMBAT CASUALTY CARE</div>
       <h1 data-brand-product>TCCC Evaluation Suite</h1>
       <p>Offline-first TCCC evaluation, training management, readiness analysis, and local program oversight for Tier 1–4 assessments.</p>
-      <div class="versionLine">v<span id="appVersion">—</span> · Web/PWA · Local / offline</div>
+      <div class="versionLine">v<span id="appVersion">—</span> · Web/PWA · Local evaluations + Supabase identity</div>
     </section>
     <nav id="appAreaNav" class="appAreaNav" aria-label="Application areas">
       <button class="areaTab active" data-home-area="evaluate">EVALUATE</button>
@@ -106,8 +106,8 @@
     <section id="areaProgram" class="appArea hidden" data-app-area="program">
       <div class="areaIntro"><b>PROGRAM</b><span>Installation views · MAJCOM views · Evaluator calibration · Curriculum versions · Data quality</span></div>
       <section class="card managementCard">
-        <div class="cardHead"><span>Program Views</span><span>Local analytics only</span></div>
-        <p class="helper">No cloud connection is used. Filters and program analytics operate only on records stored on this device.</p>
+        <div class="cardHead"><span>Program Views</span><span>Local analytics · Cloud identity enabled</span></div>
+        <p class="helper">Authentication and role/scope validation use Supabase. Program analytics still operate on records stored on this device until centralized evaluation sync is enabled.</p>
         <div class="managementFilters">
           <label><span>MAJCOM / Command</span><select id="managementMajcom"></select></label>
           <label><span>Home installation</span><select id="managementInstallation"></select></label>
@@ -272,6 +272,9 @@
 <div id="formModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet formSheet"><div class="sheetHead"><h2 id="formModalTitle"></h2><button data-close="formModal" class="ghost">Close</button></div><div id="formModalBody"></div></div></div>
 <div id="reportModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>Evaluation Review</h2><button data-close="reportModal" class="ghost">Close</button></div><pre id="aarText"></pre><div class="actions"><button id="confirmFinalizeBtn" class="action primary">Finalize Evaluation</button><button id="copyAar" class="action">Copy Review</button></div></div></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="supabase-config.js?v=3.0.1-web.1"></script>
+<script src="cloud-auth.js?v=3.0.1-web.1"></script>
 <script src="version.js?v=3.0.1-web.1"></script>
 <script src="tiers.js?v=3.0.1-web.1"></script>
 <script src="branding.js?v=3.0.1-web.1"></script>
