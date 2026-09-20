@@ -148,15 +148,18 @@ function saveDb(){
       const a=evalState();if(a){ensureSyncMeta(a,a.startedAt||ts,db.deviceId);a.modifiedAt=ts;a.lastModifiedDeviceId=db.deviceId;a.syncStatus=SYNC_LOCAL;}
     }
   }
-  localStorage.setItem(DB_KEY,JSON.stringify(db));
   if(c){
     const state=c.cloudSync||{};
     if(state.enabled===true && state.status!=='syncing'){
       state.status=navigator.onLine?'pending':'offline';
       state.error='';
       state.localModifiedAt=ts;
-      window.dispatchEvent(new CustomEvent('raps-local-class-change',{detail:{classId:c.id,at:ts}}));
+      c.cloudSync=state;
     }
+  }
+  localStorage.setItem(DB_KEY,JSON.stringify(db));
+  if(c?.cloudSync?.enabled===true && c.cloudSync.status!=='syncing'){
+    window.dispatchEvent(new CustomEvent('raps-local-class-change',{detail:{classId:c.id,at:ts}}));
   }
 }
 function cls(){ return db.classes.find(c=>c.id===currentClassId); }
@@ -245,7 +248,10 @@ function event(label,detail=''){
 function createClass(data){
   const source=TIERS[data.tierId];
   const ts=now();const c={id:uuid(),name:String(data.name||'').trim(),tierId:data.tierId,roster:String(data.roster||'').trim(),scenario:String(data.scenario||'').trim(),scenarioVersion:String(data.scenarioVersion||'1').trim()||'1',date:data.date,siteCode:String(data.siteCode||'').trim(),courseType:String(data.courseType||'initial'),scenarioDifficulty:String(data.scenarioDifficulty||'standard'),scenarioProfile:String(data.scenarioProfile||'').trim(),leadEvaluator:String(data.leadEvaluator||'').trim(),evaluatorId:String(data.evaluatorId||'').trim(),curriculumId:`TCCC-TIER${data.tierId}`,appVersion:APP_VERSION,createdAt:ts,modifiedAt:ts,deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,status:'draft',closedAt:null,closedBy:'',deletedAt:null,scenarioNT:[],students:[],cloudSync:{enabled:true,status:navigator.onLine?'pending':'offline',error:'',createdBy:'',lastSyncedAt:0,localModifiedAt:ts,remoteModifiedAt:0},contentVersion:`${source.source} | app ${APP_VERSION}`,tierSnapshot:deep(source)};
-  applyClassLocationFields(c,data);db.classes.unshift(c);saveDb();return c;
+  applyClassLocationFields(c,data);db.classes.unshift(c);saveDb();
+  localStorage.setItem(DB_KEY,JSON.stringify(db));
+  window.dispatchEvent(new CustomEvent('raps-local-class-change',{detail:{classId:c.id,at:ts}}));
+  return c;
 }
 function classStats(c){
   let started=0,completed=0,qualified=0,failed=0;
