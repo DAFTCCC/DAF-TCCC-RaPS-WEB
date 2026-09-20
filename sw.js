@@ -1,5 +1,5 @@
-const CACHE_NAME = 'tccc-eval-web-v3-1-1-web-1-invite-activation-1';
-const VERSION = '3.1.1-web.1';
+const CACHE_NAME = 'tccc-eval-web-v3-1-2-web-1-invite-diagnostics-1';
+const VERSION = '3.1.2-web.1';
 const SHELL = [
   './', './index.html',
   `./styles.css?v=${VERSION}`, `./version.js?v=${VERSION}`,
