@@ -410,3 +410,7 @@ body.cloudAuthLocked{overflow:hidden}
 .syncBadge.offline{background:#4a3a22;color:#ffe1aa;border-color:#a77b36}
 .syncBadge.error,.syncBadge.conflict{background:#5c2628;color:#ffd0d0;border-color:#c74a48}
 .syncBadge.local{background:#263746;color:#d8e6ef;border-color:#5f7f95}
+
+
+/* v3.0.3 roster/event shell sync */
+.rosterCloudNote{font-size:10px;color:#9fb1bf}
