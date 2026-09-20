@@ -7,7 +7,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://bplevsfvpwrkgafizvao.supabase.co wss://bplevsfvpwrkgafizvao.supabase.co;">
 <link rel="icon" type="image/png" href="assets/icon-192.png">
 <link rel="apple-touch-icon" href="assets/icon-192.png">
-<link rel="stylesheet" href="styles.css?v=3.0.1-web.1">
+<link rel="stylesheet" href="styles.css?v=3.0.2-web.1">
 <title>TCCC Evaluation Suite</title>
 </head>
 <body>
@@ -62,7 +62,9 @@
       <div class="areaIntro"><b>EVALUATE</b><span>My Classes · Resume Assessment · Start Assessment · Live evaluator workflow</span></div>
       <section class="homeActions">
         <button id="newClassBtn" class="action primary big">+ New Class</button>
+        <button id="syncClassesBtn" class="action big" type="button">Sync Classes</button>
       </section>
+      <div id="classSyncStatus" class="classSyncStatus" data-mode="local">Local classes ready</div>
       <section class="card">
         <div class="cardHead"><span>My Classes</span><span id="classCount">0</span></div>
         <div id="classList" class="classList"></div>
@@ -273,12 +275,13 @@
 <div id="reportModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>Evaluation Review</h2><button data-close="reportModal" class="ghost">Close</button></div><pre id="aarText"></pre><div class="actions"><button id="confirmFinalizeBtn" class="action primary">Finalize Evaluation</button><button id="copyAar" class="action">Copy Review</button></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-config.js?v=3.0.1-web.1"></script>
-<script src="cloud-auth.js?v=3.0.1-web.1"></script>
-<script src="version.js?v=3.0.1-web.1"></script>
-<script src="tiers.js?v=3.0.1-web.1"></script>
-<script src="branding.js?v=3.0.1-web.1"></script>
-<script src="installations.js?v=3.0.1-web.1"></script>
-<script src="app.js?v=3.0.1-web.1"></script>
+<script src="supabase-config.js?v=3.0.2-web.1"></script>
+<script src="cloud-auth.js?v=3.0.2-web.1"></script>
+<script src="version.js?v=3.0.2-web.1"></script>
+<script src="tiers.js?v=3.0.2-web.1"></script>
+<script src="branding.js?v=3.0.2-web.1"></script>
+<script src="installations.js?v=3.0.2-web.1"></script>
+<script src="app.js?v=3.0.2-web.1"></script>
+<script src="cloud-sync.js?v=3.0.2-web.1"></script>
 </body>
 </html>
