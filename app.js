@@ -603,9 +603,12 @@ function sectionStatus(s){
   s.items.forEach(i=>{const r=st.ratings[i.id];if(!r||(i.critical&&r==='nt'))unresolved++;if(r==='fail')warn++;});
   return warn?'warn':unresolved?'':'done';
 }
+function sectionTabLabel(code){
+  return code==='COMMS'?'COM':code;
+}
 function renderTabs(){
   const t=tier(),st=evalState();
-  $('tabs').innerHTML=t.sections.map(s=>`<button class="tab ${s.code===st.section?'active':''} ${sectionStatus(s)}" data-section="${esc(s.code)}">${esc(s.code)}</button>`).join('');
+  $('tabs').innerHTML=t.sections.map(s=>`<button class="tab ${s.code===st.section?'active':''} ${sectionStatus(s)}" data-section="${esc(s.code)}">${esc(sectionTabLabel(s.code))}</button>`).join('');
 }
 function renderSection(){
   const t=tier(),st=evalState(),sec=t.sections.find(s=>s.code===st.section)||t.sections[0]; st.section=sec.code;
