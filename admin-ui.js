@@ -294,7 +294,7 @@ async function assignExisting() {
     user_id,
     ...scopePayload('Existing'),
     active: true,
-    starts_at: null,
+    starts_at: new Date().toISOString(),
     ends_at: null,
     created_by: window.RAPS_CLOUD.user.id
   };
