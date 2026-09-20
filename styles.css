@@ -356,3 +356,44 @@ button,input,select,textarea{font-size:14px;line-height:1.25;min-width:0}
 .kpis small,#evalHeader.collapsed .kpis small{font-size:12px!important;line-height:1.15}
 .crit,.localBadge,.sourceBadge,.noteBadge,.forcedBadge{font-size:12px}
 .observeFocus span{font-size:12px}
+
+
+/* v3.0.1 Supabase identity/authentication integration */
+body.cloudAuthLocked{overflow:hidden}
+.cloudAuthGate{
+  position:fixed;inset:0;z-index:1200;display:none;align-items:center;justify-content:center;
+  padding:20px;background:linear-gradient(rgba(4,11,18,.90),rgba(4,11,18,.96)),url("assets/splash-background.png") center/cover no-repeat fixed;
+}
+.cloudAuthGate.open{display:flex}
+.cloudAuthCard{
+  width:min(560px,100%);background:linear-gradient(180deg,rgba(14,30,43,.97),rgba(9,19,29,.97));
+  border:1px solid rgba(143,193,203,.32);border-radius:18px;padding:22px;box-shadow:0 24px 70px #000c;
+}
+.cloudAuthBrand{display:flex;gap:14px;align-items:center}
+.cloudAuthBrand h1{margin:4px 0 0;font-size:clamp(24px,5vw,34px);line-height:1.08}
+.cloudAuthIcon{width:68px;height:68px;border-radius:16px;border:1px solid rgba(143,193,203,.35);object-fit:cover}
+.cloudAuthIntro{color:#c5d1d9;line-height:1.5;margin:16px 0}
+.cloudAuthForm{display:grid;gap:12px}
+.cloudAuthForm label{display:grid;gap:6px;font-size:12px;color:var(--muted)}
+.cloudAuthForm input{
+  width:100%;min-height:50px;background:#101820;color:var(--text);border:1px solid #496275;border-radius:10px;padding:11px 12px;
+}
+.cloudAuthMessage{min-height:20px;margin-top:12px;font-size:12px;line-height:1.4;color:#b9c8d2}
+.cloudAuthMessage.error{color:#ffb7b7}
+.cloudAuthMessage.working{color:#bfe1ff}
+.cloudAuthFoot{margin-top:14px;padding:11px 12px;border:1px solid rgba(95,127,149,.35);border-radius:10px;background:rgba(9,19,29,.55);color:#9fb1bf;font-size:11px;line-height:1.45}
+.cloudIdentityBar{
+  margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 11px;border:1px solid rgba(95,127,149,.38);
+  border-radius:10px;background:rgba(8,18,28,.72);font-size:11px;color:#cbd8e1;
+}
+.cloudIdentityDot{width:9px;height:9px;border-radius:50%;background:#d1a252;box-shadow:0 0 0 3px rgba(209,162,82,.12)}
+.cloudIdentityDot.connected{background:#4e8f78;box-shadow:0 0 0 3px rgba(78,143,120,.15)}
+.cloudIdentityDot.offline{background:#d1a252;box-shadow:0 0 0 3px rgba(209,162,82,.15)}
+.cloudIdentityDot.denied{background:#c74a48;box-shadow:0 0 0 3px rgba(199,74,72,.15)}
+.cloudLogoutBtn{margin-left:auto;min-height:36px;min-width:auto;padding:6px 10px;font-size:11px}
+@media(max-width:560px){
+  .cloudAuthGate{align-items:flex-start;padding:10px;overflow:auto}
+  .cloudAuthCard{margin-top:10px;padding:16px;border-radius:14px}
+  .cloudAuthIcon{width:56px;height:56px}
+  .cloudLogoutBtn{width:100%;margin-left:0}
+}
