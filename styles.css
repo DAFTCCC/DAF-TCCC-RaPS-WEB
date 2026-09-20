@@ -521,3 +521,13 @@ body.cloudActivationLocked{overflow:hidden}
 .enterpriseBaseGroup .analyticsTableWrap{border:0;border-radius:0}
 .enterpriseBaseGroup .enterpriseBaseTable{min-width:1180px}
 @media(max-width:760px){.enterpriseRefreshBar{grid-template-columns:1fr}.enterpriseRefreshBtn{width:100%!important;max-width:none}.enterpriseDashboardMessage{width:100%}}
+
+
+/* v3.4.3 evaluator phase tabs */
+#tabs .tab{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  text-align:center;
+  line-height:1.1;
+}
