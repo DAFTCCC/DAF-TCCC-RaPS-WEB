@@ -454,3 +454,19 @@ body.cloudActivationLocked{overflow:hidden}
   gap:.4rem;
   align-items:center;
 }
+
+
+/* v3.2.0 Program Manager — My Base operations */
+.pmBaseCard{border-color:rgba(65,145,190,.5)}
+.pmBaseToolbar{display:grid;grid-template-columns:minmax(180px,240px) auto 1fr;gap:10px;align-items:end;padding:12px 14px;border-bottom:1px solid var(--line)}
+.pmBaseToolbar label{display:grid;gap:5px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.pmBaseToolbar select{width:100%;min-height:44px;background:#101b24;color:#f2f7fa;border:1px solid #3d4d59;border-radius:8px;padding:8px}
+.pmBaseStatus{align-self:center;color:var(--muted);font-size:11px;line-height:1.4}
+.pmBaseStatus.success{color:#b8efc5}.pmBaseStatus.working{color:#cfe9f9}.pmBaseStatus.error{color:#ffc1c4}.pmBaseStatus.offline{color:#ffe3a0}
+.pmBaseFoot{padding-bottom:13px}
+.pmClassTable{min-width:920px}.pmEvaluatorTable{min-width:760px}.pmIncompleteTable{min-width:900px}
+.statusPill.warn{background:#544117;color:#ffebb8}
+@media(max-width:760px){
+  .pmBaseToolbar{grid-template-columns:1fr}
+  .pmBaseToolbar .action{width:100%}
+}
