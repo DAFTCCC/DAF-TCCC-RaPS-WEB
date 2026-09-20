@@ -7,7 +7,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://bplevsfvpwrkgafizvao.supabase.co wss://bplevsfvpwrkgafizvao.supabase.co;">
 <link rel="icon" type="image/png" href="assets/icon-192.png">
 <link rel="apple-touch-icon" href="assets/icon-192.png">
-<link rel="stylesheet" href="styles.css?v=3.4.3-web.1">
+<link rel="stylesheet" href="styles.css?v=3.4.4-web.1">
 <title>TCCC Evaluation Suite</title>
 </head>
 <body>
@@ -222,9 +222,9 @@
 </header>
 
 <main class="evalMain">
-  <section id="quickCufTimerCard" class="card hidden"><div class="cardHead"><span>Quick Timer — CUF Tourniquet</span><span id="quickCufTimerStandard"></span></div><div id="quickCufTimer"></div></section>
-  <section id="instructionsCard" class="card"><div class="cardHead"><span>Evaluation Standard</span><span id="attemptLabel"></span></div><p id="instructions"></p><div class="gradeLegend"><b>PASS</b> observed and standard met · <b>FAIL</b> observed and standard not met · <b>NT</b> intentionally not tested · <b>Blank</b> unresolved. NT is excluded from the performance score.</div></section>
   <section id="globalTimerCard" class="card hidden"><div class="cardHead"><span>Overall TTA Clock</span><span id="globalTimerStandard"></span></div><div id="globalTimer"></div></section>
+  <section id="instructionsCard" class="card"><div class="cardHead"><span>Evaluation Standard</span><span id="attemptLabel"></span></div><p id="instructions"></p><div class="gradeLegend"><b>PASS</b> observed and standard met · <b>FAIL</b> observed and standard not met · <b>NT</b> intentionally not tested · <b>Blank</b> unresolved. NT is excluded from the performance score.</div></section>
+  <section id="quickCufTimerCard" class="card hidden"><div class="cardHead"><span>Quick Timer — CUF Tourniquet</span><span id="quickCufTimerStandard"></span></div><div id="quickCufTimer"></div></section>
   <section id="activeTimersCard" class="card hidden"><div class="cardHead"><span>Active Timers</span><span id="activeTimerCount"></span></div><div id="activeTimers" class="activeTimers"></div></section>
   <section class="card">
     <div class="cardHead"><span id="sectionTitle">Skills Checklist</span><span id="sectionProgress"></span></div>
@@ -275,19 +275,19 @@
 <div id="reportModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>Evaluation Review</h2><button data-close="reportModal" class="ghost">Close</button></div><pre id="aarText"></pre><div class="actions"><button id="confirmFinalizeBtn" class="action primary">Finalize Evaluation</button><button id="copyAar" class="action">Copy Review</button></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-config.js?v=3.4.3-web.1"></script>
-<script src="cloud-auth.js?v=3.4.3-web.1"></script>
-<script src="version.js?v=3.4.3-web.1"></script>
-<script src="tiers.js?v=3.4.3-web.1"></script>
-<script src="branding.js?v=3.4.3-web.1"></script>
-<script src="installations.js?v=3.4.3-web.1"></script>
-<script src="app.js?v=3.4.3-web.1"></script>
-<script src="cloud-sync.js?v=3.4.3-web.1"></script>
-<script src="cloud-roster-sync.js?v=3.4.3-web.1"></script>
-<script src="cloud-grading-sync.js?v=3.4.3-web.1"></script>
-<script src="admin-ui.js?v=3.4.3-web.1"></script>
-<script src="program-manager-dashboard.js?v=3.4.3-web.1"></script>
-<script src="majcom-manager-dashboard.js?v=3.4.3-web.1"></script>
-<script src="enterprise-dashboard.js?v=3.4.3-web.1"></script>
+<script src="supabase-config.js?v=3.4.4-web.1"></script>
+<script src="cloud-auth.js?v=3.4.4-web.1"></script>
+<script src="version.js?v=3.4.4-web.1"></script>
+<script src="tiers.js?v=3.4.4-web.1"></script>
+<script src="branding.js?v=3.4.4-web.1"></script>
+<script src="installations.js?v=3.4.4-web.1"></script>
+<script src="app.js?v=3.4.4-web.1"></script>
+<script src="cloud-sync.js?v=3.4.4-web.1"></script>
+<script src="cloud-roster-sync.js?v=3.4.4-web.1"></script>
+<script src="cloud-grading-sync.js?v=3.4.4-web.1"></script>
+<script src="admin-ui.js?v=3.4.4-web.1"></script>
+<script src="program-manager-dashboard.js?v=3.4.4-web.1"></script>
+<script src="majcom-manager-dashboard.js?v=3.4.4-web.1"></script>
+<script src="enterprise-dashboard.js?v=3.4.4-web.1"></script>
 </body>
 </html>
