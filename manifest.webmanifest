@@ -1,0 +1,9 @@
+{
+  "name": "TCCC Evaluation Suite",
+  "short_name": "TCCC Eval",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#08131d",
+  "theme_color": "#08131d",
+  "description": "Offline-capable TCCC field evaluation, training management, readiness analysis, and local program oversight."
+}

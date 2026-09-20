@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#08131d">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none';">
+<link rel="icon" type="image/png" href="assets/icon-192.png">
+<link rel="apple-touch-icon" href="assets/icon-192.png">
+<link rel="stylesheet" href="styles.css?v=3.0.1-web.1">
+<title>TCCC Evaluation Suite</title>
+</head>
+<body>
+<div id="welcomeSplash" class="safetySplash" role="dialog" aria-modal="true" aria-labelledby="welcomeSplashTitle" aria-hidden="false">
+  <div class="safetySplashCard">
+    <div class="safetyBrand">
+      <img src="assets/app-icon.png" alt="" class="safetyIcon">
+      <div>
+        <div class="eyebrow">DAF TCCC TRAINING &amp; EVALUATION</div>
+        <h1 id="welcomeSplashTitle">TCCC Evaluation Suite</h1>
+      </div>
+    </div>
+    <div class="safetyHeadlineGrid" aria-label="Key safeguards">
+      <div><strong>TRAINING USE ONLY</strong><span>Not clinical decision support or an operational casualty record.</span></div>
+      <div><strong>NO PHI/CUI</strong><span>Do not enter protected medical, operational, classified, or controlled information.</span></div>
+      <div><strong>DATA STORED LOCALLY</strong><span>Working records stay on this device unless you explicitly export them.</span></div>
+    </div>
+    <details class="safetyDetails">
+      <summary>View Safeguards</summary>
+      <div class="safetyOwnerBox"><strong id="safetyOwnerLine">Program ownership</strong><span id="safetyContactLine"></span></div>
+      <div class="safetyRules">
+        <div><b>Training/evaluation use only</b><span>Use this application to support TCCC skills assessment. It is not clinical decision support and is not an operational casualty or medical record.</span></div>
+        <div><b>Minimum necessary student data</b><span>Use only the student information required for an authorized training record. Do not enter SSNs, DoD ID numbers, patient identifiers, diagnoses, or unnecessary personal information.</span></div>
+        <div><b>No protected operational/medical data</b><span>Do not enter classified information, CUI, PHI, patient/casualty information, or other protected data unless this application and hosting environment are specifically approved for that data.</span></div>
+        <div><b>Protect exports</b><span>PDF, CSV, and JSON exports may contain names and official training results. Store and transmit them only through approved organizational systems and according to applicable records/privacy requirements.</span></div>
+        <div><b>Local-storage risk</b><span>This web/PWA version stores working records on the local device/browser. Clearing browser/site data, changing devices, or device loss can remove unsynchronized records. Export/backup completed classes promptly.</span></div>
+        <div><b>Verify current standards</b><span>DHA/JTS/DAF source references support the evaluator, but the current official standard and authorized course guidance remain controlling if a discrepancy is identified.</span></div>
+      </div>
+    </details>
+    <label class="safetyAckRow"><input id="safetyAck" type="checkbox"><span>I understand the safeguards and will use this tool only for authorized TCCC training/evaluation.</span></label>
+    <button id="safetyEnterBtn" class="action primary safetyEnter" type="button" disabled>Acknowledge &amp; Continue</button>
+    <p class="safetyFinePrint">Acknowledgment is required once per app session. No acknowledgment or application data is transmitted by this version.</p>
+  </div>
+</div>
+<div id="homeView" class="view">
+  <main class="homeMain">
+    <section class="hero">
+      <img class="heroIcon" src="assets/app-icon.png" alt="TCCC Evaluation Suite icon">
+      <div class="eyebrow">TACTICAL COMBAT CASUALTY CARE</div>
+      <h1 data-brand-product>TCCC Evaluation Suite</h1>
+      <p>Offline-first TCCC evaluation, training management, readiness analysis, and local program oversight for Tier 1–4 assessments.</p>
+      <div class="versionLine">v<span id="appVersion">—</span> · Web/PWA · Local / offline</div>
+    </section>
+    <nav id="appAreaNav" class="appAreaNav" aria-label="Application areas">
+      <button class="areaTab active" data-home-area="evaluate">EVALUATE</button>
+      <button class="areaTab" data-home-area="manage">MANAGE TRAINING</button>
+      <button class="areaTab" data-home-area="readiness">READINESS</button>
+      <button class="areaTab" data-home-area="program">PROGRAM</button>
+    </nav>
+
+    <section id="areaEvaluate" class="appArea" data-app-area="evaluate">
+      <div class="areaIntro"><b>EVALUATE</b><span>My Classes · Resume Assessment · Start Assessment · Live evaluator workflow</span></div>
+      <section class="homeActions">
+        <button id="newClassBtn" class="action primary big">+ New Class</button>
+      </section>
+      <section class="card">
+        <div class="cardHead"><span>My Classes</span><span id="classCount">0</span></div>
+        <div id="classList" class="classList"></div>
+      </section>
+      <section class="card infoCard">
+        <div class="cardHead"><span>Evaluator Workflow</span><span>CUF → TFC → MARCH-PAWS</span></div>
+        <div class="workflow"><div><b>1</b><span>Create/open class</span></div><div><b>2</b><span>Select participant</span></div><div><b>3</b><span>Observe &amp; grade</span></div><div><b>4</b><span>Review &amp; finalize</span></div></div>
+      </section>
+    </section>
+
+    <section id="areaManage" class="appArea hidden" data-app-area="manage">
+      <div class="areaIntro"><b>MANAGE TRAINING</b><span>Rosters · Class management · Attempts · Remediation · Completion · Reports · Exports</span></div>
+      <section class="homeActions">
+        <button id="importBackupBtn" class="action big">Restore Backup</button>
+        <input id="backupImportFile" type="file" accept=".json,application/json" hidden>
+      </section>
+      <section class="card">
+        <div class="cardHead"><span>Local Classes</span><span>Open a class to manage training</span></div>
+        <div id="manageClassList" class="classList"></div>
+      </section>
+      <section id="trashCard" class="card hidden">
+        <div class="cardHead"><span>Trash</span><span id="trashCount">0</span></div>
+        <p class="helper">Deleted classes stay here until permanently deleted. Restoring a closed class does not unlock it.</p>
+        <div id="trashList" class="classList"></div>
+      </section>
+    </section>
+
+    <section id="areaReadiness" class="appArea hidden" data-app-area="readiness">
+      <div class="areaIntro"><b>READINESS</b><span>Competency gaps · Scenario coverage · Remediation effectiveness · Performance trends</span></div>
+      <section class="card managementCard">
+        <div class="cardHead"><span>Readiness Intelligence</span><span id="managementScopeLabel">All local classes</span></div>
+        <p class="helper">Performance when tested is shown separately from how often a criterion was tested. NT remains excluded from student performance scoring.</p>
+        <div id="managementKpis" class="analyticsKpis"></div>
+        <details class="analyticsDetails" open>
+          <summary>Observed Performance Contributors &amp; Competency Gaps</summary>
+          <div class="analyticsSplit"><div><h3>Observed Performance Contributors</h3><div id="managementRootCauses"></div></div><div><h3>Highest Competency Gaps</h3><div id="managementGapTable"></div></div></div>
+        </details>
+      </section>
+    </section>
+
+    <section id="areaProgram" class="appArea hidden" data-app-area="program">
+      <div class="areaIntro"><b>PROGRAM</b><span>Installation views · MAJCOM views · Evaluator calibration · Curriculum versions · Data quality</span></div>
+      <section class="card managementCard">
+        <div class="cardHead"><span>Program Views</span><span>Local analytics only</span></div>
+        <p class="helper">No cloud connection is used. Filters and program analytics operate only on records stored on this device.</p>
+        <div class="managementFilters">
+          <label><span>MAJCOM / Command</span><select id="managementMajcom"></select></label>
+          <label><span>Home installation</span><select id="managementInstallation"></select></label>
+          <label><span>Tier</span><select id="managementTier"><option value="">All tiers</option><option value="1">Tier 1</option><option value="2">Tier 2</option><option value="3">Tier 3</option><option value="4">Tier 4</option></select></label>
+          <label><span>Course type</span><select id="managementCourseType"><option value="">All course types</option><option value="initial">Initial qualification</option><option value="sustainment">Sustainment / refresher</option><option value="remediation">Remediation</option><option value="calibration">Instructor / evaluator calibration</option><option value="other">Other</option></select></label>
+          <button id="managementResetBtn" class="ghost small" type="button">Reset Scope</button>
+        </div>
+        <details class="analyticsDetails" open><summary>MAJCOM &amp; Installation Performance</summary><div id="managementMajcomTable"></div><div id="managementInstallationTable" class="managementTableGap"></div></details>
+        <div id="managementDataQuality" class="dataQualityPanel"></div>
+        <div class="exportGrid managementExports"><button id="managementSummaryCsvBtn" class="action primary">Management Summary CSV</button><button id="enterpriseAnalyticsCsvBtn" class="action">Enterprise Detail CSV</button></div>
+      </section>
+    </section>
+  </main>
+</div>
+
+<div id="classView" class="view hidden">
+  <header class="compactHeader">
+    <div class="brandRow"><button id="backHome" class="ghost">← Classes</button><div><h1 id="classTitle"></h1><div id="classSub" class="sub"></div></div></div>
+  </header>
+  <main class="evalMain">
+    <section class="card">
+      <div class="cardHead"><span>Class / Scenario <span id="classState" class="statusPill"></span></span><button id="editClassBtn" class="ghost small">Edit</button></div>
+      <div id="closedBanner" class="closedBanner hidden"><b>CLASS CLOSED</b><span id="closedBannerText"></span></div>
+      <div id="classMeta" class="classMeta"></div>
+    </section>
+    <section class="card">
+      <div class="cardHead"><span>Scenario Applicability</span><span id="scenarioCoverage"></span></div>
+      <p class="helper">Class-level NT applies only to noncritical criteria. All critical criteria remain mandatory in the evaluation and cannot be removed by the scenario profile. A critical NT or blank criterion remains unresolved and blocks finalization.</p>
+      <div class="scenarioTools"><button id="scenarioBtn" class="action">Configure Scenario NT</button></div>
+    </section>
+    <section class="card analyticsCard">
+      <div class="cardHead"><span>Class Performance Intelligence</span><span id="analyticsScope">Finalized Attempt 1</span></div>
+      <div id="classAnalyticsKpis" class="analyticsKpis"></div>
+      <details class="analyticsDetails" open>
+        <summary>Training Gaps &amp; Observed Performance Contributors</summary>
+        <div class="analyticsSplit">
+          <div><h3>Highest Competency Gaps</h3><div id="classGapTable"></div></div>
+          <div><h3>Observed Performance Contributors</h3><div id="classRootCauses"></div></div>
+        </div>
+      </details>
+      <details class="analyticsDetails">
+        <summary>Student Comparison &amp; Competency Heat Map</summary>
+        <div id="studentComparison"></div>
+        <div id="classHeatmap" class="heatmapWrap"></div>
+        <div id="evaluatorSignals" class="evaluatorSignals"></div>
+      </details>
+    </section>
+    <section class="card">
+      <div class="cardHead"><span>Roster</span><span id="rosterCount"></span></div>
+      <div class="rosterTools">
+        <button id="addStudentBtn" class="action primary">+ Add Student</button>
+        <button id="importRosterBtn" class="action">Import Roster CSV</button>
+        <input id="rosterFile" type="file" accept=".csv,text/csv" hidden>
+      </div>
+      <div class="rosterFilterBar" aria-label="Roster filters">
+        <input id="rosterSearch" class="rosterSearch" type="search" placeholder="Search student, rank, or training ID">
+        <div id="rosterFilters" class="rosterFilters">
+          <button class="filterChip active" data-roster-filter="all">All</button>
+          <button class="filterChip" data-roster-filter="not-started">Not Started</button>
+          <button class="filterChip" data-roster-filter="in-progress">In Progress</button>
+          <button class="filterChip" data-roster-filter="failed">Failed</button>
+          <button class="filterChip" data-roster-filter="remediation">Remediation</button>
+          <button class="filterChip" data-roster-filter="qualified">Qualified</button>
+        </div>
+      </div>
+      <div id="rosterList" class="rosterList"></div>
+    </section>
+    <section class="card">
+      <div class="cardHead"><span>Class Export</span><span>Course completion</span></div>
+      <div class="primaryExportRow">
+        <button id="classPdfBtn" class="action primary">Export Class Summary</button>
+        <div class="moreExports">
+          <button id="moreExportsBtn" class="action" type="button" aria-expanded="false" aria-controls="moreExportsMenu">More Exports ▾</button>
+          <div id="moreExportsMenu" class="exportGrid exportMenu hidden" aria-label="Additional class exports">
+            <button id="classSummaryCsvBtn" class="action">Summary CSV</button>
+            <button id="classCriteriaCsvBtn" class="action">Criteria CSV</button>
+            <button id="classTimersCsvBtn" class="action">Timer CSV</button>
+            <button id="classEventsCsvBtn" class="action">Event / Audit CSV</button>
+            <button id="classAnalyticsCsvBtn" class="action">Performance Analytics CSV</button>
+            <button id="classEnterpriseCsvBtn" class="action">Enterprise Detail CSV</button>
+            <button id="backupClassBtn" class="action">Backup JSON</button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="card">
+      <div class="cardHead"><span>Class Management</span><span>Audit controls</span></div>
+      <p class="helper">Close permanently locks a completed class. Delete moves the class to Trash; closed classes remain locked if restored.</p>
+      <div class="exportGrid">
+        <button id="closeClassBtn" class="action primary">Close Class</button>
+        <button id="deleteClassBtn" class="action danger">Delete Class</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="evalView" class="view hidden">
+<header id="evalHeader">
+  <div class="brandRow">
+    <button id="backRoster" class="ghost">← Roster</button>
+    <div class="evalIdentity"><h1 id="tierTitle"></h1><div class="sub" id="tierSource"></div></div>
+  </div>
+  <div class="studentBar"><strong id="studentLabel"></strong><span id="attemptBadge"></span></div>
+  <div class="kpis">
+    <div><small>ELAPSED</small><strong id="elapsedTop">00:00</strong></div>
+    <div><small>CRITICAL FAIL</small><strong id="criticalTop">0</strong></div>
+    <div><small>SCORE</small><strong id="gradedTop">—</strong></div>
+    <div><small>UNRESOLVED</small><strong id="unresolvedTop">0</strong></div>
+  </div>
+</header>
+
+<main class="evalMain">
+  <section id="quickCufTimerCard" class="card hidden"><div class="cardHead"><span>Quick Timer — CUF Tourniquet</span><span id="quickCufTimerStandard"></span></div><div id="quickCufTimer"></div></section>
+  <section id="instructionsCard" class="card"><div class="cardHead"><span>Evaluation Standard</span><span id="attemptLabel"></span></div><p id="instructions"></p><div class="gradeLegend"><b>PASS</b> observed and standard met · <b>FAIL</b> observed and standard not met · <b>NT</b> intentionally not tested · <b>Blank</b> unresolved. NT is excluded from the performance score.</div></section>
+  <section id="globalTimerCard" class="card hidden"><div class="cardHead"><span>Overall TTA Clock</span><span id="globalTimerStandard"></span></div><div id="globalTimer"></div></section>
+  <section id="activeTimersCard" class="card hidden"><div class="cardHead"><span>Active Timers</span><span id="activeTimerCount"></span></div><div id="activeTimers" class="activeTimers"></div></section>
+  <section class="card">
+    <div class="cardHead"><span id="sectionTitle">Skills Checklist</span><span id="sectionProgress"></span></div>
+    <div id="tabs" class="tabs"></div>
+    <div class="modeSegmented" role="group" aria-label="Evaluator mode">
+      <button id="observeModeBtn" class="modeSegment active" type="button" aria-pressed="true">OBSERVE</button>
+      <button id="reviewModeBtn" class="modeSegment" type="button" aria-pressed="false">REVIEW</button>
+    </div>
+    <div id="observeFocus" class="observeFocus" aria-live="polite"></div>
+    <div class="phaseToolbar">
+      <button id="prevPhaseBtn" class="ghost small">← Previous</button>
+      <button id="nextUnresolvedBtn" class="action compact">Next Unresolved</button>
+      <label class="toggleLabel"><input id="showNtToggle" type="checkbox"> Show NT</label>
+      <button id="nextPhaseBtn" class="ghost small">Next →</button>
+    </div>
+    <div id="sectionTools"></div>
+    <div id="items"></div>
+    <div class="blockCloseout"><button id="nextUnresolvedBottomBtn" class="action primary nextUnresolvedAction">Next Unresolved</button><div id="blockCloseoutHint" class="helper"></div></div>
+  </section>
+  <section id="reviewTimelineCard" class="card">
+    <div class="cardHead"><span>Clinical / Evaluation Timeline</span><span id="eventCount"></span></div>
+    <div id="timeline" class="timeline"></div>
+  </section>
+  <section id="reviewSignoffCard" class="card signoff">
+    <div class="cardHead"><span>Sign-Off / Notes</span><span>Typed acknowledgment</span></div>
+    <div class="signGrid">
+      <input id="trainerSign" placeholder="Evaluator name (stored with this attempt)">
+      <input id="attemptEvaluatorId" placeholder="Evaluator ID / cadre identifier">
+      <input id="studentSign" placeholder="Student acknowledgment name">
+    </div>
+    <textarea id="overallNotes" placeholder="Overall evaluator comments / notes"></textarea>
+  </section>
+  <div class="actions evalActions">
+    <button class="action primary" id="finalizeBtn">Review / Finalize</button>
+    <button class="action danger" id="voidAttemptBtn">Void In-Progress Attempt</button>
+    <button class="action" id="individualPdfBtn">1-Page Student Summary PDF</button>
+    <button class="action" id="individualCsvBtn">Full Individual CSV</button>
+    <button class="action" id="attemptBackupBtn">Backup JSON</button>
+  </div>
+</main>
+</div>
+
+<div class="programOwnership" data-brand-footer aria-label="Program ownership and support contact"></div>
+
+<div id="brandingModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>About / Ownership / Contact</h2><button data-close="brandingModal" class="ghost">Close</button></div><div id="brandingModalBody"></div></div></div>
+
+<div id="formModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet formSheet"><div class="sheetHead"><h2 id="formModalTitle"></h2><button data-close="formModal" class="ghost">Close</button></div><div id="formModalBody"></div></div></div>
+<div id="reportModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>Evaluation Review</h2><button data-close="reportModal" class="ghost">Close</button></div><pre id="aarText"></pre><div class="actions"><button id="confirmFinalizeBtn" class="action primary">Finalize Evaluation</button><button id="copyAar" class="action">Copy Review</button></div></div></div>
+
+<script src="version.js?v=3.0.1-web.1"></script>
+<script src="tiers.js?v=3.0.1-web.1"></script>
+<script src="branding.js?v=3.0.1-web.1"></script>
+<script src="installations.js?v=3.0.1-web.1"></script>
+<script src="app.js?v=3.0.1-web.1"></script>
+</body>
+</html>
