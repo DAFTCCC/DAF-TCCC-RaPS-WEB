@@ -1,5 +1,5 @@
-const CACHE_NAME = 'tccc-eval-web-v3-4-0-web-1-enterprise-operations-1';
-const VERSION = '3.4.0-web.1';
+const CACHE_NAME = 'tccc-eval-web-v3-4-1-web-1-enterprise-layout-grouping-1';
+const VERSION = '3.4.1-web.1';
 const SHELL = [
   './', './index.html',
   `./styles.css?v=${VERSION}`, `./version.js?v=${VERSION}`,
