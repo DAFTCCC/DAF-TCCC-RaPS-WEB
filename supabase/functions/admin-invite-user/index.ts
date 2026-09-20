@@ -126,7 +126,7 @@ Deno.serve(async (req) => {
     base_id: (role === 'evaluator' || role === 'program_manager') ? baseId : null,
     majcom_id: role === 'majcom_manager' ? majcomId : null,
     active: true,
-    starts_at: null,
+    starts_at: new Date().toISOString(),
     ends_at: null,
     created_by: caller.id
   };
