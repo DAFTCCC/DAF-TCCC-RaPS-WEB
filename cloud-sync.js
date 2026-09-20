@@ -379,6 +379,7 @@ async function syncAll({ silent=false }={}) {
     if (!silent && (pulled || pushed.synced)) {
       console.info(`RaPS class sync complete: ${pulled} pulled, ${pushed.synced} pushed.`);
     }
+    window.dispatchEvent(new CustomEvent('raps-class-sync-complete',{detail:{pulled,pushed:pushed.synced,total}}));
   } catch (error) {
     console.error('RaPS class sync error', error);
     setGlobalStatus(`Class sync error · ${shortError(error)}`, 'error');
