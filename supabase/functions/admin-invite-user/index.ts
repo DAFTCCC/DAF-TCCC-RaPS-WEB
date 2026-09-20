@@ -33,16 +33,20 @@ Deno.serve(async (req) => {
   const caller = authData?.user;
   if (authError || !caller) return json({ error: 'Unauthorized' }, 401);
 
-  const { data: callerMembership, error: membershipError } = await adminClient
+  const { data: callerMemberships, error: membershipError } = await adminClient
     .from('memberships')
-    .select('id')
+    .select('id, starts_at, ends_at')
     .eq('user_id', caller.id)
     .eq('role', 'enterprise_admin')
-    .eq('active', true)
-    .or('starts_at.is.null,starts_at.lte.now()')
-    .or('ends_at.is.null,ends_at.gt.now()')
-    .limit(1)
-    .maybeSingle();
+    .eq('active', true);
+
+  const now = Date.now();
+  const callerMembership = (callerMemberships || []).find((m: any) => {
+    const starts = m.starts_at ? Date.parse(m.starts_at) : null;
+    const ends = m.ends_at ? Date.parse(m.ends_at) : null;
+    return !(Number.isFinite(starts) && starts > now)
+      && !(Number.isFinite(ends) && ends <= now);
+  });
 
   if (membershipError || !callerMembership) {
     return json({ error: 'Enterprise Admin access required' }, 403);
@@ -80,7 +84,11 @@ Deno.serve(async (req) => {
     if (!majcom) return json({ error: 'MAJCOM not found' }, 400);
   }
 
-  const redirectTo = Deno.env.get('RAPS_SITE_URL') || undefined;
+  const siteUrl = Deno.env.get('RAPS_SITE_URL') || '';
+  const redirectTo = siteUrl
+    ? `${siteUrl}${siteUrl.includes('?') ? '&' : '?'}raps_activation=1`
+    : undefined;
+
   const { data: inviteData, error: inviteError } = await adminClient.auth.admin.inviteUserByEmail(email, {
     data: { display_name: displayName || email.split('@')[0] },
     redirectTo
@@ -122,10 +130,10 @@ Deno.serve(async (req) => {
     .single();
 
   if (insertError) {
+    try { await adminClient.auth.admin.deleteUser(userId); } catch {}
     return json({
-      error: 'User was invited, but the RaPS role could not be assigned.',
-      detail: insertError.message,
-      user_id: userId
+      error: 'The invitation could not be completed because the RaPS role was not assigned. No active account was retained.',
+      detail: insertError.message
     }, 500);
   }
 
