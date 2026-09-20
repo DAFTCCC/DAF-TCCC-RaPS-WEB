@@ -423,3 +423,20 @@ body.cloudAuthLocked{overflow:hidden}
 .gradeSyncBadge.conflict,.gradeSyncBadge.error{background:#5c2628;color:#ffd0d0;border-color:#c74a48}
 .gradeSyncBadge.shell{background:#263746;color:#d8e6ef;border-color:#5f7f95}
 .gradeSyncBadge.local,.gradeSyncBadge.offline{background:#3f3526;color:#ffe1aa;border-color:#a77b36}
+
+
+/* v3.1.0 enterprise administration */
+.enterpriseAdminCard{margin-top:16px}
+.adminFormGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:12px}
+.adminFormGrid label{display:flex;flex-direction:column;gap:5px}
+.adminFormGrid label span{font-size:10px;font-weight:800;letter-spacing:.04em;color:#9fb1bf;text-transform:uppercase}
+.adminFormGrid input,.adminFormGrid select{width:100%;box-sizing:border-box}
+.adminActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.adminToolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0 10px}
+.adminMessage{min-height:18px;margin:8px 0;font-size:11px}
+.adminMessage.success{color:#bdebd7}
+.adminMessage.error{color:#ffc2c2}
+.adminMessage.working{color:#ffe0a3}
+.adminTable td{vertical-align:top}
+@media (max-width:900px){.adminFormGrid{grid-template-columns:1fr 1fr}}
+@media (max-width:600px){.adminFormGrid{grid-template-columns:1fr}}
