@@ -397,3 +397,16 @@ body.cloudAuthLocked{overflow:hidden}
   .cloudAuthIcon{width:56px;height:56px}
   .cloudLogoutBtn{width:100%;margin-left:0}
 }
+
+
+/* v3.0.2 cloud class synchronization */
+.classSyncStatus{margin:8px 0 12px;padding:8px 11px;border:1px solid rgba(95,127,149,.35);border-radius:9px;background:rgba(8,18,28,.55);font-size:11px;color:#b9c8d2}
+.classSyncStatus[data-mode="synced"]{color:#bdebd7;border-color:rgba(78,143,120,.55)}
+.classSyncStatus[data-mode="offline"]{color:#ffe0a3;border-color:rgba(209,162,82,.55)}
+.classSyncStatus[data-mode="error"]{color:#ffc2c2;border-color:rgba(199,74,72,.55)}
+.syncBadge{display:inline-block;margin-left:6px;padding:2px 6px;border-radius:999px;border:1px solid rgba(95,127,149,.4);font-size:9px;font-weight:900;letter-spacing:.04em;vertical-align:middle}
+.syncBadge.synced{background:#173f31;color:#c9f1dd;border-color:#4e8f78}
+.syncBadge.pending,.syncBadge.syncing{background:#514018;color:#ffe7ad;border-color:#d1a252}
+.syncBadge.offline{background:#4a3a22;color:#ffe1aa;border-color:#a77b36}
+.syncBadge.error,.syncBadge.conflict{background:#5c2628;color:#ffd0d0;border-color:#c74a48}
+.syncBadge.local{background:#263746;color:#d8e6ef;border-color:#5f7f95}
