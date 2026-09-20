@@ -483,3 +483,21 @@ body.cloudActivationLocked{overflow:hidden}
 .majcomBaseTable{min-width:900px}.majcomClassTable{min-width:900px}.majcomEvaluatorTable{min-width:860px}.majcomIncompleteTable{min-width:940px}
 @media(max-width:900px){.majcomToolbar{grid-template-columns:1fr 1fr}.majcomToolbar .majcomDashboardMessage{grid-column:1/-1}}
 @media(max-width:620px){.majcomToolbar{grid-template-columns:1fr}.majcomToolbar .action{width:100%}.majcomToolbar .majcomDashboardMessage{grid-column:auto}}
+
+
+/* v3.4.0 Enterprise Operations */
+.enterpriseOperationsDashboard{border-color:rgba(72,163,120,.55)}
+.enterpriseToolbar{display:grid;grid-template-columns:minmax(160px,190px) minmax(170px,210px) minmax(210px,1fr) minmax(150px,180px) auto minmax(240px,1fr);gap:10px;align-items:end;padding:12px 14px;border-bottom:1px solid var(--line)}
+.enterpriseToolbar label{display:grid;gap:5px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.enterpriseToolbar select{width:100%;min-height:44px;background:#101b24;color:#f2f7fa;border:1px solid #3d4d59;border-radius:8px;padding:8px}
+.enterpriseDashboardMessage{align-self:center;color:var(--muted);font-size:11px;line-height:1.4}
+.enterpriseDashboardMessage.success{color:#b8efc5}.enterpriseDashboardMessage.working{color:#cfe9f9}.enterpriseDashboardMessage.error{color:#ffc1c4}.enterpriseDashboardMessage.offline{color:#ffe3a0}
+.enterpriseInlineHelper{padding:0 0 10px}
+.enterpriseDashboardFoot{padding-bottom:13px}
+.enterpriseMajcomTable{min-width:1080px}.enterpriseBaseTable{min-width:1280px}.enterpriseTrendTable{min-width:760px}.enterpriseClassTable{min-width:980px}.enterpriseEvaluatorTable{min-width:1120px}.enterpriseIncompleteTable{min-width:1160px}.enterpriseAttentionTable{min-width:840px}
+.enterpriseFlag{display:inline-block;border-radius:999px;padding:4px 8px;font-size:10px;font-weight:900;border:1px solid transparent}
+.enterpriseFlag.attention{background:#5b2528;color:#ffd2d3;border-color:#8a3b40}
+.enterpriseFlag.watch{background:#544117;color:#ffebb8;border-color:#836b2e}
+@media(max-width:1180px){.enterpriseToolbar{grid-template-columns:repeat(3,minmax(0,1fr))}.enterpriseToolbar .enterpriseDashboardMessage{grid-column:1/-1}}
+@media(max-width:760px){.enterpriseToolbar{grid-template-columns:1fr 1fr}.enterpriseToolbar .action{width:100%}.enterpriseToolbar .enterpriseDashboardMessage{grid-column:1/-1}}
+@media(max-width:520px){.enterpriseToolbar{grid-template-columns:1fr}.enterpriseToolbar .enterpriseDashboardMessage{grid-column:auto}}
