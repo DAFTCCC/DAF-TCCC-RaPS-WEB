@@ -265,7 +265,20 @@ async function inviteUser() {
     $('adminInviteName').value = '';
     await loadAdminData();
   } catch (error) {
-    setMessage(`Invite failed: ${error?.message || error}. Confirm the admin-invite-user Edge Function is deployed.`, 'error');
+    let detail = error?.message || String(error);
+    try {
+      if (error?.context && typeof error.context.clone === 'function') {
+        const response = error.context.clone();
+        const body = await response.json().catch(() => null);
+        if (body?.error) detail = body.error;
+        if (body?.detail) detail += ` · ${body.detail}`;
+        if (body?.code) detail = `[${body.code}] ${detail}`;
+      }
+    } catch (parseError) {
+      console.warn('Unable to parse Edge Function error body', parseError);
+    }
+    console.error('RaPS admin invite failed', error);
+    setMessage(`Invite failed: ${detail}`, 'error');
   } finally {
     button.disabled = false;
   }
