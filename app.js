@@ -25,6 +25,8 @@ let managementFilters={majcom:'',installationId:'',tierId:'',courseType:''};
 let homeArea='evaluate';
 let tick=null;
 const SYNC_LOCAL='LOCAL';
+const SYNC_PENDING='PENDING';
+const SYNCED='SYNCED';
 const LEGACY_FAILURE_MODE_MAP={
   'omitted':'omitted','incorrect-technique':'incorrect','incorrect':'incorrect',
   'delayed':'delayed-sequence','wrong-sequence':'delayed-sequence','timing':'delayed-sequence','delayed-sequence':'delayed-sequence',
@@ -73,6 +75,7 @@ function normalizeDb(x){
   x.classes.forEach(c=>{
     ensureSyncMeta(c,c.createdAt||now(),x.deviceId);c.deviceId=c.deviceId||x.deviceId;c.lastModifiedDeviceId=c.lastModifiedDeviceId||c.deviceId;c.appVersion=c.appVersion||APP_VERSION;
     c.deletedAt=c.deletedAt||null;
+    c.cloudSync=c.cloudSync||{enabled:false,status:'local',error:'',createdBy:'',lastSyncedAt:0,localModifiedAt:0,remoteModifiedAt:0};
     c.closedAt=c.closedAt||null;
     c.closedBy=c.closedBy||'';
     c.courseType=c.courseType||'initial';
@@ -146,6 +149,15 @@ function saveDb(){
     }
   }
   localStorage.setItem(DB_KEY,JSON.stringify(db));
+  if(c){
+    const state=c.cloudSync||{};
+    if(state.enabled===true && state.status!=='syncing'){
+      state.status=navigator.onLine?'pending':'offline';
+      state.error='';
+      state.localModifiedAt=ts;
+      window.dispatchEvent(new CustomEvent('raps-local-class-change',{detail:{classId:c.id,at:ts}}));
+    }
+  }
 }
 function cls(){ return db.classes.find(c=>c.id===currentClassId); }
 function tier(){ const c=cls(); return c ? (c.tierSnapshot||TIERS[c.tierId]) : null; }
@@ -232,7 +244,7 @@ function event(label,detail=''){
 // ---------- Classes / roster ----------
 function createClass(data){
   const source=TIERS[data.tierId];
-  const ts=now();const c={id:uuid(),name:String(data.name||'').trim(),tierId:data.tierId,roster:String(data.roster||'').trim(),scenario:String(data.scenario||'').trim(),scenarioVersion:String(data.scenarioVersion||'1').trim()||'1',date:data.date,siteCode:String(data.siteCode||'').trim(),courseType:String(data.courseType||'initial'),scenarioDifficulty:String(data.scenarioDifficulty||'standard'),scenarioProfile:String(data.scenarioProfile||'').trim(),leadEvaluator:String(data.leadEvaluator||'').trim(),evaluatorId:String(data.evaluatorId||'').trim(),curriculumId:`TCCC-TIER${data.tierId}`,appVersion:APP_VERSION,createdAt:ts,modifiedAt:ts,deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,status:'draft',closedAt:null,closedBy:'',deletedAt:null,scenarioNT:[],students:[],contentVersion:`${source.source} | app ${APP_VERSION}`,tierSnapshot:deep(source)};
+  const ts=now();const c={id:uuid(),name:String(data.name||'').trim(),tierId:data.tierId,roster:String(data.roster||'').trim(),scenario:String(data.scenario||'').trim(),scenarioVersion:String(data.scenarioVersion||'1').trim()||'1',date:data.date,siteCode:String(data.siteCode||'').trim(),courseType:String(data.courseType||'initial'),scenarioDifficulty:String(data.scenarioDifficulty||'standard'),scenarioProfile:String(data.scenarioProfile||'').trim(),leadEvaluator:String(data.leadEvaluator||'').trim(),evaluatorId:String(data.evaluatorId||'').trim(),curriculumId:`TCCC-TIER${data.tierId}`,appVersion:APP_VERSION,createdAt:ts,modifiedAt:ts,deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,status:'draft',closedAt:null,closedBy:'',deletedAt:null,scenarioNT:[],students:[],cloudSync:{enabled:true,status:navigator.onLine?'pending':'offline',error:'',createdBy:'',lastSyncedAt:0,localModifiedAt:ts,remoteModifiedAt:0},contentVersion:`${source.source} | app ${APP_VERSION}`,tierSnapshot:deep(source)};
   applyClassLocationFields(c,data);db.classes.unshift(c);saveDb();return c;
 }
 function classStats(c){
@@ -251,13 +263,20 @@ function setHomeArea(area){
   document.querySelectorAll('[data-app-area]').forEach(el=>el.classList.toggle('hidden',el.dataset.appArea!==homeArea));
   document.querySelectorAll('[data-home-area]').forEach(b=>{const active=b.dataset.homeArea===homeArea;b.classList.toggle('active',active);b.setAttribute('aria-pressed',String(active));});
 }
+function cloudSyncBadge(c){
+  const s=c?.cloudSync||{};
+  if(!s.enabled)return '<span class="syncBadge local">LOCAL</span>';
+  const status=String(s.status||'pending').toLowerCase();
+  const label=status==='synced'?'SYNCED':status==='syncing'?'SYNCING':status==='offline'?'OFFLINE':status==='conflict'?'CONFLICT':status==='error'?'SYNC ERROR':'PENDING';
+  return `<span class="syncBadge ${esc(status)}" title="${esc(s.error||'')}">${label}</span>`;
+}
 function renderHome(){
   const active=db.classes.filter(c=>!c.deletedAt),trash=db.classes.filter(c=>c.deletedAt);
   active.forEach(ensureLocationFields);
   $('classCount').textContent=`${active.length} class${active.length===1?'':'es'}`;
   $('classList').innerHTML=active.length?active.map(c=>{
     const st=classStats(c),t=c.tierSnapshot||TIERS[c.tierId],life=lifecycleStatus(c).toLowerCase(),loc=c.homeInstallationName||c.location||'Location not set',cmd=c.majcom?commandName(c.majcom):'MAJCOM not set';
-    return `<div class="classRow"><div><div class="rowTitle">${esc(c.name||'Untitled Class')} <span class="statusPill ${life}">${life.toUpperCase()}</span></div><div class="rowSub">${esc(cmd)} · ${esc(loc)} · Tier ${c.tierId} ${esc(t.shortName)}<br>${esc(c.roster||'No roster #')} · ${esc(c.scenario||'Scenario not named')} · ${st.completed}/${st.total} finalized · ${st.qualified} qualified${c.closedAt?` · Closed ${new Date(c.closedAt).toLocaleDateString()}`:''}</div></div><div class="rowActions"><button class="action compact" data-open-class="${c.id}">${isClassClosed(c)?'View':'Open'}</button></div></div>`;
+    return `<div class="classRow"><div><div class="rowTitle">${esc(c.name||'Untitled Class')} <span class="statusPill ${life}">${life.toUpperCase()}</span> ${cloudSyncBadge(c)}</div><div class="rowSub">${esc(cmd)} · ${esc(loc)} · Tier ${c.tierId} ${esc(t.shortName)}<br>${esc(c.roster||'No roster #')} · ${esc(c.scenario||'Scenario not named')} · ${st.completed}/${st.total} finalized · ${st.qualified} qualified${c.closedAt?` · Closed ${new Date(c.closedAt).toLocaleDateString()}`:''}</div></div><div class="rowActions"><button class="action compact" data-open-class="${c.id}">${isClassClosed(c)?'View':'Open'}</button></div></div>`;
   }).join(''):'<div class="empty">No classes yet. Create a class to begin.</div>';
   if($('manageClassList'))$('manageClassList').innerHTML=$('classList').innerHTML;
   $('trashCard').classList.toggle('hidden',trash.length===0);
@@ -502,7 +521,7 @@ function newClassForm(existing=null){
   function toggleTraining(){const on=!same.checked;$('trainingLocationFields').classList.toggle('hidden',!on);train.required=on;if(!on)form.elements.customTrainingLocation.required=false;toggleTrainingCustom();}
   function toggleTrainingCustom(){const on=!same.checked&&train.value==='__OTHER__';$('customTrainingFields').classList.toggle('hidden',!on);form.elements.customTrainingLocation.required=on;}
   maj.onchange=()=>{if(!showAll.checked)refreshHome(false);};showAll.onchange=()=>refreshHome(true);home.onchange=toggleHomeCustom;same.onchange=toggleTraining;train.onchange=toggleTrainingCustom;refreshHome();refreshTraining();toggleTraining();
-  form.onsubmit=e=>{e.preventDefault();const f=new FormData(e.currentTarget),data=Object.fromEntries(f.entries());if(existing){['name','roster','date','scenario','scenarioVersion','siteCode','courseType','scenarioDifficulty','scenarioProfile','leadEvaluator','evaluatorId'].forEach(k=>existing[k]=String(f.get(k)||'').trim());applyClassLocationFields(existing,data);saveDb();closeModal('formModal');renderClass();renderHome();}else{const c=createClass(data);closeModal('formModal');openClass(c.id);}};
+  form.onsubmit=e=>{e.preventDefault();const f=new FormData(e.currentTarget),data=Object.fromEntries(f.entries());if(existing){['name','roster','date','scenario','scenarioVersion','siteCode','courseType','scenarioDifficulty','scenarioProfile','leadEvaluator','evaluatorId'].forEach(k=>existing[k]=String(f.get(k)||'').trim());applyClassLocationFields(existing,data);existing.cloudSync=existing.cloudSync||{};existing.cloudSync.enabled=true;saveDb();closeModal('formModal');renderClass();renderHome();}else{const c=createClass(data);closeModal('formModal');openClass(c.id);}};
   openModal('formModal');
 }
 function addStudentForm(){
@@ -1197,6 +1216,35 @@ if(window&&typeof window.addEventListener==='function')window.addEventListener('
 startLiveClockLoop();
 setupNativeBackButton();
 if($('appVersion'))$('appVersion').textContent=APP_VERSION;
+
+window.RAPS_CLASS_STORE = Object.freeze({
+  getClasses:()=>db.classes,
+  getClass:id=>db.classes.find(c=>c.id===id)||null,
+  deviceId:()=>db.deviceId,
+  patchCloudState:(id,patch)=>{
+    const c=db.classes.find(x=>x.id===id);if(!c)return null;
+    c.cloudSync={...(c.cloudSync||{}),...(patch||{})};
+    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    renderHome();
+    if(currentClassId===id&&!$('classView')?.classList.contains('hidden'))renderClass();
+    return c;
+  },
+  upsertFromCloud:(remote,options={})=>{
+    if(!remote?.id)return null;
+    const idx=db.classes.findIndex(c=>c.id===remote.id);
+    if(idx<0){db.classes.unshift(normalizeDb({schemaVersion:5,deviceId:db.deviceId,classes:[remote]})?.classes?.[0]||remote);}
+    else{
+      const current=db.classes[idx];
+      const students=options.preserveStudents?(current.students||[]):(remote.students||[]);
+      db.classes[idx]={...current,...remote,students};
+      ensureLocationFields(db.classes[idx]);
+    }
+    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    renderHome();
+    return db.classes.find(c=>c.id===remote.id)||null;
+  }
+});
+
 renderHome();
 })();
 
