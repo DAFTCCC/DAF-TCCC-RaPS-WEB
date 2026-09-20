@@ -414,3 +414,12 @@ body.cloudAuthLocked{overflow:hidden}
 
 /* v3.0.3 roster/event shell sync */
 .rosterCloudNote{font-size:10px;color:#9fb1bf}
+
+
+/* v3.0.4 full grading sync */
+.gradeSyncBadge{display:inline-block;margin-left:5px;padding:2px 6px;border-radius:999px;border:1px solid rgba(95,127,149,.4);font-size:9px;font-weight:900;letter-spacing:.03em}
+.gradeSyncBadge.synced{background:#173f31;color:#c9f1dd;border-color:#4e8f78}
+.gradeSyncBadge.syncing{background:#514018;color:#ffe7ad;border-color:#d1a252}
+.gradeSyncBadge.conflict,.gradeSyncBadge.error{background:#5c2628;color:#ffd0d0;border-color:#c74a48}
+.gradeSyncBadge.shell{background:#263746;color:#d8e6ef;border-color:#5f7f95}
+.gradeSyncBadge.local,.gradeSyncBadge.offline{background:#3f3526;color:#ffe1aa;border-color:#a77b36}
