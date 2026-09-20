@@ -119,48 +119,60 @@ async function pushParticipants(c, refs) {
 async function pushEvaluationShells(c, refs) {
   const client = getClient();
   const cloud = getCloud();
-  const rows = [];
+  const candidates = [];
 
   for (const s of c.students || []) {
     for (const [attemptKey, a] of Object.entries(s.attempts || {})) {
       if (!a?.id) continue;
-      rows.push({
-        id: a.id,
-        event_id: c.id,
-        participant_id: s.id,
-        evaluator_id: cloud.user.id,
-        curriculum_version_id: refs.curriculum.id,
-        attempt_number: Number(a.attemptNo || attemptKey || 1),
-        status: evaluationStatus(a),
-        overall_result: null,
-        score_numerator: null,
-        score_denominator: null,
-        started_at: isoFromMs(a.startedAt),
-        completed_at: null,
-        app_data: {
-          schemaVersion: 1,
-          shellOnly: true,
-          localClassId: c.id,
-          localParticipantId: s.id,
-          localAttemptId: a.id,
-          appVersion: a.appVersion || c.appVersion || '',
-          contentVersion: a.contentVersion || c.contentVersion || ''
-        },
-        client_modified_at: isoFromMs(a.modifiedAt || a.startedAt || Date.now()),
-        source_device_id: getStore()?.deviceId?.() || null
-      });
+      candidates.push({ s, attemptKey, a });
     }
   }
+  if (!candidates.length) return [];
+
+  const ids = candidates.map(x => x.a.id);
+  const { data: existingRows, error: existingError } = await client
+    .from('evaluations')
+    .select('id')
+    .in('id', ids);
+  if (existingError) throw existingError;
+
+  const existing = new Set((existingRows || []).map(x => x.id));
+  const rows = candidates
+    .filter(x => !existing.has(x.a.id))
+    .map(({s,attemptKey,a}) => ({
+      id: a.id,
+      event_id: c.id,
+      participant_id: s.id,
+      evaluator_id: cloud.user.id,
+      curriculum_version_id: refs.curriculum.id,
+      attempt_number: Number(a.attemptNo || attemptKey || 1),
+      status: evaluationStatus(a),
+      overall_result: null,
+      score_numerator: null,
+      score_denominator: null,
+      started_at: isoFromMs(a.startedAt),
+      completed_at: null,
+      app_data: {
+        schemaVersion: 1,
+        shellOnly: true,
+        localClassId: c.id,
+        localParticipantId: s.id,
+        localAttemptId: a.id,
+        appVersion: a.appVersion || c.appVersion || '',
+        contentVersion: a.contentVersion || c.contentVersion || ''
+      },
+      client_modified_at: isoFromMs(a.modifiedAt || a.startedAt || Date.now()),
+      source_device_id: getStore()?.deviceId?.() || null
+    }));
 
   if (!rows.length) return [];
   const { data, error } = await client
     .from('evaluations')
-    .upsert(rows, { onConflict:'id' })
+    .insert(rows)
     .select('id, participant_id, attempt_number');
   if (error) throw error;
   return data || [];
 }
-
 async function pushClassRosterAndShells(c) {
   const client = getClient();
   const cloud = getCloud();
