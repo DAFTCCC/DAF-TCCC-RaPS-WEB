@@ -123,7 +123,9 @@ function inject() {
         '<option value="CMC">CMC</option>',
         '<option value="CPP">CPP</option>',
       '</select></label>',
-      '<button id="enterpriseRefreshBtn" class="action primary" type="button">Refresh Enterprise Data</button>',
+    '</div>',
+    '<div class="enterpriseRefreshBar">',
+      '<button id="enterpriseRefreshBtn" class="action primary enterpriseRefreshBtn" type="button">Refresh Enterprise Data</button>',
       '<span id="enterpriseDashboardMessage" class="enterpriseDashboardMessage"></span>',
     '</div>',
 
@@ -324,18 +326,44 @@ function refreshBaseOptions() {
   const current = select.value || '';
   const majcomId = selectedMajcomId();
 
+  const majcomById = new Map(raw.majcoms.map((majcom) => [majcom.id, majcom]));
+
   const bases = raw.bases
     .filter((base) => !majcomId || base.majcom_id === majcomId)
     .slice()
-    .sort((a, b) => String(a.name || a.code).localeCompare(String(b.name || b.code)));
+    .sort((a, b) => {
+      const aMajcom = majcomById.get(a.majcom_id);
+      const bMajcom = majcomById.get(b.majcom_id);
+      const aMajcomLabel = aMajcom?.code || aMajcom?.name || 'Other';
+      const bMajcomLabel = bMajcom?.code || bMajcom?.name || 'Other';
+
+      return aMajcomLabel.localeCompare(bMajcomLabel) ||
+        String(a.name || a.code).localeCompare(String(b.name || b.code));
+    });
+
+  const grouped = new Map();
+
+  bases.forEach((base) => {
+    const majcom = majcomById.get(base.majcom_id);
+    const groupLabel = majcom?.code || majcom?.name || 'Other';
+
+    if (!grouped.has(groupLabel)) grouped.set(groupLabel, []);
+    grouped.get(groupLabel).push(base);
+  });
+
+  const groupedOptions = [...grouped.entries()].map(([groupLabel, groupBases]) =>
+    '<optgroup label="' + esc(groupLabel) + '">' +
+      groupBases.map((base) =>
+        '<option value="' + esc(base.id) + '">' +
+          esc(base.code || base.name) + ' · ' + esc(base.name) +
+        '</option>'
+      ).join('') +
+    '</optgroup>'
+  ).join('');
 
   select.innerHTML =
     '<option value="">All installations</option>' +
-    bases.map((base) =>
-      '<option value="' + esc(base.id) + '">' +
-      esc(base.code || base.name) + ' · ' + esc(base.name) +
-      '</option>'
-    ).join('');
+    groupedOptions;
 
   if (current && bases.some((base) => base.id === current)) {
     select.value = current;
@@ -517,7 +545,10 @@ function buildModel(data) {
       latestActivity: latest,
       latestAgeDays: ageDays(latest)
     };
-  }).sort((a, b) => b.evaluations - a.evaluations || a.name.localeCompare(b.name));
+  }).sort((a, b) =>
+    a.majcom.localeCompare(b.majcom) ||
+    a.name.localeCompare(b.name)
+  );
 
   const majcomRows = data.majcoms
     .filter((majcom) => data.bases.some((base) => base.majcom_id === majcom.id))
@@ -863,12 +894,24 @@ function render() {
     });
   });
 
-  byId('enterpriseBaseTable').innerHTML = model.baseRows.length ? [
-    '<div class="analyticsTableWrap"><table class="analyticsTable enterpriseBaseTable">',
-    '<thead><tr><th>MAJCOM</th><th>Installation</th><th>Classes</th><th>Students</th><th>Evaluations</th><th>Incomplete</th><th>Pass rate</th><th>Remed success</th><th>Contributor doc</th><th>Last activity</th><th>Drill-down</th></tr></thead><tbody>',
-    model.baseRows.map((row) => [
+  const groupedBaseRows = new Map();
+
+  model.baseRows.forEach((row) => {
+    const groupLabel = row.majcom || 'Other';
+    if (!groupedBaseRows.has(groupLabel)) groupedBaseRows.set(groupLabel, []);
+    groupedBaseRows.get(groupLabel).push(row);
+  });
+
+  const groupedBaseTableBody = [...groupedBaseRows.entries()].map(([groupLabel, rows]) => [
+    '<tr class="enterpriseMajcomGroupRow">',
+      '<td colspan="11">',
+        '<span>', esc(groupLabel), '</span>',
+        '<small>', rows.length, ' installation', rows.length === 1 ? '' : 's', '</small>',
+      '</td>',
+    '</tr>',
+    rows.map((row) => [
       '<tr>',
-        '<td><b>', esc(row.majcom), '</b></td>',
+        '<td><span class="enterpriseMajcomRepeat">', esc(row.majcom), '</span></td>',
         '<td><b>', esc(row.code || row.name), '</b><div>', esc(row.name), '</div></td>',
         '<td>', row.classes, '</td>',
         '<td>', row.students, '</td>',
@@ -880,7 +923,13 @@ function render() {
         '<td>', esc(dateOnly(row.latestActivity)), '</td>',
         '<td><button class="ghost small" type="button" data-enterprise-base="', esc(row.id), '" data-enterprise-base-majcom="', esc(row.majcomId), '">View Base</button></td>',
       '</tr>'
-    ].join('')).join(''),
+    ].join('')).join('')
+  ].join('')).join('');
+
+  byId('enterpriseBaseTable').innerHTML = model.baseRows.length ? [
+    '<div class="analyticsTableWrap"><table class="analyticsTable enterpriseBaseTable">',
+    '<thead><tr><th>MAJCOM</th><th>Installation</th><th>Classes</th><th>Students</th><th>Evaluations</th><th>Incomplete</th><th>Pass rate</th><th>Remed success</th><th>Contributor doc</th><th>Last activity</th><th>Drill-down</th></tr></thead><tbody>',
+    groupedBaseTableBody,
     '</tbody></table></div>'
   ].join('') : '<div class="analyticsEmpty">No installations in this view.</div>';
 
