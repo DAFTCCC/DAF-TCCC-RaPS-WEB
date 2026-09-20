@@ -1,9 +1,9 @@
-const CACHE_NAME = 'tccc-eval-web-v3-0-2-web-1-class-sync-1';
-const VERSION = '3.0.2-web.1';
+const CACHE_NAME = 'tccc-eval-web-v3-0-3-web-1-roster-sync-1';
+const VERSION = '3.0.3-web.1';
 const SHELL = [
   './', './index.html',
   `./styles.css?v=${VERSION}`, `./version.js?v=${VERSION}`,
-  `./tiers.js?v=${VERSION}`, `./branding.js?v=${VERSION}`, `./supabase-config.js?v=${VERSION}`, `./cloud-auth.js?v=${VERSION}`, `./cloud-sync.js?v=${VERSION}`,
+  `./tiers.js?v=${VERSION}`, `./branding.js?v=${VERSION}`, `./supabase-config.js?v=${VERSION}`, `./cloud-auth.js?v=${VERSION}`, `./cloud-sync.js?v=${VERSION}`, `./cloud-roster-sync.js?v=${VERSION}`,
   `./installations.js?v=${VERSION}`, `./app.js?v=${VERSION}`,
   './manifest.webmanifest', './assets/app-icon.png', './assets/icon-192.png',
   './assets/icon-512.png', './assets/splash-background.png'
