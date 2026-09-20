@@ -227,8 +227,11 @@ async function pullEvaluation(c,s,a){
 
   const remoteMs=ms(row.client_modified_at||row.updated_at);
   const localMs=Number(a.modifiedAt||0);
-  if(!a.cloudShellOnly&&localMs>remoteMs+1000)return false;
-  if(!a.cloudShellOnly&&remoteMs<=Number(attemptState(a).remoteModifiedAt||0)+500)return false;
+  const state=attemptState(a);
+  const lastSeen=Number(state.remoteModifiedAt||0);
+  if(!a.cloudShellOnly&&lastSeen&&localMs>lastSeen+10)return false;
+  if(!a.cloudShellOnly&&!lastSeen&&localMs>remoteMs+1000)return false;
+  if(!a.cloudShellOnly&&remoteMs<=lastSeen+10)return false;
 
   const crit=await criteriaFor(row.curriculum_version_id);
   const [{data:cr,error:crErr},{data:tr,error:trErr}]=await Promise.all([
@@ -300,6 +303,9 @@ async function pushAll(){
     for(const s of c.students||[]){
       for(const a of Object.values(s.attempts||{})){
         if(!a?.id||a.cloudShellOnly)continue;
+        const state=attemptState(a),localMs=Number(a.modifiedAt||0),remoteMs=Number(state.remoteModifiedAt||0);
+        if(state.status==='conflict')continue;
+        if(state.status==='synced'&&remoteMs&&localMs<=remoteMs+10)continue;
         try{if(await pushEvaluation(c,s,a))n++;}catch(e){patchAttempt(a,{status:'error',error:err(e)});console.warn('Evaluation push failed',a.id,e)}
       }
     }
