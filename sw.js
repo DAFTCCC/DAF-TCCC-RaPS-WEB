@@ -1,9 +1,9 @@
-const CACHE_NAME = 'tccc-eval-web-v3-2-0-web-1-program-manager-base-1';
-const VERSION = '3.2.0-web.1';
+const CACHE_NAME = 'tccc-eval-web-v3-3-0-web-1-majcom-dashboard-1';
+const VERSION = '3.3.0-web.1';
 const SHELL = [
   './', './index.html',
   `./styles.css?v=${VERSION}`, `./version.js?v=${VERSION}`,
-  `./tiers.js?v=${VERSION}`, `./branding.js?v=${VERSION}`, `./supabase-config.js?v=${VERSION}`, `./cloud-auth.js?v=${VERSION}`, `./cloud-sync.js?v=${VERSION}`, `./cloud-roster-sync.js?v=${VERSION}`, `./cloud-grading-sync.js?v=${VERSION}`, `./admin-ui.js?v=${VERSION}`, `./program-manager-dashboard.js?v=${VERSION}`,
+  `./tiers.js?v=${VERSION}`, `./branding.js?v=${VERSION}`, `./supabase-config.js?v=${VERSION}`, `./cloud-auth.js?v=${VERSION}`, `./cloud-sync.js?v=${VERSION}`, `./cloud-roster-sync.js?v=${VERSION}`, `./cloud-grading-sync.js?v=${VERSION}`, `./admin-ui.js?v=${VERSION}`, `./program-manager-dashboard.js?v=${VERSION}`, `./majcom-manager-dashboard.js?v=${VERSION}`,
   `./installations.js?v=${VERSION}`, `./app.js?v=${VERSION}`,
   './manifest.webmanifest', './assets/app-icon.png', './assets/icon-192.png',
   './assets/icon-512.png', './assets/splash-background.png'
