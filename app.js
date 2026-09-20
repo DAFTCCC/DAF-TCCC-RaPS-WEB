@@ -438,6 +438,13 @@ function renderClass(){
   if(closed)$('closedBannerText').textContent=`Closed ${new Date(c.closedAt).toLocaleString()}. This class is locked and can only be viewed/exported.`;
   bindRosterRows();
 }
+function gradingSyncBadge(a){
+  if(!a)return '';
+  if(a.cloudShellOnly)return '<span class="gradeSyncBadge shell">CLOUD SHELL</span>';
+  const st=String(a.cloudGrading?.status||'local').toLowerCase();
+  const label=st==='synced'?'GRADE SYNCED':st==='syncing'?'GRADE SYNCING':st==='conflict'?'GRADE CONFLICT':st==='error'?'GRADE ERROR':st==='offline'?'GRADE OFFLINE':'GRADE LOCAL';
+  return `<span class="gradeSyncBadge ${esc(st)}" title="${esc(a.cloudGrading?.error||'')}">${label}</span>`;
+}
 function rosterRow(c,s){
   const a1=s.attempts?.['1'],a2=s.attempts?.['2'],closed=isClassClosed(c);
   const best=a2?.finalizedAt?a2:a1?.finalizedAt?a1:null;
@@ -457,7 +464,7 @@ function rosterRow(c,s){
     else if(a1?.finalizedAt&&a1.finalResult==='PASS')buttons+=` <span class="rowSub">A2 not indicated after A1 PASS</span>`;
     buttons+=` <button class="ghost small danger" data-delete-student="${s.id}">Delete</button>`;
   }
-  return `<div class="rosterRow"><div><div class="rowTitle">${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</div><div class="rowSub">${esc(s.trainingId||'No training ID')} · <span class="statusPill ${clsx}">${status}</span>${best?` · ${scoreStats(c.tierSnapshot,best).percentText}`:''}</div></div><div class="rowActions">${buttons}</div></div>`;
+  return `<div class="rosterRow"><div><div class="rowTitle">${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</div><div class="rowSub">${esc(s.trainingId||'No training ID')} · <span class="statusPill ${clsx}">${status}</span>${best?` · ${scoreStats(c.tierSnapshot,best).percentText} ${gradingSyncBadge(best)}`:a1?` ${gradingSyncBadge(a1)}`:''}</div></div><div class="rowActions">${buttons}</div></div>`;
 }
 function bindRosterRows(){
   document.querySelectorAll('[data-start]').forEach(b=>b.onclick=()=>openEvaluation(b.dataset.start,Number(b.dataset.attempt)));
