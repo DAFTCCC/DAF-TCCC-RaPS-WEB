@@ -7,7 +7,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://bplevsfvpwrkgafizvao.supabase.co wss://bplevsfvpwrkgafizvao.supabase.co;">
 <link rel="icon" type="image/png" href="assets/icon-192.png">
 <link rel="apple-touch-icon" href="assets/icon-192.png">
-<link rel="stylesheet" href="styles.css?v=3.0.4-web.1">
+<link rel="stylesheet" href="styles.css?v=3.1.0-web.1">
 <title>TCCC Evaluation Suite</title>
 </head>
 <body>
@@ -23,7 +23,7 @@
     <div class="safetyHeadlineGrid" aria-label="Key safeguards">
       <div><strong>TRAINING USE ONLY</strong><span>Not clinical decision support or an operational casualty record.</span></div>
       <div><strong>NO PHI/CUI</strong><span>Do not enter protected medical, operational, classified, or controlled information.</span></div>
-      <div><strong>LOCAL RECORDS + CLOUD IDENTITY</strong><span>Evaluation records remain local in this phase; authorized user identity and role are verified through Supabase.</span></div>
+      <div><strong>OFFLINE-FIRST + CLOUD SYNC</strong><span>Authorized RaPS records sync through Supabase while the device retains an offline-first working copy.</span></div>
     </div>
     <details class="safetyDetails">
       <summary>View Safeguards</summary>
@@ -39,7 +39,7 @@
     </details>
     <label class="safetyAckRow"><input id="safetyAck" type="checkbox"><span>I understand the safeguards and will use this tool only for authorized TCCC training/evaluation.</span></label>
     <button id="safetyEnterBtn" class="action primary safetyEnter" type="button" disabled>Acknowledge &amp; Continue</button>
-    <p class="safetyFinePrint">Acknowledgment is required once per app session. This phase transmits authentication and role/scope queries to Supabase; evaluation records remain local until cloud sync is enabled in a later phase.</p>
+    <p class="safetyFinePrint">Acknowledgment is required once per app session. Authentication, role/scope, classes, rosters, and authorized evaluation data may sync to Supabase. Do not enter PHI, CUI, classified, or operationally sensitive information.</p>
   </div>
 </div>
 <div id="homeView" class="view">
@@ -49,7 +49,7 @@
       <div class="eyebrow">TACTICAL COMBAT CASUALTY CARE</div>
       <h1 data-brand-product>TCCC Evaluation Suite</h1>
       <p>Offline-first TCCC evaluation, training management, readiness analysis, and local program oversight for Tier 1–4 assessments.</p>
-      <div class="versionLine">v<span id="appVersion">—</span> · Web/PWA · Local evaluations + Supabase identity</div>
+      <div class="versionLine">v<span id="appVersion">—</span> · Web/PWA · Offline-first + Supabase enterprise sync</div>
     </section>
     <nav id="appAreaNav" class="appAreaNav" aria-label="Application areas">
       <button class="areaTab active" data-home-area="evaluate">EVALUATE</button>
@@ -109,7 +109,7 @@
       <div class="areaIntro"><b>PROGRAM</b><span>Installation views · MAJCOM views · Evaluator calibration · Curriculum versions · Data quality</span></div>
       <section class="card managementCard">
         <div class="cardHead"><span>Program Views</span><span>Local analytics · Cloud identity enabled</span></div>
-        <p class="helper">Authentication and role/scope validation use Supabase. Program analytics still operate on records stored on this device until centralized evaluation sync is enabled.</p>
+        <p class="helper">Authentication, role/scope, classes, rosters, and evaluation records use Supabase synchronization with an offline-first local working copy.</p>
         <div class="managementFilters">
           <label><span>MAJCOM / Command</span><select id="managementMajcom"></select></label>
           <label><span>Home installation</span><select id="managementInstallation"></select></label>
@@ -275,15 +275,16 @@
 <div id="reportModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>Evaluation Review</h2><button data-close="reportModal" class="ghost">Close</button></div><pre id="aarText"></pre><div class="actions"><button id="confirmFinalizeBtn" class="action primary">Finalize Evaluation</button><button id="copyAar" class="action">Copy Review</button></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-config.js?v=3.0.4-web.1"></script>
-<script src="cloud-auth.js?v=3.0.4-web.1"></script>
-<script src="version.js?v=3.0.4-web.1"></script>
-<script src="tiers.js?v=3.0.4-web.1"></script>
-<script src="branding.js?v=3.0.4-web.1"></script>
-<script src="installations.js?v=3.0.4-web.1"></script>
-<script src="app.js?v=3.0.4-web.1"></script>
-<script src="cloud-sync.js?v=3.0.4-web.1"></script>
-<script src="cloud-roster-sync.js?v=3.0.4-web.1"></script>
-<script src="cloud-grading-sync.js?v=3.0.4-web.1"></script>
+<script src="supabase-config.js?v=3.1.0-web.1"></script>
+<script src="cloud-auth.js?v=3.1.0-web.1"></script>
+<script src="version.js?v=3.1.0-web.1"></script>
+<script src="tiers.js?v=3.1.0-web.1"></script>
+<script src="branding.js?v=3.1.0-web.1"></script>
+<script src="installations.js?v=3.1.0-web.1"></script>
+<script src="app.js?v=3.1.0-web.1"></script>
+<script src="cloud-sync.js?v=3.1.0-web.1"></script>
+<script src="cloud-roster-sync.js?v=3.1.0-web.1"></script>
+<script src="cloud-grading-sync.js?v=3.1.0-web.1"></script>
+<script src="admin-ui.js?v=3.1.0-web.1"></script>
 </body>
 </html>
