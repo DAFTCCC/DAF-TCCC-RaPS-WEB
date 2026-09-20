@@ -507,3 +507,17 @@ body.cloudActivationLocked{overflow:hidden}
 .enterpriseMajcomGroupRow td small{margin-left:10px;color:var(--muted);font-size:10px;font-weight:700}
 .enterpriseMajcomRepeat{color:#9fb7c6;font-weight:800}
 #enterpriseBaseFilter optgroup{font-weight:900}
+
+
+/* v3.4.2 Enterprise UI refinement */
+.enterpriseRefreshBar{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:12px;padding:10px 14px 14px;border-bottom:1px solid var(--line)}
+.enterpriseRefreshBtn{width:auto!important;min-width:150px!important;max-width:220px;white-space:nowrap;justify-self:start;padding-left:18px;padding-right:18px}
+.enterpriseDashboardMessage{min-width:0!important}
+.enterpriseBaseGroups{display:grid;gap:16px}
+.enterpriseBaseGroup{border:1px solid rgba(86,166,211,.25);border-radius:10px;overflow:hidden;background:#0d1820}
+.enterpriseBaseGroupHead{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#102532;border-bottom:1px solid rgba(86,166,211,.28)}
+.enterpriseBaseGroupHead b{font-size:13px;letter-spacing:.06em;color:#d8edf8}
+.enterpriseBaseGroupHead span{margin-left:10px;color:var(--muted);font-size:10px;font-weight:700}
+.enterpriseBaseGroup .analyticsTableWrap{border:0;border-radius:0}
+.enterpriseBaseGroup .enterpriseBaseTable{min-width:1180px}
+@media(max-width:760px){.enterpriseRefreshBar{grid-template-columns:1fr}.enterpriseRefreshBtn{width:100%!important;max-width:none}.enterpriseDashboardMessage{width:100%}}
