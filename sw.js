@@ -1,5 +1,5 @@
-const CACHE_NAME = 'tccc-eval-web-v3-4-3-web-1-centered-tabs-com-1';
-const VERSION = '3.4.3-web.1';
+const CACHE_NAME = 'tccc-eval-web-v3-4-4-web-1-tta-cuf-order-1';
+const VERSION = '3.4.4-web.1';
 const SHELL = [
   './', './index.html',
   `./styles.css?v=${VERSION}`, `./version.js?v=${VERSION}`,
