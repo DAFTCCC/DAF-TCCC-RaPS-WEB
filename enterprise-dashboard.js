@@ -125,7 +125,7 @@ function inject() {
       '</select></label>',
     '</div>',
     '<div class="enterpriseRefreshBar">',
-      '<button id="enterpriseRefreshBtn" class="action primary enterpriseRefreshBtn" type="button">Refresh Enterprise Data</button>',
+      '<button id="enterpriseRefreshBtn" class="action primary enterpriseRefreshBtn" type="button">Refresh Data</button>',
       '<span id="enterpriseDashboardMessage" class="enterpriseDashboardMessage"></span>',
     '</div>',
 
@@ -902,36 +902,47 @@ function render() {
     groupedBaseRows.get(groupLabel).push(row);
   });
 
-  const groupedBaseTableBody = [...groupedBaseRows.entries()].map(([groupLabel, rows]) => [
-    '<tr class="enterpriseMajcomGroupRow">',
-      '<td colspan="11">',
-        '<span>', esc(groupLabel), '</span>',
-        '<small>', rows.length, ' installation', rows.length === 1 ? '' : 's', '</small>',
-      '</td>',
-    '</tr>',
-    rows.map((row) => [
-      '<tr>',
-        '<td><span class="enterpriseMajcomRepeat">', esc(row.majcom), '</span></td>',
-        '<td><b>', esc(row.code || row.name), '</b><div>', esc(row.name), '</div></td>',
-        '<td>', row.classes, '</td>',
-        '<td>', row.students, '</td>',
-        '<td>', row.finalized, '/', row.evaluations, '</td>',
-        '<td class="', row.incomplete ? 'warnText' : '', '">', row.incomplete, '</td>',
-        '<td>', esc(pct(row.passRate)), '</td>',
-        '<td>', esc(pct(row.repeatSuccess)), '</td>',
-        '<td>', esc(pct(row.contributorRate)), '</td>',
-        '<td>', esc(dateOnly(row.latestActivity)), '</td>',
-        '<td><button class="ghost small" type="button" data-enterprise-base="', esc(row.id), '" data-enterprise-base-majcom="', esc(row.majcomId), '">View Base</button></td>',
-      '</tr>'
-    ].join('')).join('')
-  ].join('')).join('');
+  const groupedBaseSections = [...groupedBaseRows.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([groupLabel, rows]) => {
+      const orderedRows = rows.slice().sort((a, b) =>
+        String(a.name || a.code).localeCompare(String(b.name || b.code))
+      );
 
-  byId('enterpriseBaseTable').innerHTML = model.baseRows.length ? [
-    '<div class="analyticsTableWrap"><table class="analyticsTable enterpriseBaseTable">',
-    '<thead><tr><th>MAJCOM</th><th>Installation</th><th>Classes</th><th>Students</th><th>Evaluations</th><th>Incomplete</th><th>Pass rate</th><th>Remed success</th><th>Contributor doc</th><th>Last activity</th><th>Drill-down</th></tr></thead><tbody>',
-    groupedBaseTableBody,
-    '</tbody></table></div>'
-  ].join('') : '<div class="analyticsEmpty">No installations in this view.</div>';
+      return [
+        '<section class="enterpriseBaseGroup">',
+          '<div class="enterpriseBaseGroupHead">',
+            '<div><b>', esc(groupLabel), '</b><span>', orderedRows.length, ' installation', orderedRows.length === 1 ? '' : 's', '</span></div>',
+          '</div>',
+          '<div class="analyticsTableWrap">',
+            '<table class="analyticsTable enterpriseBaseTable">',
+              '<thead><tr><th>Installation</th><th>Classes</th><th>Students</th><th>Evaluations</th><th>Incomplete</th><th>Pass rate</th><th>Remed success</th><th>Contributor doc</th><th>Last activity</th><th>Drill-down</th></tr></thead>',
+              '<tbody>',
+                orderedRows.map((row) => [
+                  '<tr>',
+                    '<td><b>', esc(row.code || row.name), '</b><div>', esc(row.name), '</div></td>',
+                    '<td>', row.classes, '</td>',
+                    '<td>', row.students, '</td>',
+                    '<td>', row.finalized, '/', row.evaluations, '</td>',
+                    '<td class="', row.incomplete ? 'warnText' : '', '">', row.incomplete, '</td>',
+                    '<td>', esc(pct(row.passRate)), '</td>',
+                    '<td>', esc(pct(row.repeatSuccess)), '</td>',
+                    '<td>', esc(pct(row.contributorRate)), '</td>',
+                    '<td>', esc(dateOnly(row.latestActivity)), '</td>',
+                    '<td><button class="ghost small" type="button" data-enterprise-base="', esc(row.id), '" data-enterprise-base-majcom="', esc(row.majcomId), '">View Base</button></td>',
+                  '</tr>'
+                ].join('')).join(''),
+              '</tbody>',
+            '</table>',
+          '</div>',
+        '</section>'
+      ].join('');
+    })
+    .join('');
+
+  byId('enterpriseBaseTable').innerHTML = model.baseRows.length
+    ? '<div class="enterpriseBaseGroups">' + groupedBaseSections + '</div>'
+    : '<div class="analyticsEmpty">No installations in this view.</div>';
 
   byId('enterpriseBaseTable').querySelectorAll('[data-enterprise-base]').forEach((button) => {
     button.addEventListener('click', () => {
