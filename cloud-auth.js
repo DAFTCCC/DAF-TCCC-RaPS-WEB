@@ -24,6 +24,32 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 }[ch]));
 
+function activationRequested() {
+  try {
+    const url = new URL(window.location.href);
+    const type = url.searchParams.get('type') || '';
+    const hash = new URLSearchParams((url.hash || '').replace(/^#/, ''));
+    const hashType = hash.get('type') || '';
+    return url.searchParams.get('raps_activation') === '1'
+      || type === 'invite'
+      || type === 'recovery'
+      || hashType === 'invite'
+      || hashType === 'recovery';
+  } catch {
+    return false;
+  }
+}
+
+function clearActivationUrl() {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('raps_activation');
+    url.searchParams.delete('type');
+    url.hash = '';
+    window.history.replaceState({}, document.title, url.pathname + (url.search ? url.search : ''));
+  } catch {}
+}
+
 function readCachedIdentity() {
   try {
     const raw = localStorage.getItem(CFG.identityCacheKey || 'RAPS_CLOUD_IDENTITY_V1');
@@ -108,6 +134,41 @@ function injectUi() {
     `);
   }
 
+
+  if (!byId('cloudActivationGate')) {
+    document.body.insertAdjacentHTML('afterbegin', `
+      <div id="cloudActivationGate" class="cloudAuthGate cloudActivationGate" role="dialog" aria-modal="true" aria-labelledby="cloudActivationTitle" aria-hidden="true">
+        <div class="cloudAuthCard">
+          <div class="cloudAuthBrand">
+            <img src="assets/app-icon.png" alt="" class="cloudAuthIcon">
+            <div>
+              <div class="eyebrow">RaPS ACCOUNT ACTIVATION</div>
+              <h1 id="cloudActivationTitle">Set Your RaPS Password</h1>
+            </div>
+          </div>
+          <p class="cloudAuthIntro">Your invitation has been verified. Create a password to finish activating this RaPS account.</p>
+          <form id="cloudActivationForm" class="cloudAuthForm">
+            <label>
+              <span>New password</span>
+              <input id="cloudActivationPassword" type="password" autocomplete="new-password" minlength="12" required>
+            </label>
+            <label>
+              <span>Confirm password</span>
+              <input id="cloudActivationConfirm" type="password" autocomplete="new-password" minlength="12" required>
+            </label>
+            <div class="cloudPasswordRule">Use at least 12 characters. Do not reuse a password from another system.</div>
+            <button id="cloudActivationSubmit" class="action primary" type="submit">Activate Account</button>
+          </form>
+          <div id="cloudActivationMessage" class="cloudAuthMessage" aria-live="polite"></div>
+          <div class="cloudAuthFoot">
+            Your RaPS role and organizational scope were assigned by an Enterprise Administrator.
+            <br>Do not enter PHI, CUI, classified, or operationally sensitive information.
+          </div>
+        </div>
+      </div>
+    `);
+  }
+
   if (!byId('cloudIdentityBar')) {
     const versionLine = document.querySelector('.hero .versionLine');
     if (versionLine) {
@@ -122,6 +183,7 @@ function injectUi() {
   }
 
   byId('cloudAuthForm')?.addEventListener('submit', handleSignIn);
+  byId('cloudActivationForm')?.addEventListener('submit', handleSetPassword);
   byId('cloudLogoutBtn')?.addEventListener('click', handleSignOut);
 }
 
@@ -133,6 +195,20 @@ function setGate(open, message = '', kind = '') {
   document.body.classList.toggle('cloudAuthLocked', !!open);
 
   const messageEl = byId('cloudAuthMessage');
+  if (messageEl) {
+    messageEl.textContent = message;
+    messageEl.className = `cloudAuthMessage ${kind || ''}`.trim();
+  }
+}
+
+function setActivationGate(open, message = '', kind = '') {
+  const gate = byId('cloudActivationGate');
+  if (!gate) return;
+  gate.classList.toggle('open', !!open);
+  gate.setAttribute('aria-hidden', open ? 'false' : 'true');
+  document.body.classList.toggle('cloudActivationLocked', !!open);
+
+  const messageEl = byId('cloudActivationMessage');
   if (messageEl) {
     messageEl.textContent = message;
     messageEl.className = `cloudAuthMessage ${kind || ''}`.trim();
@@ -307,6 +383,51 @@ async function handleSignIn(event) {
   }
 }
 
+async function handleSetPassword(event) {
+  event.preventDefault();
+  if (!client) return;
+
+  const password = byId('cloudActivationPassword')?.value || '';
+  const confirmPassword = byId('cloudActivationConfirm')?.value || '';
+  const submit = byId('cloudActivationSubmit');
+
+  if (password.length < 12) {
+    setActivationGate(true, 'Use a password with at least 12 characters.', 'error');
+    return;
+  }
+  if (password !== confirmPassword) {
+    setActivationGate(true, 'The passwords do not match.', 'error');
+    return;
+  }
+
+  if (submit) {
+    submit.disabled = true;
+    submit.textContent = 'Activating…';
+  }
+  setActivationGate(true, 'Setting your RaPS password…', 'working');
+
+  try {
+    const { data, error } = await client.auth.updateUser({ password });
+    if (error) throw error;
+    if (!data?.user) throw new Error('Supabase did not return the activated user.');
+
+    if (byId('cloudActivationPassword')) byId('cloudActivationPassword').value = '';
+    if (byId('cloudActivationConfirm')) byId('cloudActivationConfirm').value = '';
+    clearActivationUrl();
+    setActivationGate(false);
+    await establishIdentity(data.user);
+    setStatus('connected', 'RaPS account activated · Cloud connected');
+  } catch (error) {
+    console.error('RaPS account activation failed', error);
+    setActivationGate(true, error?.message || 'Unable to activate account.', 'error');
+  } finally {
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = 'Activate Account';
+    }
+  }
+}
+
 async function handleSignOut() {
   if (!client) return;
   if (!confirm('Sign out of RaPS on this device? Offline cached identity will also be removed. Local evaluation data will remain on this device.')) return;
@@ -319,6 +440,7 @@ async function handleSignOut() {
 
   identity = null;
   clearCachedIdentity();
+  setActivationGate(false);
   window.RAPS_CLOUD = null;
   document.body.dataset.rapsRole = 'none';
   document.body.dataset.rapsCloudMode = 'signed-out';
@@ -368,10 +490,20 @@ async function initCloudAuth() {
   }
 
   if (session?.user) {
-    await establishIdentity(session.user);
+    if (activationRequested()) {
+      setGate(false);
+      setStatus('checking', 'RaPS invitation verified · Set password to continue');
+      setActivationGate(true, 'Create a password to finish activating your RaPS account.', '');
+    } else {
+      await establishIdentity(session.user);
+    }
   } else {
     setStatus('denied', 'Not signed in');
-    setGate(true, 'Sign in with your authorized RaPS account.', '');
+    if (activationRequested()) {
+      setGate(true, 'This activation link could not establish a valid session. Request a new invitation from your RaPS administrator.', 'error');
+    } else {
+      setGate(true, 'Sign in with your authorized RaPS account.', '');
+    }
   }
 
   const { data } = client.auth.onAuthStateChange((event, nextSession) => {
@@ -379,6 +511,15 @@ async function initCloudAuth() {
       identity = null;
       setStatus('denied', 'Not signed in');
       setGate(true, 'Signed out. Sign in to continue.', '');
+      return;
+    }
+
+    if ((event === 'PASSWORD_RECOVERY' || activationRequested()) && nextSession?.user) {
+      window.setTimeout(() => {
+        setGate(false);
+        setStatus('checking', 'RaPS invitation verified · Set password to continue');
+        setActivationGate(true, 'Create a password to finish activating your RaPS account.', '');
+      }, 0);
       return;
     }
 
