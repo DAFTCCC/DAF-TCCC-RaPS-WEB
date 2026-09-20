@@ -421,7 +421,8 @@ function renderClass(){
   $('classSub').textContent=`Tier ${c.tierId} — ${t.name} · ${t.source}`;
   $('classState').textContent=life;$('classState').className=`statusPill ${life.toLowerCase()}`;
   ensureLocationFields(c);const home=installationById(c.homeInstallationId);
-  $('classMeta').innerHTML=[['Roster',c.roster||'—'],['Course type',String(c.courseType||'initial').replace(/-/g,' ')],['Supported MAJCOM',c.majcom?commandName(c.majcom):'—'],['Home installation',c.homeInstallationName||'—'],['Host command',home?.hostCommand?commandName(home.hostCommand):'—'],['Unit / organization',c.unit||'—'],['Training location',c.trainingLocationName||'—'],['Site code',c.siteCode||'—'],['Exercise / event',c.exercise||'—'],['Scenario',`${c.scenario||'—'} · v${c.scenarioVersion||'1'}`],['Scenario difficulty',String(c.scenarioDifficulty||'standard').replace(/-/g,' ')],['Scenario profile',c.scenarioProfile||'—'],['Date',c.date||'—'],['Lead Evaluator',c.leadEvaluator||'—'],['Evaluator ID',c.evaluatorId||'—'],['Curriculum ID',c.curriculumId||`TCCC-TIER${c.tierId}`],['Content',c.contentVersion||t.source],['Status',life],['Closed',c.closedAt?`${new Date(c.closedAt).toLocaleString()}${c.closedBy?` · ${c.closedBy}`:''}`:'—']].map(([a,b])=>`<div class="metaCell"><small>${esc(a)}</small><b>${esc(b)}</b></div>`).join('');
+  const rosterCloud=c.cloudRosterSync||{};const rosterCloudLabel=!c.cloudSync?.enabled?'Local only':rosterCloud.status==='synced'?'Synced':rosterCloud.status==='error'?'Sync error':rosterCloud.status==='offline'?'Offline':rosterCloud.status==='pending'?'Pending':'Not synced';
+  $('classMeta').innerHTML=[['Roster',c.roster||'—'],['Roster cloud',rosterCloudLabel],['Course type',String(c.courseType||'initial').replace(/-/g,' ')],['Supported MAJCOM',c.majcom?commandName(c.majcom):'—'],['Home installation',c.homeInstallationName||'—'],['Host command',home?.hostCommand?commandName(home.hostCommand):'—'],['Unit / organization',c.unit||'—'],['Training location',c.trainingLocationName||'—'],['Site code',c.siteCode||'—'],['Exercise / event',c.exercise||'—'],['Scenario',`${c.scenario||'—'} · v${c.scenarioVersion||'1'}`],['Scenario difficulty',String(c.scenarioDifficulty||'standard').replace(/-/g,' ')],['Scenario profile',c.scenarioProfile||'—'],['Date',c.date||'—'],['Lead Evaluator',c.leadEvaluator||'—'],['Evaluator ID',c.evaluatorId||'—'],['Curriculum ID',c.curriculumId||`TCCC-TIER${c.tierId}`],['Content',c.contentVersion||t.source],['Status',life],['Closed',c.closedAt?`${new Date(c.closedAt).toLocaleString()}${c.closedBy?` · ${c.closedBy}`:''}`:'—']].map(([a,b])=>`<div class="metaCell"><small>${esc(a)}</small><b>${esc(b)}</b></div>`).join('');
   const items=allItems(t),critical=items.filter(i=>i.critical).length,noncrit=items.filter(i=>!i.critical).length;
   $('scenarioCoverage').textContent=`${critical} critical required · ${noncrit-(c.scenarioNT||[]).length}/${noncrit} noncritical active`;
   $('scenarioBtn').textContent=closed?'Scenario NT (closed)':hasStartedClass(c)?'View Scenario NT (locked)':'Configure Scenario NT';
@@ -449,8 +450,9 @@ function rosterRow(c,s){
     if(!a1&&!a2)buttons='<span class="rowSub">No evaluation</span>';
   }else{
     if(!a1)buttons=`<button class="action compact primary" data-start="${s.id}" data-attempt="1">Start A1</button>`;
+    else if(a1.cloudShellOnly)buttons=`<button class="action compact" data-start="${s.id}" data-attempt="1">Cloud A1 Shell</button>`;
     else buttons=`<button class="action compact" data-start="${s.id}" data-attempt="1">${a1.finalizedAt?'View A1':'Continue A1'}</button>`;
-    if(a2)buttons+=` <button class="action compact" data-start="${s.id}" data-attempt="2">${a2.finalizedAt?'View A2':'Continue A2'}</button>`;
+    if(a2)buttons+=a2.cloudShellOnly?` <button class="action compact" data-start="${s.id}" data-attempt="2">Cloud A2 Shell</button>`:` <button class="action compact" data-start="${s.id}" data-attempt="2">${a2.finalizedAt?'View A2':'Continue A2'}</button>`;
     else if(a1?.finalizedAt&&a1.finalResult==='FAIL')buttons+=` <button class="action compact primary" data-start="${s.id}" data-attempt="2">Start A2 Remediation</button>`;
     else if(a1?.finalizedAt&&a1.finalResult==='PASS')buttons+=` <span class="rowSub">A2 not indicated after A1 PASS</span>`;
     buttons+=` <button class="ghost small danger" data-delete-student="${s.id}">Delete</button>`;
@@ -552,7 +554,13 @@ function scenarioForm(){
 function openEvaluation(studentId,attemptNo){
   const c=cls(),s=c?.students.find(x=>x.id===studentId);if(!c||!s)return;
   const existing=s.attempts?.[String(attemptNo)];
-  if(existing){currentStudentId=studentId;currentAttemptNo=attemptNo;renderEval();showView('evalView');requestEvalWakeLock();return;}
+  if(existing){
+    if(existing.cloudShellOnly){
+      alert('This attempt shell was synced from another device. Criterion-level grades, timers, notes, and final result are not cloud-synced yet in this phase. Open the originating device for the full evaluation record.');
+      return;
+    }
+    currentStudentId=studentId;currentAttemptNo=attemptNo;renderEval();showView('evalView');requestEvalWakeLock();return;
+  }
   if(attemptNo===2 && s.attempts?.['1']?.finalResult!=='FAIL'){alert('Attempt 2 is reserved for remediation after a finalized Attempt 1 FAIL.');return;}
   if(isClassClosed(c)){alert('Closed classes are read-only.');return;}
   $('formModalTitle').textContent=`Begin Attempt ${attemptNo}`;
@@ -1234,6 +1242,19 @@ window.RAPS_CLASS_STORE = Object.freeze({
     renderHome();
     if(currentClassId===id&&!$('classView')?.classList.contains('hidden'))renderClass();
     return c;
+  },
+  patchRosterCloudState:(id,patch)=>{
+    const c=db.classes.find(x=>x.id===id);if(!c)return null;
+    c.cloudRosterSync={...(c.cloudRosterSync||{}),...(patch||{})};
+    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    renderHome();
+    if(currentClassId===id&&!$('classView')?.classList.contains('hidden'))renderClass();
+    return c;
+  },
+  persistCloudMerge:()=>{
+    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    renderHome();
+    if(currentClassId&&!$('classView')?.classList.contains('hidden'))renderClass();
   },
   upsertFromCloud:(remote,options={})=>{
     if(!remote?.id)return null;
