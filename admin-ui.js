@@ -8,7 +8,13 @@ const ROLE_LABELS = Object.freeze({
   enterprise_admin: 'Enterprise Admin'
 });
 
-let catalog = { profiles: [], memberships: [], bases: [], majcoms: [] };
+let catalog = {
+  profiles: [],
+  memberships: [],
+  bases: [],
+  majcoms: [],
+  accessRequests: []
+};
 let mounted = false;
 
 const $ = id => document.getElementById(id);
@@ -40,7 +46,15 @@ function inject() {
       <div id="adminMessage" class="adminMessage" aria-live="polite"></div>
 
       <details class="analyticsDetails" open>
-        <summary>Invite New User</summary>
+        <summary>Pending Access Requests <span id="adminRequestCount"></span></summary>
+        <div class="adminToolbar">
+          <button id="adminRequestRefreshBtn" class="ghost small" type="button">Refresh</button>
+        </div>
+        <div id="adminAccessRequestTable"></div>
+      </details>
+
+      <details class="analyticsDetails">
+        <summary>Invite New User Manually</summary>
         <div class="adminFormGrid">
           <label><span>Email</span><input id="adminInviteEmail" type="email" autocomplete="off" placeholder="user@example.mil"></label>
           <label><span>Display name</span><input id="adminInviteName" type="text" autocomplete="off" placeholder="Name"></label>
@@ -93,6 +107,7 @@ function inject() {
   $('adminInviteRole')?.addEventListener('change', () => renderScope('Invite'));
   $('adminExistingRole')?.addEventListener('change', () => renderScope('Existing'));
   $('adminRefreshBtn')?.addEventListener('click', () => loadAdminData());
+  $('adminRequestRefreshBtn')?.addEventListener('click', () => loadAdminData());
   $('adminInviteBtn')?.addEventListener('click', inviteUser);
   $('adminAssignBtn')?.addEventListener('click', assignExisting);
 
@@ -142,6 +157,110 @@ function activeNow(m) {
   const starts = m.starts_at ? Date.parse(m.starts_at) : null;
   const ends = m.ends_at ? Date.parse(m.ends_at) : null;
   return !(Number.isFinite(starts) && starts > now) && !(Number.isFinite(ends) && ends <= now);
+}
+
+
+function accessRequestScope(request) {
+  if (request.requested_role === 'majcom_manager') {
+    return request.majcoms?.code ||
+      request.majcoms?.name ||
+      'MAJCOM not found';
+  }
+
+  return request.bases?.code ||
+    request.bases?.name ||
+    'Installation not found';
+}
+
+function renderAccessRequests() {
+  const wrap = $('adminAccessRequestTable');
+  const count = $('adminRequestCount');
+
+  if (!wrap) return;
+
+  const requests = (catalog.accessRequests || [])
+    .filter(r => r.status === 'pending')
+    .slice()
+    .sort((a, b) =>
+      String(a.created_at || '').localeCompare(String(b.created_at || ''))
+    );
+
+  if (count) {
+    count.textContent =
+      `· ${requests.length} pending`;
+  }
+
+  if (!requests.length) {
+    wrap.innerHTML =
+      '<div class="analyticsEmpty">No pending access requests.</div>';
+    return;
+  }
+
+  wrap.innerHTML = `
+    <div class="analyticsTableWrap">
+      <table class="analyticsTable adminTable">
+        <thead>
+          <tr>
+            <th>Requester</th>
+            <th>Requested Role</th>
+            <th>Scope</th>
+            <th>Reason / Program</th>
+            <th>Requested</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${requests.map(r => `
+            <tr>
+              <td>
+                <b>${esc(r.display_name || r.email)}</b>
+                <div><small>${esc(r.email || '')}</small></div>
+              </td>
+              <td>${esc(ROLE_LABELS[r.requested_role] || r.requested_role)}</td>
+              <td>${esc(accessRequestScope(r))}</td>
+              <td>${esc(r.justification || '—')}</td>
+              <td>${esc(
+                r.created_at
+                  ? new Date(r.created_at).toLocaleString()
+                  : '—'
+              )}</td>
+              <td>
+                <div class="adminRowActions">
+                  <button
+                    class="action small"
+                    data-admin-approve-request="${esc(r.id)}"
+                    type="button">
+                    Approve
+                  </button>
+
+                  <button
+                    class="ghost small danger"
+                    data-admin-deny-request="${esc(r.id)}"
+                    type="button">
+                    Deny
+                  </button>
+                </div>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  wrap.querySelectorAll('[data-admin-approve-request]').forEach(btn => {
+    btn.addEventListener(
+      'click',
+      () => approveAccessRequest(btn.dataset.adminApproveRequest)
+    );
+  });
+
+  wrap.querySelectorAll('[data-admin-deny-request]').forEach(btn => {
+    btn.addEventListener(
+      'click',
+      () => denyAccessRequest(btn.dataset.adminDenyRequest)
+    );
+  });
 }
 
 function renderTable() {
@@ -213,14 +332,24 @@ async function loadAdminData() {
   if (!client) return;
   setMessage('Loading enterprise users…', 'working');
 
-  const [profiles, memberships, bases, majcoms] = await Promise.all([
+  const [profiles, memberships, bases, majcoms, accessRequests] = await Promise.all([
     client.from('profiles').select('id, display_name, email').order('display_name'),
     client.from('memberships').select('id,user_id,role,base_id,majcom_id,active,starts_at,ends_at,created_at,bases(id,code,name),majcoms(id,code,name)').order('created_at',{ascending:false}),
     client.from('bases').select('id,code,name,majcom_id,active').eq('active',true).order('name'),
-    client.from('majcoms').select('id,code,name,active').eq('active',true).order('code')
+    client.from('majcoms').select('id,code,name,active').eq('active',true).order('code'),
+    client
+      .from('access_requests')
+      .select('id,email,display_name,requested_role,base_id,majcom_id,justification,status,created_at,reviewed_at,reviewed_by,review_note,bases(id,code,name),majcoms(id,code,name)')
+      .eq('status','pending')
+      .order('created_at',{ascending:true})
   ]);
 
-  const firstError = profiles.error || memberships.error || bases.error || majcoms.error;
+  const firstError =
+    profiles.error ||
+    memberships.error ||
+    bases.error ||
+    majcoms.error ||
+    accessRequests.error;
   if (firstError) {
     setMessage(firstError.message || 'Unable to load enterprise users.', 'error');
     return;
@@ -230,7 +359,8 @@ async function loadAdminData() {
     profiles: profiles.data || [],
     memberships: memberships.data || [],
     bases: bases.data || [],
-    majcoms: majcoms.data || []
+    majcoms: majcoms.data || [],
+    accessRequests: accessRequests.data || []
   };
 
   const userSelect = $('adminExistingUser');
@@ -242,6 +372,7 @@ async function loadAdminData() {
 
   renderScope('Invite');
   renderScope('Existing');
+  renderAccessRequests();
   renderTable();
   setMessage('Enterprise access data loaded.', 'success');
 }
@@ -255,6 +386,176 @@ function scopePayload(prefix) {
     base_id: type === 'base' ? scope : null,
     majcom_id: type === 'majcom' ? scope : null
   };
+}
+
+
+async function edgeFunctionError(error) {
+  let detail = error?.message || String(error);
+
+  try {
+    if (error?.context && typeof error.context.clone === 'function') {
+      const response = error.context.clone();
+      const body = await response.json().catch(() => null);
+
+      if (body?.error) detail = body.error;
+      if (body?.detail) detail += ` · ${body.detail}`;
+      if (body?.code) detail = `[${body.code}] ${detail}`;
+    }
+  } catch (parseError) {
+    console.warn('Unable to parse Edge Function error body', parseError);
+  }
+
+  return detail;
+}
+
+async function approveAccessRequest(id) {
+  if (!isEnterprise() || !id) return;
+
+  const request =
+    (catalog.accessRequests || []).find(r => r.id === id);
+
+  if (!request) {
+    setMessage('Access request was not found. Refresh and try again.', 'error');
+    return;
+  }
+
+  const roleLabel =
+    ROLE_LABELS[request.requested_role] || request.requested_role;
+
+  const scope =
+    accessRequestScope(request);
+
+  if (!confirm(
+    `Approve RaPS access for ${request.display_name || request.email}?\n\n` +
+    `${roleLabel} · ${scope}\n\n` +
+    `RaPS will create/invite the account and assign this access scope.`
+  )) return;
+
+  const client = window.RAPS_SUPABASE;
+
+  setMessage(
+    `Approving access request for ${request.email}…`,
+    'working'
+  );
+
+  try {
+    const invitePayload = {
+      email: request.email,
+      display_name: request.display_name,
+      role: request.requested_role,
+      base_id:
+        request.requested_role === 'majcom_manager'
+          ? null
+          : request.base_id,
+      majcom_id:
+        request.requested_role === 'majcom_manager'
+          ? request.majcom_id
+          : null
+    };
+
+    const { data, error } =
+      await client.functions.invoke(
+        'admin-invite-user',
+        { body: invitePayload }
+      );
+
+    if (error) throw error;
+
+    if (data?.error) {
+      throw new Error(
+        data.error +
+        (data.detail ? ` · ${data.detail}` : '')
+      );
+    }
+
+    const { error: updateError } =
+      await client
+        .from('access_requests')
+        .update({
+          status: 'approved',
+          reviewed_at: new Date().toISOString(),
+          reviewed_by: window.RAPS_CLOUD.user.id,
+          review_note: 'Approved through Enterprise Access Requests'
+        })
+        .eq('id', id)
+        .eq('status', 'pending');
+
+    if (updateError) {
+      throw new Error(
+        `Account access was assigned, but the request could not be marked approved: ${updateError.message}`
+      );
+    }
+
+    setMessage(
+      `Approved ${request.email}. Invitation sent and ${roleLabel} access assigned for ${scope}.`,
+      'success'
+    );
+
+    await loadAdminData();
+
+  } catch (error) {
+    console.error('RaPS access-request approval failed', error);
+
+    const detail =
+      await edgeFunctionError(error);
+
+    setMessage(
+      `Approval failed: ${detail}`,
+      'error'
+    );
+  }
+}
+
+async function denyAccessRequest(id) {
+  if (!isEnterprise() || !id) return;
+
+  const request =
+    (catalog.accessRequests || []).find(r => r.id === id);
+
+  if (!request) {
+    setMessage('Access request was not found. Refresh and try again.', 'error');
+    return;
+  }
+
+  if (!confirm(
+    `Deny the RaPS access request from ${request.display_name || request.email}?\n\n` +
+    `${ROLE_LABELS[request.requested_role] || request.requested_role} · ` +
+    `${accessRequestScope(request)}`
+  )) return;
+
+  const client = window.RAPS_SUPABASE;
+
+  setMessage(
+    `Denying access request for ${request.email}…`,
+    'working'
+  );
+
+  const { error } =
+    await client
+      .from('access_requests')
+      .update({
+        status: 'denied',
+        reviewed_at: new Date().toISOString(),
+        reviewed_by: window.RAPS_CLOUD.user.id,
+        review_note: 'Denied by Enterprise Administrator'
+      })
+      .eq('id', id)
+      .eq('status', 'pending');
+
+  if (error) {
+    setMessage(
+      `Deny failed: ${error.message}`,
+      'error'
+    );
+    return;
+  }
+
+  setMessage(
+    `Access request from ${request.email} was denied.`,
+    'success'
+  );
+
+  await loadAdminData();
 }
 
 async function inviteUser() {

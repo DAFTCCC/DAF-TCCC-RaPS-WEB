@@ -18,6 +18,7 @@ const ROLE_LABELS = Object.freeze({
 let client = null;
 let identity = null;
 let authSubscription = null;
+let accessCatalog = { bases: [], majcoms: [] };
 
 const byId = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -123,10 +124,102 @@ function injectUi() {
               <input id="cloudAuthPassword" type="password" autocomplete="current-password" required>
             </label>
             <button id="cloudAuthSubmit" class="action primary" type="submit">Sign In</button>
+            <button id="cloudForgotPasswordBtn" class="ghost small" type="button">Forgot password?</button>
+            <button id="cloudRequestAccessBtn" class="ghost small" type="button">Request access</button>
           </form>
           <div id="cloudAuthMessage" class="cloudAuthMessage" aria-live="polite"></div>
           <div class="cloudAuthFoot">
             <b>No public registration.</b> Accounts and access scopes are managed by RaPS administrators.
+            <br>Do not enter PHI, CUI, classified, or operationally sensitive information.
+          </div>
+        </div>
+      </div>
+    `);
+  }
+
+  if (!byId('cloudRequestAccessGate')) {
+    document.body.insertAdjacentHTML('afterbegin', `
+      <div id="cloudRequestAccessGate" class="cloudAuthGate cloudRequestAccessGate"
+           role="dialog" aria-modal="true"
+           aria-labelledby="cloudRequestAccessTitle"
+           aria-hidden="true">
+
+        <div class="cloudAuthCard">
+          <div class="cloudAuthBrand">
+            <img src="assets/app-icon.png" alt="" class="cloudAuthIcon">
+            <div>
+              <div class="eyebrow">RaPS ACCESS REQUEST</div>
+              <h1 id="cloudRequestAccessTitle">Request RaPS Access</h1>
+            </div>
+          </div>
+
+          <p class="cloudAuthIntro">
+            Submit an access request for administrator review.
+            Submitting this form does not create an account or grant access.
+          </p>
+
+          <form id="cloudRequestAccessForm" class="cloudAuthForm">
+
+            <label>
+              <span>Full name</span>
+              <input id="cloudRequestAccessName"
+                     type="text"
+                     autocomplete="name"
+                     maxlength="120"
+                     required>
+            </label>
+
+            <label>
+              <span>Email</span>
+              <input id="cloudRequestAccessEmail"
+                     type="email"
+                     autocomplete="email"
+                     inputmode="email"
+                     maxlength="254"
+                     required>
+            </label>
+
+            <label>
+              <span>Requested role</span>
+              <select id="cloudRequestAccessRole" required>
+                <option value="evaluator">Evaluator</option>
+                <option value="program_manager">Program Manager</option>
+                <option value="majcom_manager">MAJCOM Manager</option>
+              </select>
+            </label>
+
+            <label>
+              <span id="cloudRequestAccessScopeLabel">Installation</span>
+              <select id="cloudRequestAccessScope" required></select>
+            </label>
+
+            <label>
+              <span>Reason / program <small>(optional)</small></span>
+              <textarea id="cloudRequestAccessJustification"
+                        rows="3"
+                        maxlength="1000"
+                        placeholder="Briefly describe why you need RaPS access."></textarea>
+            </label>
+
+            <button id="cloudRequestAccessSubmit"
+                    class="action primary"
+                    type="submit">
+              Submit Request
+            </button>
+
+            <button id="cloudRequestAccessBack"
+                    class="ghost small"
+                    type="button">
+              Back to Sign In
+            </button>
+          </form>
+
+          <div id="cloudRequestAccessMessage"
+               class="cloudAuthMessage"
+               aria-live="polite"></div>
+
+          <div class="cloudAuthFoot">
+            Enterprise Administrator access cannot be requested through this form.
             <br>Do not enter PHI, CUI, classified, or operationally sensitive information.
           </div>
         </div>
@@ -142,11 +235,11 @@ function injectUi() {
           <div class="cloudAuthBrand">
             <img src="assets/app-icon.png" alt="" class="cloudAuthIcon">
             <div>
-              <div class="eyebrow">RaPS ACCOUNT ACTIVATION</div>
+              <div class="eyebrow">RaPS SECURE PASSWORD</div>
               <h1 id="cloudActivationTitle">Set Your RaPS Password</h1>
             </div>
           </div>
-          <p class="cloudAuthIntro">Your invitation has been verified. Create a password to finish activating this RaPS account.</p>
+          <p class="cloudAuthIntro">Your secure RaPS link has been verified. Create a new password to continue.</p>
           <form id="cloudActivationForm" class="cloudAuthForm">
             <label>
               <span>New password</span>
@@ -157,7 +250,7 @@ function injectUi() {
               <input id="cloudActivationConfirm" type="password" autocomplete="new-password" minlength="12" required>
             </label>
             <div class="cloudPasswordRule">Use at least 12 characters. Do not reuse a password from another system.</div>
-            <button id="cloudActivationSubmit" class="action primary" type="submit">Activate Account</button>
+            <button id="cloudActivationSubmit" class="action primary" type="submit">Set Password</button>
           </form>
           <div id="cloudActivationMessage" class="cloudAuthMessage" aria-live="polite"></div>
           <div class="cloudAuthFoot">
@@ -183,6 +276,11 @@ function injectUi() {
   }
 
   byId('cloudAuthForm')?.addEventListener('submit', handleSignIn);
+  byId('cloudForgotPasswordBtn')?.addEventListener('click', handleForgotPassword);
+  byId('cloudRequestAccessBtn')?.addEventListener('click', openRequestAccess);
+  byId('cloudRequestAccessBack')?.addEventListener('click', closeRequestAccess);
+  byId('cloudRequestAccessRole')?.addEventListener('change', renderRequestAccessScope);
+  byId('cloudRequestAccessForm')?.addEventListener('submit', handleRequestAccessSubmit);
   byId('cloudActivationForm')?.addEventListener('submit', handleSetPassword);
   byId('cloudLogoutBtn')?.addEventListener('click', handleSignOut);
 }
@@ -383,6 +481,272 @@ async function handleSignIn(event) {
   }
 }
 
+
+function setRequestAccessGate(open, message = '', kind = '') {
+  const gate = byId('cloudRequestAccessGate');
+  if (!gate) return;
+
+  gate.classList.toggle('open', !!open);
+  gate.setAttribute('aria-hidden', open ? 'false' : 'true');
+
+  if (open) {
+    document.body.classList.add('cloudAuthLocked');
+  } else {
+    const authOpen = byId('cloudAuthGate')?.classList.contains('open');
+    const activationOpen = byId('cloudActivationGate')?.classList.contains('open');
+
+    if (!authOpen && !activationOpen) {
+      document.body.classList.remove('cloudAuthLocked');
+    }
+  }
+
+  const messageEl = byId('cloudRequestAccessMessage');
+
+  if (messageEl) {
+    messageEl.textContent = message;
+    messageEl.className = `cloudAuthMessage ${kind || ''}`.trim();
+  }
+}
+
+function renderRequestAccessScope() {
+  const role = byId('cloudRequestAccessRole')?.value || 'evaluator';
+  const label = byId('cloudRequestAccessScopeLabel');
+  const select = byId('cloudRequestAccessScope');
+
+  if (!label || !select) return;
+
+  if (role === 'majcom_manager') {
+    label.textContent = 'MAJCOM';
+
+    select.innerHTML = accessCatalog.majcoms.map(m =>
+      `<option value="${esc(m.id)}">${esc(m.code || m.name)} · ${esc(m.name)}</option>`
+    ).join('');
+  } else {
+    label.textContent = 'Installation';
+
+    select.innerHTML = accessCatalog.bases.map(b =>
+      `<option value="${esc(b.id)}">${esc(b.code || b.name)} · ${esc(b.name)}</option>`
+    ).join('');
+  }
+}
+
+async function loadRequestAccessCatalog() {
+  if (accessCatalog.bases.length && accessCatalog.majcoms.length) {
+    renderRequestAccessScope();
+    return;
+  }
+
+  const endpoint =
+    `${String(CFG.projectUrl || '').replace(/\/$/, '')}/functions/v1/request-access`;
+
+  const response = await fetch(endpoint, {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json'
+    }
+  });
+
+  let payload = {};
+
+  try {
+    payload = await response.json();
+  } catch {}
+
+  if (!response.ok) {
+    throw new Error(payload?.error || 'Unable to load RaPS installations.');
+  }
+
+  accessCatalog = {
+    bases: Array.isArray(payload?.bases) ? payload.bases : [],
+    majcoms: Array.isArray(payload?.majcoms) ? payload.majcoms : []
+  };
+
+  if (!accessCatalog.bases.length || !accessCatalog.majcoms.length) {
+    throw new Error('RaPS access catalog is unavailable.');
+  }
+
+  renderRequestAccessScope();
+}
+
+async function openRequestAccess() {
+  const signInEmail = byId('cloudAuthEmail')?.value.trim() || '';
+
+  if (byId('cloudRequestAccessEmail') && signInEmail) {
+    byId('cloudRequestAccessEmail').value = signInEmail;
+  }
+
+  setGate(false);
+  setRequestAccessGate(true, 'Loading RaPS access options…', 'working');
+
+  try {
+    await loadRequestAccessCatalog();
+    setRequestAccessGate(true, '', '');
+    byId('cloudRequestAccessName')?.focus();
+  } catch (error) {
+    console.error('RaPS access-request catalog failed', error);
+
+    setRequestAccessGate(
+      true,
+      error?.message || 'Unable to load access-request options.',
+      'error'
+    );
+  }
+}
+
+function closeRequestAccess() {
+  setRequestAccessGate(false);
+  setGate(true, 'Sign in with your authorized RaPS account.', '');
+}
+
+async function handleRequestAccessSubmit(event) {
+  event.preventDefault();
+
+  const displayName =
+    byId('cloudRequestAccessName')?.value.trim() || '';
+
+  const email =
+    byId('cloudRequestAccessEmail')?.value.trim() || '';
+
+  const requestedRole =
+    byId('cloudRequestAccessRole')?.value || 'evaluator';
+
+  const scope =
+    byId('cloudRequestAccessScope')?.value || '';
+
+  const justification =
+    byId('cloudRequestAccessJustification')?.value.trim() || '';
+
+  const submit = byId('cloudRequestAccessSubmit');
+
+  if (!displayName || !email || !scope) {
+    setRequestAccessGate(
+      true,
+      'Complete your name, email, role, and organizational scope.',
+      'error'
+    );
+    return;
+  }
+
+  const payload = {
+    email,
+    display_name: displayName,
+    requested_role: requestedRole,
+    base_id: requestedRole === 'majcom_manager' ? null : scope,
+    majcom_id: requestedRole === 'majcom_manager' ? scope : null,
+    justification: justification || null
+  };
+
+  if (submit) {
+    submit.disabled = true;
+    submit.textContent = 'Submitting…';
+  }
+
+  setRequestAccessGate(
+    true,
+    'Submitting your RaPS access request…',
+    'working'
+  );
+
+  try {
+    const endpoint =
+      `${String(CFG.projectUrl || '').replace(/\/$/, '')}/functions/v1/request-access`;
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    let result = {};
+
+    try {
+      result = await response.json();
+    } catch {}
+
+    if (!response.ok) {
+      throw new Error(result?.error || 'Unable to submit access request.');
+    }
+
+    setRequestAccessGate(
+      true,
+      result?.message ||
+        'Your RaPS access request was submitted for administrator review.',
+      'success'
+    );
+
+    if (byId('cloudRequestAccessJustification')) {
+      byId('cloudRequestAccessJustification').value = '';
+    }
+  } catch (error) {
+    console.error('RaPS access request failed', error);
+
+    setRequestAccessGate(
+      true,
+      error?.message || 'Unable to submit access request.',
+      'error'
+    );
+  } finally {
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = 'Submit Request';
+    }
+  }
+}
+
+async function handleForgotPassword() {
+  if (!client) return;
+
+  const email = byId('cloudAuthEmail')?.value.trim() || '';
+  const button = byId('cloudForgotPasswordBtn');
+
+  if (!email) {
+    setGate(true, 'Enter your email address first, then select Forgot password.', 'error');
+    byId('cloudAuthEmail')?.focus();
+    return;
+  }
+
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Sending…';
+  }
+
+  setGate(true, 'Requesting a secure password reset link…', 'working');
+
+  try {
+    const redirect = new URL(window.location.origin + window.location.pathname);
+    redirect.searchParams.set('raps_activation', '1');
+
+    const { error } = await client.auth.resetPasswordForEmail(email, {
+      redirectTo: redirect.toString()
+    });
+
+    if (error) throw error;
+
+    // Keep this intentionally generic so the UI does not disclose
+    // whether a particular email address exists in RaPS.
+    setGate(
+      true,
+      'If that email is associated with a RaPS account, a password reset link has been sent. Check your inbox and spam folder.',
+      'success'
+    );
+  } catch (error) {
+    console.error('RaPS password recovery request failed', error);
+    setGate(
+      true,
+      error?.message || 'Unable to request a password reset link.',
+      'error'
+    );
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Forgot password?';
+    }
+  }
+}
+
 async function handleSetPassword(event) {
   event.preventDefault();
   if (!client) return;
@@ -402,7 +766,7 @@ async function handleSetPassword(event) {
 
   if (submit) {
     submit.disabled = true;
-    submit.textContent = 'Activating…';
+    submit.textContent = 'Setting Password…';
   }
   setActivationGate(true, 'Setting your RaPS password…', 'working');
 
@@ -416,14 +780,14 @@ async function handleSetPassword(event) {
     clearActivationUrl();
     setActivationGate(false);
     await establishIdentity(data.user);
-    setStatus('connected', 'RaPS account activated · Cloud connected');
+    setStatus('connected', 'RaPS password set · Cloud connected');
   } catch (error) {
     console.error('RaPS account activation failed', error);
     setActivationGate(true, error?.message || 'Unable to activate account.', 'error');
   } finally {
     if (submit) {
       submit.disabled = false;
-      submit.textContent = 'Activate Account';
+      submit.textContent = 'Set Password';
     }
   }
 }
@@ -492,15 +856,15 @@ async function initCloudAuth() {
   if (session?.user) {
     if (activationRequested()) {
       setGate(false);
-      setStatus('checking', 'RaPS invitation verified · Set password to continue');
-      setActivationGate(true, 'Create a password to finish activating your RaPS account.', '');
+      setStatus('checking', 'RaPS secure link verified · Set password to continue');
+      setActivationGate(true, 'Create a new password to continue.', '');
     } else {
       await establishIdentity(session.user);
     }
   } else {
     setStatus('denied', 'Not signed in');
     if (activationRequested()) {
-      setGate(true, 'This activation link could not establish a valid session. Request a new invitation from your RaPS administrator.', 'error');
+      setGate(true, 'This secure link could not establish a valid session. Request a new invitation or password reset link.', 'error');
     } else {
       setGate(true, 'Sign in with your authorized RaPS account.', '');
     }
@@ -517,8 +881,8 @@ async function initCloudAuth() {
     if ((event === 'PASSWORD_RECOVERY' || activationRequested()) && nextSession?.user) {
       window.setTimeout(() => {
         setGate(false);
-        setStatus('checking', 'RaPS invitation verified · Set password to continue');
-        setActivationGate(true, 'Create a password to finish activating your RaPS account.', '');
+        setStatus('checking', 'RaPS secure link verified · Set password to continue');
+        setActivationGate(true, 'Create a new password to continue.', '');
       }, 0);
       return;
     }
