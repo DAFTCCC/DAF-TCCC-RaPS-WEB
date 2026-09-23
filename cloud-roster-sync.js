@@ -3,6 +3,7 @@
 
 let busy = false;
 let lastIdentityUserId = null;
+const rosterPushInFlight = new Map();
 
 const getClient = () => window.RAPS_SUPABASE;
 const getCloud = () => window.RAPS_CLOUD;
@@ -62,7 +63,7 @@ async function ensureEvent(c, refs) {
     curriculum_version_id: refs.curriculum.id,
     scenario_id: null,
     status: eventStatus(c),
-    created_by: cloud.user.id,
+    created_by: c.cloudSync?.createdBy || cloud.user.id,
     app_data: {
       schemaVersion: 1,
       localClassId: c.id,
@@ -75,10 +76,33 @@ async function ensureEvent(c, refs) {
     source_device_id: getStore()?.deviceId?.() || null
   };
 
+  const { data: existing, error: existingError } = await client
+    .from('evaluation_events')
+    .select('id')
+    .eq('id', c.id)
+    .maybeSingle();
+
+  if (existingError) throw existingError;
+
+  let writeResult;
+
+  if (existing) {
+    writeResult = await client
+      .from('evaluation_events')
+      .update(payload)
+      .eq('id', c.id);
+  } else {
+    writeResult = await client
+      .from('evaluation_events')
+      .insert(payload);
+  }
+
+  if (writeResult.error) throw writeResult.error;
+
   const { data, error } = await client
     .from('evaluation_events')
-    .upsert(payload, { onConflict:'id' })
     .select('id, updated_at, client_modified_at')
+    .eq('id', c.id)
     .single();
 
   if (error) throw error;
@@ -88,6 +112,7 @@ async function ensureEvent(c, refs) {
 async function pushParticipants(c, refs) {
   const client = getClient();
   const cloud = getCloud();
+
   const rows = (c.students || []).map(s => ({
     id: s.id,
     participant_identifier: `RAPS-${s.id}`,
@@ -103,15 +128,57 @@ async function pushParticipants(c, refs) {
       appVersion: s.appVersion || c.appVersion || '',
       contentVersion: s.contentVersion || c.contentVersion || ''
     },
-    client_modified_at: isoFromMs(s.modifiedAt || s.createdAt || c.modifiedAt || Date.now()),
+    client_modified_at: isoFromMs(
+      s.modifiedAt || s.createdAt || c.modifiedAt || Date.now()
+    ),
     source_device_id: getStore()?.deviceId?.() || null
   }));
 
   if (!rows.length) return [];
+
+  const ids = rows.map(r => r.id);
+
+  const { data: existingRows, error: existingError } = await client
+    .from('participants')
+    .select('id, created_by')
+    .in('id', ids);
+
+  if (existingError) throw existingError;
+
+  const existingById = new Map(
+    (existingRows || []).map(r => [r.id, r])
+  );
+
+  for (const row of rows) {
+    const existing = existingById.get(row.id);
+
+    if (existing) {
+      const updatePayload = {
+        ...row,
+        created_by: existing.created_by || row.created_by
+      };
+
+      const { error } = await client
+        .from('participants')
+        .update(updatePayload)
+        .eq('id', row.id);
+
+      if (error) throw error;
+    } else {
+      const { error } = await client
+        .from('participants')
+        .insert(row);
+
+      // Another sync path may have inserted it after our lookup.
+      if (error && error.code !== '23505') throw error;
+    }
+  }
+
   const { data, error } = await client
     .from('participants')
-    .upsert(rows, { onConflict:'id' })
-    .select('id');
+    .select('id')
+    .in('id', ids);
+
   if (error) throw error;
   return data || [];
 }
@@ -166,11 +233,23 @@ async function pushEvaluationShells(c, refs) {
     }));
 
   if (!rows.length) return [];
-  const { data, error } = await client
+
+  for (const row of rows) {
+    const { error } = await client
+      .from('evaluations')
+      .insert(row);
+
+    // Another sync path may have created the same shell after our
+    // existence check. Treat that duplicate as success.
+    if (error && error.code !== '23505') throw error;
+  }
+
+  const { data, error: readError } = await client
     .from('evaluations')
-    .insert(rows)
-    .select('id, participant_id, attempt_number');
-  if (error) throw error;
+    .select('id, participant_id, attempt_number')
+    .in('id', rows.map(r => r.id));
+
+  if (readError) throw readError;
   return data || [];
 }
 async function pushClassRosterAndShells(c) {
@@ -179,21 +258,38 @@ async function pushClassRosterAndShells(c) {
   if (!client || !cloud?.user?.id || !c?.id) return false;
   if (!navigator.onLine) return false;
 
-  if (window.RAPS_CLASS_SYNC?.pushClass) {
-    await window.RAPS_CLASS_SYNC.pushClass(c);
+  if (rosterPushInFlight.has(c.id)) {
+    return rosterPushInFlight.get(c.id);
   }
 
-  const refs = await lookupBaseAndCurriculum(c);
-  await ensureEvent(c, refs);
-  await pushParticipants(c, refs);
-  await pushEvaluationShells(c, refs);
+  const task = (async () => {
+    if (window.RAPS_CLASS_SYNC?.pushClass) {
+      await window.RAPS_CLASS_SYNC.pushClass(c);
+    }
 
-  getStore()?.patchRosterCloudState?.(c.id, {
-    status:'synced',
-    error:'',
-    lastSyncedAt:Date.now()
-  });
-  return true;
+    const refs = await lookupBaseAndCurriculum(c);
+    await ensureEvent(c, refs);
+    await pushParticipants(c, refs);
+    await pushEvaluationShells(c, refs);
+
+    getStore()?.patchRosterCloudState?.(c.id, {
+      status:'synced',
+      error:'',
+      lastSyncedAt:Date.now()
+    });
+
+    return true;
+  })();
+
+  rosterPushInFlight.set(c.id, task);
+
+  try {
+    return await task;
+  } finally {
+    if (rosterPushInFlight.get(c.id) === task) {
+      rosterPushInFlight.delete(c.id);
+    }
+  }
 }
 
 function makeShellAttempt(row, c, s) {
@@ -400,5 +496,7 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pushClassRosterAndShells,
   pullRosterAndShells
 });
+
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.5-web.1';
 
 })();

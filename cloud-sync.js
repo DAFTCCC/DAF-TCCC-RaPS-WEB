@@ -198,23 +198,46 @@ async function pushClass(c) {
     source_device_id: getStore()?.deviceId?.() || null
   };
 
-  const { data, error } = await client
-    .from('classes')
-    .upsert(payload, { onConflict: 'id' })
-    .select('id, created_by, updated_at, client_modified_at')
-    .single();
+  let result;
 
-  if (error) {
-    patchState(c.id, { enabled:true, status:navigator.onLine ? 'error' : 'offline', error:shortError(error) });
+  if (existing) {
+    result = await client
+      .from('classes')
+      .update(payload)
+      .eq('id', c.id);
+  } else {
+    result = await client
+      .from('classes')
+      .insert(payload);
+  }
+
+  if (result.error) {
+    patchState(c.id, {
+      enabled:true,
+      status:navigator.onLine ? 'error' : 'offline',
+      error:shortError(result.error)
+    });
+    throw result.error;
+  }
+
+  const data = await fetchRemoteById(c.id);
+
+  if (!data) {
+    const error = new Error('Class write completed but the saved class could not be read back.');
+    patchState(c.id, {
+      enabled:true,
+      status:'error',
+      error:error.message
+    });
     throw error;
   }
 
-  const remoteMs = msFromIso(data?.client_modified_at || data?.updated_at) || localModified;
+  const remoteMs = msFromIso(data.client_modified_at || data.updated_at) || localModified;
   patchState(c.id, {
     enabled: true,
     status: 'synced',
     error: '',
-    createdBy: data?.created_by || payload.created_by,
+    createdBy: data.created_by || payload.created_by,
     lastSyncedAt: Date.now(),
     localModifiedAt: localModified,
     remoteModifiedAt: remoteMs
@@ -447,6 +470,8 @@ if (document.readyState === 'loading') {
   bindUi();
   if (cloudReady()) syncAll({ silent:true });
 }
+
+window.RAPS_CLASS_SYNC_BUILD = '3.4.5-web.1';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,

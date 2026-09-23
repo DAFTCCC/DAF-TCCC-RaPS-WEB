@@ -1,5 +1,5 @@
 window.TCCC_BUILD = Object.freeze({
-  versionName: '3.4.4-web.1',
+  versionName: '3.4.5-web.1',
   versionCode: 30404,
   target: 'web-pwa'
 });
