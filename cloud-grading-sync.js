@@ -224,7 +224,7 @@ function freshTimerStore(t){
 async function pullEvaluation(c,s,a){
   const client=getClient();
   const {data:row,error}=await client.from('evaluations')
-    .select('id,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id,curriculum_version_id')
+    .select('id,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id,curriculum_version_id,evaluator_id')
     .eq('id',a.id).maybeSingle();
   if(error)throw error;if(!row)return false;
 
