@@ -187,6 +187,9 @@ async function pushEvaluation(c,s,a){
     instants:a.instants||{},
     trainerSign:a.trainerSign||'',
     evaluatorId:a.evaluatorId||'',
+    cloudEvaluatorUserId:cloud.user.id,
+    startedByUserId:a.startedByUserId||cloud.user.id,
+    startedByDeviceId:a.startedByDeviceId||getStore()?.deviceId?.()||'',
     studentSign:a.studentSign||'',
     overallNotes:a.overallNotes||'',
     showNt:!!a.showNt,
@@ -221,7 +224,7 @@ function freshTimerStore(t){
 async function pullEvaluation(c,s,a){
   const client=getClient();
   const {data:row,error}=await client.from('evaluations')
-    .select('id,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id,curriculum_version_id')
+    .select('id,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id,curriculum_version_id,evaluator_id')
     .eq('id',a.id).maybeSingle();
   if(error)throw error;if(!row)return false;
 
@@ -270,7 +273,9 @@ async function pullEvaluation(c,s,a){
   a.timers=stores;
 
   const app=row.app_data||{};
-  for(const k of ['section','timerForced','events','instants','trainerSign','evaluatorId','studentSign','overallNotes','remediation'])if(app[k]!==undefined)a[k]=app[k];
+  for(const k of ['section','timerForced','events','instants','trainerSign','evaluatorId','cloudEvaluatorUserId','startedByUserId','startedByDeviceId','studentSign','overallNotes','remediation'])if(app[k]!==undefined)a[k]=app[k];
+  if(!a.cloudEvaluatorUserId&&row.evaluator_id)a.cloudEvaluatorUserId=row.evaluator_id;
+  if(!a.startedByUserId&&a.cloudEvaluatorUserId)a.startedByUserId=a.cloudEvaluatorUserId;
   if(app.showNt!==undefined)a.showNt=!!app.showNt;
   if(app.observeMode!==undefined){a.observeMode=!!app.observeMode;a.fieldMode=a.observeMode;}
   a.startedAt=ms(row.started_at)||a.startedAt;

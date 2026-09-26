@@ -127,6 +127,9 @@ function normalizeDb(x){
         a.observeMode=a.observeMode!==undefined?a.observeMode:(a.fieldMode!==undefined?a.fieldMode:true);
         a.fieldMode=a.observeMode; // compatibility with v2.x backups
         a.remediation=a.remediation||null;
+        a.cloudEvaluatorUserId=a.cloudEvaluatorUserId||'';
+        a.startedByUserId=a.startedByUserId||a.cloudEvaluatorUserId||'';
+        a.startedByDeviceId=a.startedByDeviceId||a.deviceId||'';
         a.timerForced=a.timerForced||{};
         a.legacyRatings=a.legacyRatings||{};
         Object.entries(a.ratings||{}).forEach(([itemId,rating])=>{
@@ -187,6 +190,58 @@ function cls(){ return db.classes.find(c=>c.id===currentClassId); }
 function tier(){ const c=cls(); return c ? (c.tierSnapshot||TIERS[c.tierId]) : null; }
 function student(){ const c=cls(); return c?.students.find(s=>s.id===currentStudentId); }
 function evalState(){ return student()?.attempts?.[String(currentAttemptNo)] || null; }
+function currentCloudUserId(){return String(window.RAPS_CLOUD?.user?.id||'');}
+function attemptBelongsToCurrentEvaluator(a){
+  if(!a||a.finalizedAt||a.voidedAt||a.cloudShellOnly)return false;
+  const uid=currentCloudUserId();
+  if(uid){
+    if(a.cloudEvaluatorUserId)return String(a.cloudEvaluatorUserId)===uid;
+    if(a.startedByUserId)return String(a.startedByUserId)===uid;
+  }
+  if(a.startedByDeviceId)return String(a.startedByDeviceId)===String(db.deviceId||'');
+  return !!a.deviceId&&String(a.deviceId)===String(db.deviceId||'');
+}
+function findActiveEvaluationLock(){
+  const locks=[];
+  (db.classes||[]).filter(c=>!c.deletedAt&&!isClassClosed(c)).forEach(c=>{
+    (c.students||[]).forEach(s=>{
+      Object.values(s.attempts||{}).filter(Boolean).forEach(a=>{
+        if(!a.startedAt||a.finalizedAt||a.voidedAt||a.cloudShellOnly||!attemptBelongsToCurrentEvaluator(a))return;
+        locks.push({
+          classId:c.id,className:c.name||'Untitled Class',
+          studentId:s.id,studentName:s.name||'Student',studentRank:s.rank||'',
+          attemptNo:Number(a.attemptNo||1),attemptId:a.id||'',
+          startedAt:Number(a.startedAt||0)
+        });
+      });
+    });
+  });
+  locks.sort((x,y)=>(y.startedAt||0)-(x.startedAt||0));
+  return locks[0]||null;
+}
+function evaluationTargetMatchesLock(lock,classId,studentId,attemptNo){
+  return !!lock&&String(lock.classId)===String(classId)&&String(lock.studentId)===String(studentId)&&Number(lock.attemptNo)===Number(attemptNo);
+}
+function activeEvaluationLockText(lock){
+  if(!lock)return '';
+  const who=`${lock.studentRank?`${lock.studentRank} `:''}${lock.studentName}`;
+  return `${who} · Attempt ${lock.attemptNo} · ${lock.className}`;
+}
+function resumeActiveEvaluation(lock=findActiveEvaluationLock()){
+  if(!lock)return false;
+  const c=db.classes.find(x=>x.id===lock.classId),s=c?.students?.find(x=>x.id===lock.studentId),a=s?.attempts?.[String(lock.attemptNo)];
+  if(!c||!s||!a||a.finalizedAt)return false;
+  currentClassId=c.id;currentStudentId=s.id;currentAttemptNo=lock.attemptNo;
+  renderEval();showView('evalView');requestEvalWakeLock();return true;
+}
+function renderActiveEvaluationLockBanner(){
+  const el=$('activeEvaluationLockBanner');if(!el)return;
+  const lock=findActiveEvaluationLock();
+  if(!lock){el.classList.add('hidden');el.innerHTML='';return;}
+  el.classList.remove('hidden');
+  el.innerHTML=`<div><b>EVALUATION LOCK ACTIVE</b><span>${esc(activeEvaluationLockText(lock))}. Finalize or Void this attempt before opening any other evaluation.</span></div><button id="resumeActiveEvaluationBtn" class="action compact primary" type="button">Resume Current Evaluation</button>`;
+  const b=$('resumeActiveEvaluationBtn');if(b)b.onclick=()=>resumeActiveEvaluation(lock);
+}
 function allItems(t=tier()){ return t ? t.sections.flatMap(s=>s.items.map(i=>({...i,section:s.code,sectionTitle:s.title}))) : []; }
 function itemById(id){ return allItems().find(i=>i.id===id); }
 function timerDef(id){ return (tier()?.timers||[]).find(d=>d.id===id); }
@@ -245,6 +300,7 @@ function makeAttempt(c,s,attemptNo){
     id:uuid(),attemptNo,startedAt:now(),finalizedAt:null,finalResult:null,section:t.sections[0].code,
     ratings,methods,stamps,ntReasons,failureDetails:{},notes:{},noteOpen:{},observeMode:true,fieldMode:true,timerForced:{},timers:makeTimerStore(t),events:[],instants:{},
     trainerSign:c.leadEvaluator||'',evaluatorId:c.evaluatorId||'',studentSign:'',overallNotes:'',showNt:false,appVersion:APP_VERSION,createdAt:now(),modifiedAt:now(),deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,classId:c.id,participantId:s.id,
+    startedByUserId:currentCloudUserId(),startedByDeviceId:db.deviceId,cloudEvaluatorUserId:currentCloudUserId(),
     curriculumId:c.curriculumId||`TCCC-TIER${c.tierId}`,contentVersion:c.contentVersion,scenarioVersion:c.scenarioVersion||'1',remediation:null
   };
 }
@@ -254,6 +310,8 @@ function ensureAttempt(){
   const k=String(currentAttemptNo);
   if(!s.attempts[k]){
     if(isClassClosed(c))return null;
+    const lock=findActiveEvaluationLock();
+    if(lock&&!evaluationTargetMatchesLock(lock,c.id,s.id,currentAttemptNo))return null;
     if(currentAttemptNo===2 && s.attempts?.['1']?.finalResult!=='FAIL')return null;
     c.status='active';s.attempts[k]=makeAttempt(c,s,currentAttemptNo);saveDb();
   }
@@ -539,6 +597,7 @@ function renderClass(){
   $('scenarioBtn').textContent=closed?'Scenario NT (closed)':hasStartedClass(c)?'View Scenario NT (locked)':'Configure Scenario NT';
   const visibleStudents=c.students.filter(rosterMatches);
   $('rosterCount').textContent=`${visibleStudents.length}/${stats.total} shown · ${stats.completed} finalized`;
+  renderActiveEvaluationLockBanner();
   $('rosterList').innerHTML=visibleStudents.length?visibleStudents.map(s=>rosterRow(c,s)).join(''):c.students.length?'<div class="empty">No students match the current roster filter.</div>':'<div class="empty">No students loaded. Add a student or import a CSV roster.</div>';
   if($('rosterSearch'))$('rosterSearch').value=rosterSearchTerm;
   document.querySelectorAll('[data-roster-filter]').forEach(b=>b.classList.toggle('active',b.dataset.rosterFilter===rosterFilter));
@@ -565,23 +624,29 @@ function gradingSyncBadge(a){
   return `<span class="gradeSyncBadge ${esc(st)}" title="${esc(a.cloudGrading?.error||'')}">${label}</span>`;
 }
 function rosterRow(c,s){
-  const a1=s.attempts?.['1'],a2=s.attempts?.['2'],closed=isClassClosed(c);
+  const a1=s.attempts?.['1'],a2=s.attempts?.['2'],closed=isClassClosed(c),lock=findActiveEvaluationLock();
   const best=a2?.finalizedAt?a2:a1?.finalizedAt?a1:null;
   const status=a2&&!a2.finalizedAt?'A2 IN PROGRESS':a1&&!a1.finalizedAt?'A1 IN PROGRESS':best?best.finalResult:'NOT STARTED';
   const clsx=status==='PASS'?'pass':status==='FAIL'?'fail':status.includes('IN PROGRESS')?'progress':'';
+  const attrs=attemptNo=>{
+    if(!lock)return '';
+    if(evaluationTargetMatchesLock(lock,c.id,s.id,attemptNo))return '';
+    return ' disabled aria-disabled="true" title="Finalize or Void the active evaluation before opening another assessment."';
+  };
+  const label=(attemptNo,normal)=>evaluationTargetMatchesLock(lock,c.id,s.id,attemptNo)?'Resume Current Evaluation':normal;
   let buttons='';
   if(closed){
-    if(a1)buttons+=`<button class="action compact" data-start="${s.id}" data-attempt="1">View A1</button>`;
-    if(a2)buttons+=` <button class="action compact" data-start="${s.id}" data-attempt="2">View A2</button>`;
+    if(a1)buttons+=`<button class="action compact" data-start="${s.id}" data-attempt="1"${attrs(1)}>${label(1,'View A1')}</button>`;
+    if(a2)buttons+=` <button class="action compact" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,'View A2')}</button>`;
     if(!a1&&!a2)buttons='<span class="rowSub">No evaluation</span>';
   }else{
-    if(!a1)buttons=`<button class="action compact primary" data-start="${s.id}" data-attempt="1">Start A1</button>`;
-    else if(a1.cloudShellOnly)buttons=`<button class="action compact" data-start="${s.id}" data-attempt="1">Cloud A1 Shell</button>`;
-    else buttons=`<button class="action compact" data-start="${s.id}" data-attempt="1">${a1.finalizedAt?'View A1':'Continue A1'}</button>`;
-    if(a2)buttons+=a2.cloudShellOnly?` <button class="action compact" data-start="${s.id}" data-attempt="2">Cloud A2 Shell</button>`:` <button class="action compact" data-start="${s.id}" data-attempt="2">${a2.finalizedAt?'View A2':'Continue A2'}</button>`;
-    else if(a1?.finalizedAt&&a1.finalResult==='FAIL')buttons+=` <button class="action compact primary" data-start="${s.id}" data-attempt="2">Start A2 Remediation</button>`;
+    if(!a1)buttons=`<button class="action compact primary" data-start="${s.id}" data-attempt="1"${attrs(1)}>${label(1,'Start A1')}</button>`;
+    else if(a1.cloudShellOnly)buttons=`<button class="action compact" data-start="${s.id}" data-attempt="1"${attrs(1)}>Cloud A1 Shell</button>`;
+    else buttons=`<button class="action compact${!a1.finalizedAt?' primary':''}" data-start="${s.id}" data-attempt="1"${attrs(1)}>${label(1,a1.finalizedAt?'View A1':'Continue A1')}</button>`;
+    if(a2)buttons+=a2.cloudShellOnly?` <button class="action compact" data-start="${s.id}" data-attempt="2"${attrs(2)}>Cloud A2 Shell</button>`:` <button class="action compact${!a2.finalizedAt?' primary':''}" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,a2.finalizedAt?'View A2':'Continue A2')}</button>`;
+    else if(a1?.finalizedAt&&a1.finalResult==='FAIL')buttons+=` <button class="action compact primary" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,'Start A2 Remediation')}</button>`;
     else if(a1?.finalizedAt&&a1.finalResult==='PASS')buttons+=` <span class="rowSub">A2 not indicated after A1 PASS</span>`;
-    buttons+=` <button class="ghost small danger" data-delete-student="${s.id}">Delete</button>`;
+    buttons+=` <button class="ghost small danger" data-delete-student="${s.id}"${lock?' disabled aria-disabled="true" title="Roster deletion is locked while an evaluation is in progress."':''}>Delete</button>`;
   }
   return `<div class="rosterRow"><div><div class="rowTitle">${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</div><div class="rowSub">${esc(s.trainingId||'No training ID')} · <span class="statusPill ${clsx}">${status}</span>${best?` · ${scoreStats(c.tierSnapshot,best).percentText} ${gradingSyncBadge(best)}`:a1?` ${gradingSyncBadge(a1)}`:''}</div></div><div class="rowActions">${buttons}</div></div>`;
 }
@@ -684,6 +749,12 @@ function scenarioForm(){
 // ---------- Evaluation ----------
 function openEvaluation(studentId,attemptNo){
   const c=cls(),s=c?.students.find(x=>x.id===studentId);if(!c||!s)return;
+  const lock=findActiveEvaluationLock();
+  if(lock&&!evaluationTargetMatchesLock(lock,c.id,studentId,attemptNo)){
+    alert(`Another evaluation is still IN PROGRESS:\n\n${activeEvaluationLockText(lock)}\n\nFinalize or Void that attempt before opening another evaluation.`);
+    renderActiveEvaluationLockBanner();
+    return;
+  }
   const existing=s.attempts?.[String(attemptNo)];
   if(existing){
     if(existing.cloudShellOnly){
@@ -698,7 +769,7 @@ function openEvaluation(studentId,attemptNo){
   const remediationFields=attemptNo===2?`<div class="remediationStart"><label><span>Remediation reason *</span><select id="remediationReason" required><option value="">Select</option><option>Critical task failure</option><option>Knowledge gap</option><option>Skill execution gap</option><option>Sequencing / prioritization gap</option><option>Timing standard</option><option>Other</option></select></label><label><span>Corrective action completed / planned *</span><textarea id="remediationAction" rows="2" placeholder="e.g., coached repetition, deliberate practice, knowledge review"></textarea></label></div>`:'';
   $('formModalBody').innerHTML=`<div class="startGate"><p><b>${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</b></p><p>Tier ${esc(c.tierId)} · ${esc(c.name)}</p>${remediationFields}<div class="startWarning"><b>Evaluator ready check</b><br>Confirm the correct student, tier, scenario, and attempt before starting. The evaluation clock begins only after you press <b>Begin Assessment</b>.</div><label class="safetyAckRow"><input id="beginAttemptAck" type="checkbox"><span>I am ready to begin direct observation of this assessment.</span></label><div class="formActions"><button id="beginAttemptBtn" class="action primary" disabled>Begin Assessment</button></div></div>`;
   $('beginAttemptAck').onchange=e=>$('beginAttemptBtn').disabled=!e.target.checked;
-  $('beginAttemptBtn').onclick=()=>{const reason=attemptNo===2?$('remediationReason').value.trim():'',action=attemptNo===2?$('remediationAction').value.trim():'';if(attemptNo===2&&(!reason||!action)){alert('Record the remediation reason and corrective action before starting Attempt 2.');return;}currentStudentId=studentId;currentAttemptNo=attemptNo;const st=ensureAttempt();if(!st){alert('Unable to start this attempt. Verify Attempt 1 remediation eligibility and class status.');return;}if(attemptNo===2)st.remediation={reason,action,at:now()};saveDb();closeModal('formModal');renderEval();showView('evalView');requestEvalWakeLock();};
+  $('beginAttemptBtn').onclick=()=>{const activeLock=findActiveEvaluationLock();if(activeLock&&!evaluationTargetMatchesLock(activeLock,c.id,studentId,attemptNo)){alert(`Another evaluation became active:\n\n${activeEvaluationLockText(activeLock)}\n\nFinalize or Void it first.`);closeModal('formModal');renderClass();return;}const reason=attemptNo===2?$('remediationReason').value.trim():'',action=attemptNo===2?$('remediationAction').value.trim():'';if(attemptNo===2&&(!reason||!action)){alert('Record the remediation reason and corrective action before starting Attempt 2.');return;}currentStudentId=studentId;currentAttemptNo=attemptNo;const st=ensureAttempt();if(!st){alert('Unable to start this attempt. Verify Attempt 1 remediation eligibility and class status.');return;}if(attemptNo===2)st.remediation={reason,action,at:now()};saveDb();closeModal('formModal');renderEval();showView('evalView');requestEvalWakeLock();};
   openModal('formModal');
 }
 function isObserveMode(st=evalState()){return st?.observeMode!==false;}
@@ -1047,7 +1118,7 @@ function reviewFinalize(){
   $('confirmFinalizeBtn').textContent=p.activeTimers.length?'Stop / resolve active timers':p.result==='INCOMPLETE'?'Resolve Items Before Finalizing':`Finalize ${p.result}`;
   openModal('reportModal');
 }
-function finalizeEvaluation(){ const st=evalState(),p=proficiency();if(p.result==='INCOMPLETE'){alert(p.activeTimers.length?'Stop or administratively resolve all active/paused timers before finalization.':'Resolve all required criteria and timing standards before finalization.');return;}if(!confirm(`Finalize this evaluation as ${p.result}? Finalized attempts become read-only.`))return;st.finalizedAt=now();st.finalResult=p.result;event('Evaluation finalized',`${p.result} · ${p.score.percentText}`);saveDb();closeModal('reportModal');renderEval(); }
+function finalizeEvaluation(){ const st=evalState(),p=proficiency();if(p.result==='INCOMPLETE'){alert(p.activeTimers.length?'Stop or administratively resolve all active/paused timers before finalization.':'Resolve all required criteria and timing standards before finalization.');return;}if(!confirm(`Finalize this evaluation as ${p.result}? Finalized attempts become read-only and the evaluator lock will be released.`))return;st.finalizedAt=now();st.finalResult=p.result;event('Evaluation finalized',`${p.result} · ${p.score.percentText}`);saveDb();closeModal('reportModal');renderEval(); }
 
 function voidCurrentAttempt(){
   const c=cls(),s=student(),st=evalState();if(!c||!s||!st||st.finalizedAt||isClassClosed(c))return;
