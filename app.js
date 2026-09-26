@@ -604,7 +604,7 @@ function renderClass(){
   renderClassAnalytics(c,t);
   if($('analyticsScope'))$('analyticsScope').textContent=`${classAttempt1s(c).length} finalized A1 · normalized rates`;
   $('editClassBtn').disabled=closed;$('scenarioBtn').disabled=closed;$('addStudentBtn').disabled=closed;$('importRosterBtn').disabled=closed;
-  $('closeClassBtn').classList.toggle('hidden',closed);$('closedBanner').classList.toggle('hidden',!closed);
+  $('closeClassBtn').classList.toggle('hidden',closed);$('closeClassBtn').textContent='Verify & Close Class';$('closedBanner').classList.toggle('hidden',!closed);
   const deleteBtn=$('deleteClassBtn');
   if(deleteBtn){
     deleteBtn.classList.toggle('hidden',!hasEnterpriseAccess());
@@ -665,11 +665,75 @@ function closureIssues(c){
   });
   return issues;
 }
-function closeClass(){
-  const c=cls();if(!c||isClassClosed(c))return;const issues=closureIssues(c);
-  if(issues.length){alert(`Class cannot be closed yet:\n\n${issues.slice(0,12).join('\n')}${issues.length>12?`\n+ ${issues.length-12} more`:''}\n\nFinalize or remove unresolved roster entries first.`);return;}
-  const token=prompt(`CLOSE CLASS\n\nClosing permanently locks the roster, scenario, evaluations, attempts, notes, and grading data. Viewing, PDF/CSV export, and backup remain available. There is no reopen function.\n\nType CLOSE to continue.`);
-  if(token!=='CLOSE')return;c.status='closed';c.closedAt=now();c.closedBy=c.leadEvaluator||'';saveDb();renderClass();
+async function syncClassForAuthoritativeClose(c){
+  if(!navigator.onLine)throw new Error('Class closure requires an online connection to the RaPS server.');
+  const cloud=window.RAPS_CLOUD,client=currentCloudClient();
+  if(!cloud?.user?.id||!cloud?.connected||!client)throw new Error('Class closure requires an online authenticated RaPS session.');
+  const classSync=window.RAPS_CLASS_SYNC,rosterSync=window.RAPS_ROSTER_SYNC,gradingSync=window.RAPS_GRADING_SYNC;
+  if(!classSync?.pushClass||!rosterSync?.pushClassRosterAndShells||!gradingSync?.pushEvaluation)throw new Error('RaPS cloud synchronization is not fully initialized. Refresh the app and try again.');
+
+  const classPushed=await classSync.pushClass(c);
+  if(!classPushed)throw new Error(c.cloudSync?.error||'Class metadata did not finish syncing.');
+  await rosterSync.pushClassRosterAndShells(c);
+
+  for(const s of (c.students||[])){
+    for(const a of Object.values(s.attempts||{})){
+      if(!a?.id||a.cloudShellOnly)continue;
+      const state=a.cloudGrading||{},localMs=Number(a.modifiedAt||0),remoteMs=Number(state.remoteModifiedAt||0);
+      const alreadySynced=state.status==='synced'&&remoteMs&&localMs<=remoteMs+10;
+      if(alreadySynced)continue;
+      const pushed=await gradingSync.pushEvaluation(c,s,a);
+      if(!pushed){
+        const detail=a.cloudGrading?.error?' — '+a.cloudGrading.error:'';
+        throw new Error((s.name||'Student')+' Attempt '+(a.attemptNo||1)+' did not finish grading sync'+detail+'.');
+      }
+    }
+  }
+  return client;
+}
+async function closeClass(){
+  const c=cls();
+  if(!c||isClassClosed(c))return;
+  const issues=closureIssues(c);
+  if(issues.length){
+    alert('Class cannot be closed yet:\n\n'+issues.slice(0,12).join('\n')+(issues.length>12?'\n+ '+(issues.length-12)+' more':'')+'\n\nFinalize or remove unresolved roster entries first.');
+    return;
+  }
+  if(!navigator.onLine){
+    alert('Class closure requires an online connection so the server can verify and lock the authoritative record. The class remains open locally.');
+    return;
+  }
+  const token=prompt('VERIFY & CLOSE CLASS\n\nRaPS will first synchronize the roster and finalized grading records, then the server will verify completeness and permanently close the class. Viewing, PDF/CSV export, backup, and server retention remain available after closure. There is no reopen function.\n\nType CLOSE to continue.');
+  if(token!=='CLOSE')return;
+
+  const btn=$('closeClassBtn');
+  if(btn){btn.disabled=true;btn.textContent='VERIFYING & CLOSING…';}
+
+  try{
+    const client=await syncClassForAuthoritativeClose(c);
+    const {data,error}=await client.rpc('close_class_authoritatively',{p_class_id:c.id});
+    if(error)throw error;
+    if(!data?.closed){
+      const serverIssues=Array.isArray(data?.issues)?data.issues:[];
+      const detail=serverIssues.length?serverIssues.slice(0,12).join('\n'):'The server did not confirm closure.';
+      alert('SERVER VERIFICATION DID NOT CLOSE THIS CLASS\n\n'+detail+(serverIssues.length>12?'\n+ '+(serverIssues.length-12)+' more':'')+'\n\nThe local class remains open.');
+      return;
+    }
+
+    c.status='closed';
+    c.closedAt=Number(data.closedAt)||now();
+    c.closedBy=String(data.closedBy||c.leadEvaluator||'');
+    c.closureMode='server_authoritative';
+    c.closureVersion=1;
+    saveDb();
+    renderClass();
+    alert('Class closed successfully. The server verified and locked the authoritative record; NUC CSV retention will proceed automatically.');
+  }catch(error){
+    console.error('Authoritative class closure failed',error);
+    alert('CLASS NOT CLOSED\n\n'+(error?.message||error)+'\n\nRaPS left the local class open. Resolve the sync or server issue and try again.');
+  }finally{
+    if(btn&&!isClassClosed(c)){btn.disabled=false;btn.textContent='Verify & Close Class';}
+  }
 }
 async function deleteClass(){
   const c=cls();if(!c)return;
