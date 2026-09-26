@@ -531,3 +531,45 @@ body.cloudActivationLocked{overflow:hidden}
   text-align:center;
   line-height:1.1;
 }
+
+
+/* v3.4.7 closed-class server retention */
+.closedArchiveStatus{
+  margin:10px 12px 0;
+  padding:11px 12px;
+  border:1px solid rgba(95,143,178,.45);
+  border-radius:10px;
+  background:rgba(17,37,52,.72);
+  display:grid;
+  gap:4px;
+}
+.closedArchiveStatus b{
+  font-size:11px;
+  letter-spacing:.05em;
+  color:#eaf5fb;
+}
+.closedArchiveStatus span{
+  font-size:11px;
+  line-height:1.45;
+  color:#b9c8d2;
+}
+.closedArchiveStatus[data-state="archived"],
+.closedArchiveStatus[data-state="retained"]{
+  border-color:rgba(78,143,120,.72);
+  background:rgba(34,76,58,.34);
+}
+.closedArchiveStatus[data-state="deletion_requested"],
+.closedArchiveStatus[data-state="pending"],
+.closedArchiveStatus[data-state="checking"]{
+  border-color:rgba(209,162,82,.72);
+  background:rgba(86,65,24,.28);
+}
+.closedArchiveStatus[data-state="deleted"],
+.closedArchiveStatus[data-state="error"]{
+  border-color:rgba(199,74,72,.72);
+  background:rgba(91,37,40,.30);
+}
+.closedArchiveStatus[data-state="offline"]{
+  border-color:rgba(116,128,193,.70);
+  background:rgba(58,62,104,.28);
+}

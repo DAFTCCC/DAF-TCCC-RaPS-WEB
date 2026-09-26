@@ -297,8 +297,13 @@ function cloudSyncBadge(c){
   const label=status==='synced'?'SYNCED':status==='syncing'?'SYNCING':status==='offline'?'OFFLINE':status==='conflict'?'CONFLICT':status==='error'?'SYNC ERROR':'PENDING';
   return `<span class="syncBadge ${esc(status)}" title="${esc(s.error||'')}">${label}</span>`;
 }
+function currentAccessRole(){return String(window.RAPS_CLOUD?.role||document.body?.dataset?.rapsRole||'');}
+function hasEnterpriseAccess(){return currentAccessRole()==='enterprise_admin';}
+function currentCloudClient(){return window.RAPS_CLOUD?.client||window.RAPS_SUPABASE||null;}
+function archiveDate(value){if(!value)return '—';const d=new Date(value);return Number.isFinite(d.getTime())?d.toLocaleString():'—';}
+function archiveIntegrityShort(value){return value?String(value).slice(0,12)+'…':'—';}
 function renderHome(){
-  const active=db.classes.filter(c=>!c.deletedAt),trash=db.classes.filter(c=>c.deletedAt);
+  const active=db.classes.filter(c=>!c.deletedAt),trash=db.classes.filter(c=>c.deletedAt),enterprise=hasEnterpriseAccess();
   active.forEach(ensureLocationFields);
   $('classCount').textContent=`${active.length} class${active.length===1?'':'es'}`;
   $('classList').innerHTML=active.length?active.map(c=>{
@@ -306,17 +311,31 @@ function renderHome(){
     return `<div class="classRow"><div><div class="rowTitle">${esc(c.name||'Untitled Class')} <span class="statusPill ${life}">${life.toUpperCase()}</span> ${cloudSyncBadge(c)}</div><div class="rowSub">${esc(cmd)} · ${esc(loc)} · Tier ${c.tierId} ${esc(t.shortName)}<br>${esc(c.roster||'No roster #')} · ${esc(c.scenario||'Scenario not named')} · ${st.completed}/${st.total} finalized · ${st.qualified} qualified${c.closedAt?` · Closed ${new Date(c.closedAt).toLocaleDateString()}`:''}</div></div><div class="rowActions"><button class="action compact" data-open-class="${c.id}">${isClassClosed(c)?'View':'Open'}</button></div></div>`;
   }).join(''):'<div class="empty">No classes yet. Create a class to begin.</div>';
   if($('manageClassList'))$('manageClassList').innerHTML=$('classList').innerHTML;
-  $('trashCard').classList.toggle('hidden',trash.length===0);
-  $('trashCount').textContent=`${trash.length}`;
-  $('trashList').innerHTML=trash.map(c=>`<div class="classRow"><div><div class="rowTitle">${esc(c.name)} <span class="statusPill trash">TRASH</span></div><div class="rowSub">${lifecycleStatus(c)} · Deleted ${new Date(c.deletedAt).toLocaleString()}</div></div><div class="rowActions"><button class="action compact" data-restore-class="${c.id}">Restore</button><button class="ghost small danger" data-purge-class="${c.id}">Delete Permanently</button></div></div>`).join('');
+  $('trashCard').classList.toggle('hidden',!enterprise||trash.length===0);
+  $('trashCount').textContent=enterprise?`${trash.length}`:'0';
+  $('trashList').innerHTML=enterprise?trash.map(c=>`<div class="classRow"><div><div class="rowTitle">${esc(c.name)} <span class="statusPill trash">LOCAL TRASH</span></div><div class="rowSub">${lifecycleStatus(c)} · Removed locally ${new Date(c.deletedAt).toLocaleString()}</div></div><div class="rowActions"><button class="action compact" data-restore-class="${c.id}">Restore</button><button class="ghost small danger" data-purge-class="${c.id}">Remove Local Copy</button></div></div>`).join(''):'';
   document.querySelectorAll('[data-open-class]').forEach(b=>b.onclick=()=>openClass(b.dataset.openClass));
-  document.querySelectorAll('[data-restore-class]').forEach(b=>b.onclick=()=>restoreDeletedClass(b.dataset.restoreClass));
-  document.querySelectorAll('[data-purge-class]').forEach(b=>b.onclick=()=>purgeDeletedClass(b.dataset.purgeClass));
+  if(enterprise){
+    document.querySelectorAll('[data-restore-class]').forEach(b=>b.onclick=()=>restoreDeletedClass(b.dataset.restoreClass));
+    document.querySelectorAll('[data-purge-class]').forEach(b=>b.onclick=()=>purgeDeletedClass(b.dataset.purgeClass));
+  }
   renderManagementDashboard();
   setHomeArea(homeArea);
 }
-function restoreDeletedClass(id){const c=db.classes.find(x=>x.id===id);if(!c)return;c.deletedAt=null;saveDb();renderHome();}
-function purgeDeletedClass(id){const c=db.classes.find(x=>x.id===id);if(!c)return;const token=prompt(`Permanently delete "${c.name}" and all locally stored data?\n\nType DELETE to continue.`);if(token!=='DELETE')return;db.classes=db.classes.filter(x=>x.id!==id);saveDb();renderHome();}
+function restoreDeletedClass(id){
+  if(!hasEnterpriseAccess()){alert('Enterprise Administrator access is required to restore deleted local classes.');return;}
+  const c=db.classes.find(x=>x.id===id);if(!c)return;
+  if(isClassClosed(c)){alert('Closed classes are retention records and are not restored through Local Trash. Open the closed class and use the audited archive controls instead.');return;}
+  c.deletedAt=null;saveDb();renderHome();
+}
+function purgeDeletedClass(id){
+  if(!hasEnterpriseAccess()){alert('Enterprise Administrator access is required to remove local class copies.');return;}
+  const c=db.classes.find(x=>x.id===id);if(!c)return;
+  if(isClassClosed(c)){alert('Closed classes cannot be locally purged. Use the audited closed-class archive deletion workflow.');return;}
+  const token=prompt(`Remove the local copy of "${c.name}" from this browser/device?\n\nThis does not replace authoritative cloud retention controls.\n\nType REMOVE LOCAL to continue.`);
+  if(token!=='REMOVE LOCAL')return;
+  db.classes=db.classes.filter(x=>x.id!==id);localStorage.setItem(DB_KEY,JSON.stringify(db));renderHome();
+}
 function openClass(id){releaseEvalWakeLock();const c=db.classes.find(x=>x.id===id);if(!c||c.deletedAt){renderHome();return;}currentClassId=id;currentStudentId=null;renderClass();showView('classView');}
 function finalStatusForStudent(s){
   const a1=s.attempts?.['1'],a2=s.attempts?.['2'];
@@ -435,6 +454,77 @@ function renderManagementDashboard(){
   const missingMaj=scope.filter(c=>!c.majcom).length,missingBase=scope.filter(c=>!c.homeInstallationId&&!c.homeInstallationName).length,custom=scope.filter(c=>!c.homeInstallationId&&c.homeInstallationName).length,missingRca=Math.max(0,a.failObs-a.classifiedFailObs);
   $('managementDataQuality').innerHTML=`<h3>Data quality</h3><div class="dataQualityGrid"><div class="dataQualityItem ${missingMaj?'bad':'good'}"><b>${missingMaj}</b><span>classes missing MAJCOM</span></div><div class="dataQualityItem ${missingBase?'bad':'good'}"><b>${missingBase}</b><span>classes missing home installation</span></div><div class="dataQualityItem ${custom?'warn':'good'}"><b>${custom}</b><span>custom / not-listed installations</span></div><div class="dataQualityItem ${missingRca?'warn':'good'}"><b>${missingRca}</b><span>failed observations missing contributor</span></div></div><small>Location and performance-contributor completeness directly affect installation/MAJCOM comparisons. Local analytics are descriptive and are not an authoritative DAF system of record.</small>`;
 }
+async function renderClosedArchiveStatus(c){
+  const panel=$('closedArchiveStatus'),deleteBtn=$('deleteClassBtn');
+  if(!panel)return;
+  if(!c||!isClassClosed(c)){
+    panel.classList.add('hidden');panel.removeAttribute('data-state');panel.innerHTML='';
+    return;
+  }
+  panel.classList.remove('hidden');
+  if(!hasEnterpriseAccess()){
+    panel.dataset.state='retained';
+    panel.innerHTML='<b>SERVER RETENTION ENABLED</b><span>Closed classes are automatically archived as CSV on the RaPS NUC in monthly folders. Archive deletion is restricted to Enterprise Administrator access.</span>';
+    return;
+  }
+  if(deleteBtn){deleteBtn.classList.remove('hidden');deleteBtn.textContent='Request Archive Deletion';deleteBtn.disabled=true;}
+  const cloud=window.RAPS_CLOUD,client=currentCloudClient();
+  if(!cloud?.connected||!client){
+    panel.dataset.state='offline';
+    panel.innerHTML='<b>ARCHIVE STATUS UNAVAILABLE OFFLINE</b><span>The closed class remains locked. Reconnect to verify the NUC archive or request deletion.</span>';
+    return;
+  }
+  panel.dataset.state='checking';
+  panel.innerHTML='<b>CHECKING SERVER ARCHIVE</b><span>Verifying closed-class retention on the RaPS NUC…</span>';
+  const {data,error}=await client.from('closed_class_archives')
+    .select('original_class_id,archive_status,closed_at,archived_at,sha256,size_bytes,deletion_requested_at,deletion_reason,deleted_at,worker_error')
+    .eq('original_class_id',c.id)
+    .maybeSingle();
+  if(currentClassId!==c.id)return;
+  if(error){
+    panel.dataset.state='error';
+    panel.innerHTML=`<b>ARCHIVE STATUS ERROR</b><span>${esc(error.message||String(error))}</span>`;
+    return;
+  }
+  if(!data){
+    panel.dataset.state='pending';
+    panel.innerHTML='<b>ARCHIVE PENDING</b><span>The class is closed. The server archive record will appear after cloud grading sync completes and the archive worker validates the class.</span>';
+    return;
+  }
+  const status=String(data.archive_status||'pending');
+  panel.dataset.state=status;
+  if(deleteBtn){
+    deleteBtn.disabled=status!=='archived';
+    deleteBtn.classList.toggle('hidden',status==='deleted');
+    deleteBtn.textContent=status==='deletion_requested'?'Archive Deletion Requested':status==='deleted'?'Archive Deleted':'Request Archive Deletion';
+  }
+  if(status==='archived'){
+    panel.innerHTML=`<b>SERVER ARCHIVE: ARCHIVED</b><span>Archived ${esc(archiveDate(data.archived_at))} · ${Number(data.size_bytes||0).toLocaleString()} bytes · SHA-256 ${esc(archiveIntegrityShort(data.sha256))}</span>`;
+  }else if(status==='deletion_requested'){
+    panel.innerHTML=`<b>SERVER ARCHIVE: DELETION REQUESTED</b><span>Requested ${esc(archiveDate(data.deletion_requested_at))}${data.deletion_reason?` · Reason: ${esc(data.deletion_reason)}`:''}. The archive worker will perform and audit the filesystem deletion.</span>`;
+  }else if(status==='deleted'){
+    panel.innerHTML=`<b>SERVER ARCHIVE: DELETED</b><span>Deleted ${esc(archiveDate(data.deleted_at))}. The deletion request and worker action remain in the audit log.</span>`;
+  }else if(status==='error'){
+    panel.innerHTML=`<b>SERVER ARCHIVE: ERROR</b><span>${esc(data.worker_error||'The archive worker reported an error. Enterprise review is required.')}</span>`;
+  }else{
+    panel.innerHTML='<b>SERVER ARCHIVE: PENDING</b><span>The NUC archive worker is waiting for the class/event/evaluation data to finish syncing.</span>';
+  }
+}
+async function requestClosedClassArchiveDeletion(c){
+  if(!c||!isClassClosed(c))return;
+  if(!hasEnterpriseAccess()){alert('Only an Enterprise Administrator may request deletion of a closed-class archive.');return;}
+  const cloud=window.RAPS_CLOUD,client=currentCloudClient();
+  if(!cloud?.connected||!client){alert('Archive deletion requires an online Enterprise session. Reconnect and try again.');return;}
+  const reason=prompt(`ENTERPRISE ARCHIVE DELETION REQUEST\n\nClass: ${c.name||'Untitled Class'}\n\nEnter the required deletion reason:`);
+  if(!reason||!reason.trim())return;
+  const token=prompt('This permanently removes the retained CSV from the NUC after the server worker processes the request.\n\nType DELETE ARCHIVE to continue.');
+  if(token!=='DELETE ARCHIVE')return;
+  const {error}=await client.rpc('request_closed_class_archive_deletion',{p_class_id:c.id,p_reason:reason.trim()});
+  if(error){alert(`Archive deletion request failed:\n${error.message||error}`);await renderClosedArchiveStatus(c);return;}
+  alert('Archive deletion request accepted. The NUC archive worker will perform and audit the deletion.');
+  await renderClosedArchiveStatus(c);
+}
+
 function renderClass(){
   const c=cls(),t=tier(),stats=classStats(c);if(!c)return showHome();
   const closed=isClassClosed(c),life=lifecycleStatus(c);
@@ -456,8 +546,16 @@ function renderClass(){
   if($('analyticsScope'))$('analyticsScope').textContent=`${classAttempt1s(c).length} finalized A1 · normalized rates`;
   $('editClassBtn').disabled=closed;$('scenarioBtn').disabled=closed;$('addStudentBtn').disabled=closed;$('importRosterBtn').disabled=closed;
   $('closeClassBtn').classList.toggle('hidden',closed);$('closedBanner').classList.toggle('hidden',!closed);
-  if(closed)$('closedBannerText').textContent=`Closed ${new Date(c.closedAt).toLocaleString()}. This class is locked and can only be viewed/exported.`;
+  const deleteBtn=$('deleteClassBtn');
+  if(deleteBtn){
+    deleteBtn.classList.toggle('hidden',!hasEnterpriseAccess());
+    deleteBtn.textContent=closed?'Request Archive Deletion':'Delete Class';
+    deleteBtn.disabled=closed;
+  }
+  if(closed)$('closedBannerText').textContent=`Closed ${new Date(c.closedAt).toLocaleString()}. This class is locked for retention, remains available for viewing/export, and is archived automatically on the RaPS NUC after cloud sync completes.`;
+  else if($('closedArchiveStatus')){$('closedArchiveStatus').classList.add('hidden');$('closedArchiveStatus').innerHTML='';}
   bindRosterRows();
+  void renderClosedArchiveStatus(c);
 }
 function gradingSyncBadge(a){
   if(!a)return '';
@@ -508,8 +606,13 @@ function closeClass(){
   const token=prompt(`CLOSE CLASS\n\nClosing permanently locks the roster, scenario, evaluations, attempts, notes, and grading data. Viewing, PDF/CSV export, and backup remain available. There is no reopen function.\n\nType CLOSE to continue.`);
   if(token!=='CLOSE')return;c.status='closed';c.closedAt=now();c.closedBy=c.leadEvaluator||'';saveDb();renderClass();
 }
-function deleteClass(){
-  const c=cls();if(!c)return;const label=isClassClosed(c)?'closed class':'class';const token=prompt(`Move this ${label} to Trash?\n\n${isClassClosed(c)?'The closed record remains locked if restored.':''}\nType DELETE to continue.`);if(token!=='DELETE')return;c.deletedAt=now();saveDb();showHome();
+async function deleteClass(){
+  const c=cls();if(!c)return;
+  if(!hasEnterpriseAccess()){alert('Only an Enterprise Administrator may delete or archive classes.');return;}
+  if(isClassClosed(c)){await requestClosedClassArchiveDeletion(c);return;}
+  const token=prompt(`Move this class to Enterprise Local Trash?\n\nThis is for non-closed class cleanup only. Closed classes use the audited NUC archive workflow.\n\nType DELETE to continue.`);
+  if(token!=='DELETE')return;
+  c.deletedAt=now();saveDb();showHome();
 }
 
 // ---------- Forms ----------// ---------- Forms ----------
@@ -1194,7 +1297,7 @@ $('backRoster').onclick=()=>navigateBackSafely();$('nextUnresolvedBottomBtn').on
 $('prevPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i>0){st.section=t.sections[i-1].code;saveDb();renderEval();}};$('nextPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i<t.sections.length-1){st.section=t.sections[i+1].code;saveDb();renderEval();}};
 $('trainerSign').oninput=e=>{evalState().trainerSign=e.target.value;saveDb();};$('attemptEvaluatorId').oninput=e=>{evalState().evaluatorId=e.target.value;saveDb();};$('studentSign').oninput=e=>{evalState().studentSign=e.target.value;saveDb();};$('overallNotes').oninput=e=>{evalState().overallNotes=e.target.value;saveDb();};
 $('finalizeBtn').onclick=reviewFinalize;$('voidAttemptBtn').onclick=voidCurrentAttempt;$('confirmFinalizeBtn').onclick=finalizeEvaluation;$('copyAar').onclick=async()=>{await navigator.clipboard.writeText($('aarText').textContent);alert('Review copied.');};$('individualPdfBtn').onclick=exportIndividualPdf;$('individualCsvBtn').onclick=exportIndividualCsv;$('attemptBackupBtn').onclick=backupAttempt;
-$('classPdfBtn').onclick=exportClassPdf;$('classSummaryCsvBtn').onclick=exportClassSummaryCsv;$('classCriteriaCsvBtn').onclick=exportClassCriteriaCsv;$('classTimersCsvBtn').onclick=exportClassTimersCsv;$('classEventsCsvBtn').onclick=exportClassEventsCsv;$('classAnalyticsCsvBtn').onclick=exportClassAnalyticsCsv;$('classEnterpriseCsvBtn').onclick=exportClassEnterpriseAnalyticsCsv;$('backupClassBtn').onclick=backupClass;$('closeClassBtn').onclick=closeClass;$('deleteClassBtn').onclick=deleteClass;
+$('classPdfBtn').onclick=exportClassPdf;$('classSummaryCsvBtn').onclick=exportClassSummaryCsv;$('classCriteriaCsvBtn').onclick=exportClassCriteriaCsv;$('classTimersCsvBtn').onclick=exportClassTimersCsv;$('classEventsCsvBtn').onclick=exportClassEventsCsv;$('classAnalyticsCsvBtn').onclick=exportClassAnalyticsCsv;$('classEnterpriseCsvBtn').onclick=exportClassEnterpriseAnalyticsCsv;$('backupClassBtn').onclick=backupClass;$('closeClassBtn').onclick=closeClass;$('deleteClassBtn').onclick=()=>{void deleteClass();};
 const moreExportsBtn=$('moreExportsBtn'),moreExportsMenu=$('moreExportsMenu');
 function setMoreExportsOpen(open){
   if(!moreExportsBtn||!moreExportsMenu)return;
@@ -1261,6 +1364,11 @@ if(window&&typeof window.addEventListener==='function')window.addEventListener('
 startLiveClockLoop();
 setupNativeBackButton();
 if($('appVersion'))$('appVersion').textContent=APP_VERSION;
+
+window.addEventListener('raps-cloud-identity',()=>{
+  renderHome();
+  if(currentClassId&&!$('classView')?.classList.contains('hidden'))renderClass();
+});
 
 window.RAPS_CLASS_STORE = Object.freeze({
   getClasses:()=>db.classes,

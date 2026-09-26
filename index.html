@@ -7,7 +7,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://bplevsfvpwrkgafizvao.supabase.co wss://bplevsfvpwrkgafizvao.supabase.co https://raps-supabase.asuscomm.com wss://raps-supabase.asuscomm.com;">
 <link rel="icon" type="image/png" href="assets/icon-192.png">
 <link rel="apple-touch-icon" href="assets/icon-192.png">
-<link rel="stylesheet" href="styles.css?v=3.4.6-web.1">
+<link rel="stylesheet" href="styles.css?v=3.4.7-web.1">
 <title>TCCC Evaluation Suite</title>
 </head>
 <body>
@@ -86,8 +86,8 @@
         <div id="manageClassList" class="classList"></div>
       </section>
       <section id="trashCard" class="card hidden">
-        <div class="cardHead"><span>Trash</span><span id="trashCount">0</span></div>
-        <p class="helper">Deleted classes stay here until permanently deleted. Restoring a closed class does not unlock it.</p>
+        <div class="cardHead"><span>Enterprise Local Trash</span><span id="trashCount">0</span></div>
+        <p class="helper">Enterprise-only cleanup for non-closed local class copies. Closed classes are retention records and use the audited server archive workflow instead.</p>
         <div id="trashList" class="classList"></div>
       </section>
     </section>
@@ -133,6 +133,7 @@
     <section class="card">
       <div class="cardHead"><span>Class / Scenario <span id="classState" class="statusPill"></span></span><button id="editClassBtn" class="ghost small">Edit</button></div>
       <div id="closedBanner" class="closedBanner hidden"><b>CLASS CLOSED</b><span id="closedBannerText"></span></div>
+      <div id="closedArchiveStatus" class="closedArchiveStatus hidden" aria-live="polite"></div>
       <div id="classMeta" class="classMeta"></div>
     </section>
     <section class="card">
@@ -197,10 +198,10 @@
     </section>
     <section class="card">
       <div class="cardHead"><span>Class Management</span><span>Audit controls</span></div>
-      <p class="helper">Close permanently locks a completed class. Delete moves the class to Trash; closed classes remain locked if restored.</p>
+      <p class="helper">Close permanently locks a completed class and triggers server-side CSV retention after cloud synchronization. Closed-class archive deletion is an audited Enterprise Administrator action only.</p>
       <div class="exportGrid">
         <button id="closeClassBtn" class="action primary">Close Class</button>
-        <button id="deleteClassBtn" class="action danger">Delete Class</button>
+        <button id="deleteClassBtn" class="action danger hidden">Delete Class</button>
       </div>
     </section>
   </main>
@@ -275,19 +276,19 @@
 <div id="reportModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>Evaluation Review</h2><button data-close="reportModal" class="ghost">Close</button></div><pre id="aarText"></pre><div class="actions"><button id="confirmFinalizeBtn" class="action primary">Finalize Evaluation</button><button id="copyAar" class="action">Copy Review</button></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-config.js?v=3.4.6-web.1"></script>
-<script src="cloud-auth.js?v=3.4.6-web.1"></script>
-<script src="version.js?v=3.4.6-web.1"></script>
-<script src="tiers.js?v=3.4.6-web.1"></script>
-<script src="branding.js?v=3.4.6-web.1"></script>
-<script src="installations.js?v=3.4.6-web.1"></script>
-<script src="app.js?v=3.4.6-web.1"></script>
-<script src="cloud-sync.js?v=3.4.6-web.1"></script>
-<script src="cloud-roster-sync.js?v=3.4.6-web.1"></script>
-<script src="cloud-grading-sync.js?v=3.4.6-web.1"></script>
-<script src="admin-ui.js?v=3.4.6-web.1-r2"></script>
-<script src="program-manager-dashboard.js?v=3.4.6-web.1"></script>
-<script src="majcom-manager-dashboard.js?v=3.4.6-web.1"></script>
-<script src="enterprise-dashboard.js?v=3.4.6-web.1"></script>
+<script src="supabase-config.js?v=3.4.7-web.1"></script>
+<script src="cloud-auth.js?v=3.4.7-web.1"></script>
+<script src="version.js?v=3.4.7-web.1"></script>
+<script src="tiers.js?v=3.4.7-web.1"></script>
+<script src="branding.js?v=3.4.7-web.1"></script>
+<script src="installations.js?v=3.4.7-web.1"></script>
+<script src="app.js?v=3.4.7-web.1"></script>
+<script src="cloud-sync.js?v=3.4.7-web.1"></script>
+<script src="cloud-roster-sync.js?v=3.4.7-web.1"></script>
+<script src="cloud-grading-sync.js?v=3.4.7-web.1"></script>
+<script src="admin-ui.js?v=3.4.7-web.1-r2"></script>
+<script src="program-manager-dashboard.js?v=3.4.7-web.1"></script>
+<script src="majcom-manager-dashboard.js?v=3.4.7-web.1"></script>
+<script src="enterprise-dashboard.js?v=3.4.7-web.1"></script>
 </body>
 </html>
