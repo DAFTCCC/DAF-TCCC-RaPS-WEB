@@ -97,8 +97,11 @@ function serializeAppData(c) {
     trainingLocationCountry: c.trainingLocationCountry || '',
     location: c.location || '',
     scenarioNT: Array.isArray(c.scenarioNT) ? c.scenarioNT : [],
+    participantIds: Array.isArray(c.students) ? c.students.map(s => s?.id).filter(Boolean) : [],
     closedAt: c.closedAt || null,
     closedBy: c.closedBy || '',
+    closureMode: c.closureMode || '',
+    closureVersion: Number(c.closureVersion || 0) || null,
     deletedAt: c.deletedAt || null
   };
 }
@@ -279,6 +282,8 @@ function remoteToLocal(row, loadedRefs) {
     status: row.status === 'completed' ? 'closed' : row.status === 'archived' ? 'draft' : (row.status || 'draft'),
     closedAt: appData.closedAt || (row.status === 'completed' ? remoteModifiedAt : null),
     closedBy: appData.closedBy || '',
+    closureMode: appData.closureMode || '',
+    closureVersion: Number(appData.closureVersion || 0) || null,
     deletedAt: row.status === 'archived' ? (appData.deletedAt || remoteModifiedAt) : null,
     scenarioNT: Array.isArray(appData.scenarioNT) ? appData.scenarioNT : [],
     students: [],
@@ -471,7 +476,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.5-web.1';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.9-web.1';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,
