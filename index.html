@@ -7,7 +7,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://bplevsfvpwrkgafizvao.supabase.co wss://bplevsfvpwrkgafizvao.supabase.co https://raps-supabase.asuscomm.com wss://raps-supabase.asuscomm.com;">
 <link rel="icon" type="image/png" href="assets/icon-192.png">
 <link rel="apple-touch-icon" href="assets/icon-192.png">
-<link rel="stylesheet" href="styles.css?v=3.4.7-web.1">
+<link rel="stylesheet" href="styles.css?v=3.4.8-web.1">
 <title>TCCC Evaluation Suite</title>
 </head>
 <body>
@@ -160,6 +160,7 @@
     </section>
     <section class="card">
       <div class="cardHead"><span>Roster</span><span id="rosterCount"></span></div>
+      <div id="activeEvaluationLockBanner" class="activeEvaluationLockBanner hidden" aria-live="polite"></div>
       <div class="rosterTools">
         <button id="addStudentBtn" class="action primary">+ Add Student</button>
         <button id="importRosterBtn" class="action">Import Roster CSV</button>
@@ -276,19 +277,19 @@
 <div id="reportModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>Evaluation Review</h2><button data-close="reportModal" class="ghost">Close</button></div><pre id="aarText"></pre><div class="actions"><button id="confirmFinalizeBtn" class="action primary">Finalize Evaluation</button><button id="copyAar" class="action">Copy Review</button></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-config.js?v=3.4.7-web.1"></script>
-<script src="cloud-auth.js?v=3.4.7-web.1"></script>
-<script src="version.js?v=3.4.7-web.1"></script>
-<script src="tiers.js?v=3.4.7-web.1"></script>
-<script src="branding.js?v=3.4.7-web.1"></script>
-<script src="installations.js?v=3.4.7-web.1"></script>
-<script src="app.js?v=3.4.7-web.1"></script>
-<script src="cloud-sync.js?v=3.4.7-web.1"></script>
-<script src="cloud-roster-sync.js?v=3.4.7-web.1"></script>
-<script src="cloud-grading-sync.js?v=3.4.7-web.1"></script>
-<script src="admin-ui.js?v=3.4.7-web.1-r2"></script>
-<script src="program-manager-dashboard.js?v=3.4.7-web.1"></script>
-<script src="majcom-manager-dashboard.js?v=3.4.7-web.1"></script>
-<script src="enterprise-dashboard.js?v=3.4.7-web.1"></script>
+<script src="supabase-config.js?v=3.4.8-web.1"></script>
+<script src="cloud-auth.js?v=3.4.8-web.1"></script>
+<script src="version.js?v=3.4.8-web.1"></script>
+<script src="tiers.js?v=3.4.8-web.1"></script>
+<script src="branding.js?v=3.4.8-web.1"></script>
+<script src="installations.js?v=3.4.8-web.1"></script>
+<script src="app.js?v=3.4.8-web.1"></script>
+<script src="cloud-sync.js?v=3.4.8-web.1"></script>
+<script src="cloud-roster-sync.js?v=3.4.8-web.1"></script>
+<script src="cloud-grading-sync.js?v=3.4.8-web.1"></script>
+<script src="admin-ui.js?v=3.4.8-web.1-r2"></script>
+<script src="program-manager-dashboard.js?v=3.4.8-web.1"></script>
+<script src="majcom-manager-dashboard.js?v=3.4.8-web.1"></script>
+<script src="enterprise-dashboard.js?v=3.4.8-web.1"></script>
 </body>
 </html>
