@@ -573,3 +573,33 @@ body.cloudActivationLocked{overflow:hidden}
   border-color:rgba(116,128,193,.70);
   background:rgba(58,62,104,.28);
 }
+
+
+/* v3.4.8 single-active-evaluation guard */
+.activeEvaluationLockBanner{
+  margin:12px 12px 0;
+  padding:11px 12px;
+  border:1px solid rgba(209,162,82,.75);
+  border-radius:10px;
+  background:rgba(86,65,24,.30);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+}
+.activeEvaluationLockBanner>div{display:grid;gap:4px;min-width:0}
+.activeEvaluationLockBanner b{
+  color:#ffe8b2;
+  font-size:11px;
+  letter-spacing:.05em;
+}
+.activeEvaluationLockBanner span{
+  color:#d8c9a5;
+  font-size:11px;
+  line-height:1.45;
+}
+.activeEvaluationLockBanner .action{white-space:nowrap}
+@media(max-width:640px){
+  .activeEvaluationLockBanner{align-items:stretch;flex-direction:column}
+  .activeEvaluationLockBanner .action{width:100%}
+}
