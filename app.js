@@ -1356,7 +1356,7 @@ Type VOID to continue.`);
     if(!pushed)throw new Error(st.cloudGrading?.error||'The current evaluation could not be synchronized before voiding.');
     const {data,error}=await client.rpc('void_evaluation_authoritatively',{
       p_evaluation_id:st.id,
-      p_reason:'Evaluator voided accidental or invalid in-progress attempt from RaPS v3.4.11-web.1',
+      p_reason:`Evaluator voided accidental or invalid in-progress attempt from RaPS ${APP_VERSION}`,
       p_source_device_id:db.deviceId||null
     });
     if(error)throw error;
@@ -1730,12 +1730,25 @@ window.RAPS_CLASS_STORE = Object.freeze({
   }
 });
 
+window.addEventListener('raps-evaluation-tombstoned',event=>{
+  const d=event.detail||{};
+  const viewingEvaluation=!$('evalView')?.classList.contains('hidden');
+  if(!viewingEvaluation)return;
+  if(String(currentClassId||'')!==String(d.classId||''))return;
+  if(String(currentStudentId||'')!==String(d.participantId||''))return;
+  if(Number(currentAttemptNo||0)!==Number(d.attemptNumber||0))return;
+
+  releaseEvalWakeLock();
+  openClass(d.classId);
+  alert('ATTEMPT VOIDED ON SERVER\n\nThis assessment was voided from another RaPS session. The obsolete local working copy was removed. You may start the attempt again if needed.');
+});
+
 renderHome();
 })();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.11-web.4';
+  const UPDATE_BUILD = '3.4.11-web.5';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
