@@ -865,9 +865,10 @@ function openEvaluation(studentId,attemptNo){
     return;
   }
   const existing=s.attempts?.[String(attemptNo)];
-  if(existing){
+  const unstartedCloudShell=!!(existing?.cloudShellOnly && !existing.startedAt && String(existing.cloudStatus||'draft')==='draft');
+  if(existing&&!unstartedCloudShell){
     if(existing.cloudShellOnly){
-      alert('This attempt shell was synced from another device. Criterion-level grades, timers, notes, and final result are not cloud-synced yet in this phase. Open the originating device for the full evaluation record.');
+      alert('This assessment exists in the cloud but has not finished hydrating on this device. Use Sync Classes, then reopen it. RaPS will not create a duplicate local assessment.');
       return;
     }
     currentStudentId=studentId;currentAttemptNo=attemptNo;renderEval();showView('evalView');requestEvalWakeLock();return;
@@ -891,6 +892,7 @@ function openEvaluation(studentId,attemptNo){
     let claimClient=null,claimedId='';
     try{
       const candidate=makeAttempt(c,s,attemptNo);
+      if(unstartedCloudShell&&existing?.id)candidate.id=existing.id;
       if(attemptNo===2)candidate.remediation={reason,action,at:now()};
       const claim=await claimEvaluationOnServer(c,s,candidate);
       claimClient=claim.client;
