@@ -603,3 +603,49 @@ body.cloudActivationLocked{overflow:hidden}
   .activeEvaluationLockBanner{align-items:stretch;flex-direction:column}
   .activeEvaluationLockBanner .action{width:100%}
 }
+
+/* RaPS PWA update notification — v3.4.11-web.4 */
+.rapsUpdateBanner{
+  position:fixed;
+  left:50%;
+  bottom:max(16px,env(safe-area-inset-bottom));
+  transform:translateX(-50%);
+  z-index:10000;
+  width:min(760px,calc(100vw - 24px));
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  padding:14px 16px;
+  border:1px solid rgba(255,255,255,.18);
+  border-radius:14px;
+  background:#101b25;
+  box-shadow:0 14px 40px rgba(0,0,0,.38);
+}
+.rapsUpdateBannerCopy{
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+  min-width:0;
+}
+.rapsUpdateBannerCopy strong{
+  font-size:.95rem;
+}
+.rapsUpdateBannerCopy span{
+  font-size:.82rem;
+  opacity:.84;
+}
+.rapsUpdateBanner button:disabled{
+  opacity:.55;
+  cursor:not-allowed;
+}
+@media (max-width:640px){
+  .rapsUpdateBanner{
+    align-items:stretch;
+    flex-direction:column;
+  }
+  .rapsUpdateBanner button{
+    width:100%;
+  }
+}
+
