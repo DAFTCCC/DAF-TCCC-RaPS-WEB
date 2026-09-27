@@ -35,6 +35,26 @@ function finalResult(a){
 function attemptState(a){a.cloudGrading=a.cloudGrading||{status:'local',error:'',lastSyncedAt:0,remoteModifiedAt:0};return a.cloudGrading}
 function persist(){getStore()?.persistCloudMerge?.()}
 function patchAttempt(a,patch){a.cloudGrading={...attemptState(a),...patch};persist()}
+function removeLocalAttemptByEvaluationId(c,s,evaluationId){
+  if(!s?.attempts||!evaluationId)return false;
+  let removed=false,attemptNumber=null;
+  for(const [key,attempt] of Object.entries(s.attempts)){
+    if(!attempt||String(attempt.id||'')!==String(evaluationId))continue;
+    if(attemptNumber===null)attemptNumber=Number(attempt.attemptNo||key||1);
+    delete s.attempts[key];
+    removed=true;
+  }
+  if(removed){
+    persist();
+    window.dispatchEvent(new CustomEvent('raps-evaluation-tombstoned',{detail:{
+      classId:c?.id||'',
+      participantId:s?.id||'',
+      evaluationId:String(evaluationId),
+      attemptNumber:Number(attemptNumber||1)
+    }}));
+  }
+  return removed;
+}
 
 async function curriculumIdFor(c){
   const courseMap={'1':'ASM','2':'CLS','3':'CMC','4':'CPP'};
@@ -236,6 +256,13 @@ async function pullEvaluation(c,s,a){
     .eq('id',a.id).maybeSingle();
   if(error)throw error;if(!row)return false;
 
+  // VOID is a server tombstone, not a resumable evaluation. Remove only
+  // the matching local evaluation UUID; never delete a newer replacement
+  // attempt that happens to reuse the same A1/A2 attempt number.
+  if(String(row.status||'').toLowerCase()==='voided'){
+    return removeLocalAttemptByEvaluationId(c,s,row.id);
+  }
+
   const remoteMs=ms(row.client_modified_at||row.updated_at);
   const localMs=Number(a.modifiedAt||0);
   const state=attemptState(a);
@@ -344,6 +371,6 @@ window.addEventListener('online',()=>syncAll());
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.11-web.4';
+window.RAPS_GRADING_SYNC_BUILD='3.4.11-web.5';
 window.RAPS_GRADING_SYNC=Object.freeze({syncAll,pushEvaluation,pullEvaluation,pullAll,pushAll});
 })();
