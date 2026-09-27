@@ -364,21 +364,52 @@ async function pullRosterAndShells() {
     .in('event_id', eventIds);
   if (evalError) throw evalError;
 
-  const participantIds = [...new Set((evals || []).map(e => e.participant_id).filter(Boolean))];
-  let participants = [];
-  if (participantIds.length) {
+  // Pull the full class roster even when participants do not yet have
+  // evaluation rows.  pushParticipants() persists app_data.classId for
+  // this purpose; relying only on evaluations made fresh rosters invisible
+  // on a second device until somebody started an assessment.
+  const participants = [];
+  for (const classId of classIds) {
     const { data, error } = await client
       .from('participants')
-      .select('id, participant_identifier, display_name, home_base_id, updated_at, client_modified_at, source_device_id, app_data')
-      .in('id', participantIds);
+      .select('id, participant_identifier, display_name, home_base_id, created_at, updated_at, client_modified_at, source_device_id, app_data')
+      .eq('app_data->>classId', classId);
     if (error) throw error;
-    participants = data || [];
+    participants.push(...(data || []));
   }
 
   const participantById = new Map(participants.map(p => [p.id, p]));
   const eventById = new Map((events || []).map(e => [e.id, e]));
   let participantImports = 0;
   let evaluationImports = 0;
+
+  // Hydrate roster members before attaching evaluation shells.
+  for (const p of participants) {
+    const app = p.app_data && typeof p.app_data === 'object' ? p.app_data : {};
+    const c = store.getClass(app.classId);
+    if (!c) continue;
+
+    let s = (c.students || []).find(x => x.id === p.id);
+    if (!s) {
+      s = {
+        id:p.id,
+        classId:c.id,
+        name:p.display_name || app.trainingId || 'Cloud participant',
+        rank:app.rank || '',
+        trainingId:app.trainingId || '',
+        appVersion:app.appVersion || window.TCCC_BUILD?.versionName || '',
+        contentVersion:app.contentVersion || c.contentVersion || '',
+        createdAt:msFromIso(p.created_at || p.client_modified_at || p.updated_at) || Date.now(),
+        modifiedAt:msFromIso(p.client_modified_at || p.updated_at) || Date.now(),
+        deviceId:'',
+        lastModifiedDeviceId:p.source_device_id || '',
+        syncStatus:'CLOUD',
+        attempts:{}
+      };
+      c.students.push(s);
+      participantImports++;
+    }
+  }
 
   for (const row of evals || []) {
     const event = eventById.get(row.event_id);
@@ -502,6 +533,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.2';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.3';
 
 })();
