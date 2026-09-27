@@ -21,6 +21,35 @@ function msFromIso(value) {
   const n = value ? Date.parse(value) : NaN;
   return Number.isFinite(n) ? n : 0;
 }
+function isVoidedEvaluation(row) {
+  return String(row?.status || '').toLowerCase() === 'voided';
+}
+function removeLocalAttemptByEvaluationId(c, s, evaluationId) {
+  if (!s?.attempts || !evaluationId) return false;
+
+  let removed = false;
+  let attemptNumber = null;
+
+  for (const [key, a] of Object.entries(s.attempts)) {
+    if (!a || String(a.id || '') !== String(evaluationId)) continue;
+    if (attemptNumber === null) attemptNumber = Number(a.attemptNo || key || 1);
+    delete s.attempts[key];
+    removed = true;
+  }
+
+  if (removed) {
+    window.dispatchEvent(new CustomEvent('raps-evaluation-tombstoned', {
+      detail: {
+        classId: c?.id || '',
+        participantId: s.id || '',
+        evaluationId: String(evaluationId),
+        attemptNumber: Number(attemptNumber || 1)
+      }
+    }));
+  }
+
+  return removed;
+}
 function eventStatus(c) {
   if (c?.closedAt || c?.status === 'closed') return 'closed';
   const started = (c?.students || []).some(s => Object.values(s.attempts || {}).some(a => a?.startedAt));
@@ -192,7 +221,11 @@ async function pushEvaluationShells(c, refs) {
 
   for (const s of c.students || []) {
     for (const [attemptKey, a] of Object.entries(s.attempts || {})) {
-      if (!a?.id) continue;
+      if (
+        !a?.id
+        || a?.voidedAt
+        || String(a?.cloudStatus || '').toLowerCase() === 'voided'
+      ) continue;
       candidates.push({ s, attemptKey, a });
     }
   }
@@ -295,6 +328,7 @@ async function pushClassRosterAndShells(c) {
 }
 
 function makeShellAttempt(row, c, s) {
+  if (isVoidedEvaluation(row)) return null;
   const startedMs = msFromIso(row.started_at) || null;
   const modifiedMs = msFromIso(row.client_modified_at || row.updated_at) || Date.now();
   return {
@@ -382,6 +416,7 @@ async function pullRosterAndShells() {
   const eventById = new Map((events || []).map(e => [e.id, e]));
   let participantImports = 0;
   let evaluationImports = 0;
+  let evaluationTombstones = 0;
 
   // Hydrate roster members before attaching evaluation shells.
   for (const p of participants) {
@@ -411,7 +446,28 @@ async function pullRosterAndShells() {
     }
   }
 
+  // Apply server VOID rows first as tombstones. A tombstone removes only
+  // the exact local evaluation UUID it represents; a newer replacement
+  // attempt with the same attempt number but a different UUID is preserved.
   for (const row of evals || []) {
+    if (!isVoidedEvaluation(row)) continue;
+
+    const event = eventById.get(row.event_id);
+    const c = store.getClass(event?.class_id);
+    if (!c) continue;
+
+    const s = (c.students || []).find(x => x.id === row.participant_id);
+    if (!s) continue;
+
+    if (removeLocalAttemptByEvaluationId(c, s, row.id)) {
+      evaluationTombstones++;
+    }
+  }
+
+  // Only non-voided evaluations are eligible to become local cloud shells.
+  for (const row of evals || []) {
+    if (isVoidedEvaluation(row)) continue;
+
     const event = eventById.get(row.event_id);
     const c = store.getClass(event?.class_id);
     if (!c) continue;
@@ -444,12 +500,15 @@ async function pullRosterAndShells() {
     const key = String(row.attempt_number || 1);
     if (!s.attempts) s.attempts = {};
     if (!s.attempts[key]) {
-      s.attempts[key] = makeShellAttempt(row, c, s);
-      evaluationImports++;
+      const shell = makeShellAttempt(row, c, s);
+      if (shell) {
+        s.attempts[key] = shell;
+        evaluationImports++;
+      }
     }
   }
 
-  if (participantImports || evaluationImports) {
+  if (participantImports || evaluationImports || evaluationTombstones) {
     store.persistCloudMerge?.();
   }
 
@@ -461,7 +520,11 @@ async function pullRosterAndShells() {
     });
   }
 
-  return {participants:participantImports,evaluations:evaluationImports};
+  return {
+    participants: participantImports,
+    evaluations: evaluationImports,
+    tombstones: evaluationTombstones
+  };
 }
 
 async function syncAll({silent=false}={}) {
@@ -533,6 +596,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.4';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.5';
 
 })();
