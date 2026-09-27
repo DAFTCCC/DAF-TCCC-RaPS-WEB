@@ -476,7 +476,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.9-web.1';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.10-web.1';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,

@@ -357,6 +357,7 @@ function cloudSyncBadge(c){
 }
 function currentAccessRole(){return String(window.RAPS_CLOUD?.role||document.body?.dataset?.rapsRole||'');}
 function hasEnterpriseAccess(){return currentAccessRole()==='enterprise_admin';}
+function hasClassCloseAccess(){return ['program_manager','majcom_manager','enterprise_admin'].includes(currentAccessRole());}
 function currentCloudClient(){return window.RAPS_CLOUD?.client||window.RAPS_SUPABASE||null;}
 function archiveDate(value){if(!value)return '—';const d=new Date(value);return Number.isFinite(d.getTime())?d.toLocaleString():'—';}
 function archiveIntegrityShort(value){return value?String(value).slice(0,12)+'…':'—';}
@@ -604,7 +605,7 @@ function renderClass(){
   renderClassAnalytics(c,t);
   if($('analyticsScope'))$('analyticsScope').textContent=`${classAttempt1s(c).length} finalized A1 · normalized rates`;
   $('editClassBtn').disabled=closed;$('scenarioBtn').disabled=closed;$('addStudentBtn').disabled=closed;$('importRosterBtn').disabled=closed;
-  $('closeClassBtn').classList.toggle('hidden',closed);$('closeClassBtn').textContent='Verify & Close Class';$('closedBanner').classList.toggle('hidden',!closed);
+  const closeBtn=$('closeClassBtn'),canClose=hasClassCloseAccess();if(closeBtn){closeBtn.classList.toggle('hidden',closed||!canClose);closeBtn.disabled=!canClose;closeBtn.textContent='Verify & Close Class';}$('closedBanner').classList.toggle('hidden',!closed);
   const deleteBtn=$('deleteClassBtn');
   if(deleteBtn){
     deleteBtn.classList.toggle('hidden',!hasEnterpriseAccess());
@@ -694,6 +695,10 @@ async function syncClassForAuthoritativeClose(c){
 async function closeClass(){
   const c=cls();
   if(!c||isClassClosed(c))return;
+  if(!hasClassCloseAccess()){
+    alert('Class closure is limited to Program Managers, MAJCOM Managers, and Enterprise Administrators.');
+    return;
+  }
   const issues=closureIssues(c);
   if(issues.length){
     alert('Class cannot be closed yet:\n\n'+issues.slice(0,12).join('\n')+(issues.length>12?'\n+ '+(issues.length-12)+' more':'')+'\n\nFinalize or remove unresolved roster entries first.');
@@ -732,7 +737,7 @@ async function closeClass(){
     console.error('Authoritative class closure failed',error);
     alert('CLASS NOT CLOSED\n\n'+(error?.message||error)+'\n\nRaPS left the local class open. Resolve the sync or server issue and try again.');
   }finally{
-    if(btn&&!isClassClosed(c)){btn.disabled=false;btn.textContent='Verify & Close Class';}
+    if(btn&&!isClassClosed(c)){const canClose=hasClassCloseAccess();btn.disabled=!canClose;btn.classList.toggle('hidden',!canClose);btn.textContent='Verify & Close Class';}
   }
 }
 async function deleteClass(){
