@@ -341,7 +341,7 @@ async function pullEvaluation(c,s,a){
 
 async function pullAll(){
   const store=getStore();if(!store)return 0;let n=0;
-  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled && !x?.closedAt && x?.status!=='closed')){
+  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled)){
     for(const s of c.students||[]){
       for(const a of Object.values(s.attempts||{})){
         if(!a?.id)continue;
@@ -353,7 +353,7 @@ async function pullAll(){
 }
 async function pushAll(){
   const store=getStore();if(!store)return 0;let n=0;
-  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled)){
+  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled && !x?.closedAt && x?.status!=='closed')){
     for(const s of c.students||[]){
       for(const a of Object.values(s.attempts||{})){
         if(!a?.id||a.cloudShellOnly)continue;
