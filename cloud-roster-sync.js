@@ -13,7 +13,9 @@ function shortError(error) {
   return String(error?.message || error || 'Unknown sync error').slice(0, 240);
 }
 function isoFromMs(ms) {
-  return Number.isFinite(Number(ms)) ? new Date(Number(ms)).toISOString() : null;
+  if (ms === null || ms === undefined || ms === '') return null;
+  const n = Number(ms);
+  return Number.isFinite(n) ? new Date(n).toISOString() : null;
 }
 function msFromIso(value) {
   const n = value ? Date.parse(value) : NaN;
@@ -497,6 +499,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.5-web.1';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.1';
 
 })();
