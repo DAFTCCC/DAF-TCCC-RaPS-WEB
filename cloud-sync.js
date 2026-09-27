@@ -23,6 +23,9 @@ function msFromIso(value) {
 function shortError(error) {
   return String(error?.message || error || 'Unknown sync error').slice(0, 240);
 }
+function isClosedClass(c) {
+  return !!c && (!!c.closedAt || c.status === 'closed');
+}
 function setGlobalStatus(text, mode='') {
   const el = document.getElementById('classSyncStatus');
   if (!el) return;
@@ -147,6 +150,35 @@ async function pushClassUnlocked(c) {
   const cloud = getCloud();
   if (!client || !cloud?.user?.id) return false;
 
+  // Closed classes are server-authoritative retention records. Never push
+  // local metadata back into a closed class, even if a background sync path
+  // calls this function directly.
+  if (isClosedClass(c)) {
+    patchState(c.id, {
+      enabled:true,
+      status:'synced',
+      error:'',
+      lastSyncedAt:Date.now()
+    });
+    return true;
+  }
+
+  // A stale browser may still think the class is open. Check the server
+  // before writing so an authoritative completed class is pull-only.
+  const existing = await fetchRemoteById(c.id);
+  if (existing?.status === 'completed') {
+    const remoteMs = msFromIso(existing.client_modified_at || existing.updated_at);
+    patchState(c.id, {
+      enabled:true,
+      status:'synced',
+      error:'',
+      createdBy:existing.created_by || c.cloudSync?.createdBy || '',
+      lastSyncedAt:Date.now(),
+      remoteModifiedAt:remoteMs
+    });
+    return true;
+  }
+
   const loadedRefs = await loadRefs();
   const base = resolveBaseForClass(c, loadedRefs);
   const curriculum = resolveCurriculumForClass(c, loadedRefs);
@@ -172,7 +204,6 @@ async function pushClassUnlocked(c) {
 
   patchState(c.id, { enabled:true, status:'syncing', error:'', lastAttemptAt:Date.now() });
 
-  const existing = await fetchRemoteById(c.id);
   const localModified = Number(c.modifiedAt || c.createdAt || Date.now());
   const remoteModified = msFromIso(existing?.client_modified_at || existing?.updated_at);
   const lastRemoteSeen = Number(c.cloudSync?.remoteModifiedAt || 0);
@@ -386,6 +417,7 @@ async function pushPendingClasses() {
   if (!store) return { attempted:0, synced:0 };
   const classes = store.getClasses().filter(c =>
     c?.cloudSync?.enabled === true &&
+    !isClosedClass(c) &&
     ['pending','offline','error'].includes(c.cloudSync?.status || '')
   );
 
@@ -438,6 +470,15 @@ function queueClass(classId) {
   const store = getStore();
   const c = store?.getClass(classId);
   if (!c) return;
+  if (isClosedClass(c)) {
+    patchState(classId, {
+      enabled:true,
+      status:'synced',
+      error:'',
+      lastSyncedAt:Date.now()
+    });
+    return;
+  }
   patchState(classId, {
     enabled:true,
     status:navigator.onLine ? 'pending' : 'offline',
@@ -493,7 +534,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.6';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.7';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,
