@@ -24,6 +24,20 @@ function msFromIso(value) {
 function isVoidedEvaluation(row) {
   return String(row?.status || '').toLowerCase() === 'voided';
 }
+function isClosedClass(c) {
+  return !!c && (!!c.closedAt || c.status === 'closed');
+}
+async function remoteClassIsClosed(classId) {
+  const client = getClient();
+  if (!client || !classId) return false;
+  const { data, error } = await client
+    .from('classes')
+    .select('status')
+    .eq('id', classId)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.status === 'completed';
+}
 function reconcileClassLifecycleFromEvaluations(classes, events, evaluations) {
   const classIdByEventId = new Map(
     (events || []).map(event => [String(event.id), String(event.class_id || '')])
@@ -316,6 +330,17 @@ async function pushClassRosterAndShells(c) {
   if (!client || !cloud?.user?.id || !c?.id) return false;
   if (!navigator.onLine) return false;
 
+  // Closed classes are retention records. All normal browser synchronization
+  // becomes pull-only after authoritative closure.
+  if (isClosedClass(c) || await remoteClassIsClosed(c.id)) {
+    getStore()?.patchRosterCloudState?.(c.id, {
+      status:'synced',
+      error:'',
+      lastSyncedAt:Date.now()
+    });
+    return true;
+  }
+
   if (rosterPushInFlight.has(c.id)) {
     return rosterPushInFlight.get(c.id);
   }
@@ -577,7 +602,7 @@ async function syncAll({silent=false}={}) {
   busy = true;
   try {
     await pullRosterAndShells();
-    for (const c of store.getClasses().filter(x => x?.cloudSync?.enabled)) {
+    for (const c of store.getClasses().filter(x => x?.cloudSync?.enabled && !isClosedClass(x))) {
       try {
         await pushClassRosterAndShells(c);
       } catch (error) {
@@ -598,6 +623,14 @@ window.addEventListener('raps-local-class-change', event => {
   const id = event.detail?.classId;
   const c = getStore()?.getClass(id);
   if (!c || !c.cloudSync?.enabled) return;
+  if (isClosedClass(c)) {
+    getStore()?.patchRosterCloudState?.(id,{
+      status:'synced',
+      error:'',
+      lastSyncedAt:Date.now()
+    });
+    return;
+  }
   getStore()?.patchRosterCloudState?.(id,{
     status:navigator.onLine?'pending':'offline',
     error:''
@@ -631,6 +664,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.6';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.7';
 
 })();
