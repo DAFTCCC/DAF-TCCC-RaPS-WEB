@@ -1,9 +1,9 @@
-const CACHE_NAME = 'tccc-eval-web-v3-4-11-web-3-r1';
-const VERSION = '3.4.11-web.3';
+const CACHE_NAME = 'tccc-eval-web-v3-4-11-web-4-r1';
+const VERSION = '3.4.11-web.4';
 const SHELL = [
   './', './index.html',
   `./styles.css?v=${VERSION}`, `./version.js?v=${VERSION}`,
-  `./tiers.js?v=${VERSION}`, `./branding.js?v=${VERSION}`, `./supabase-config.js?v=${VERSION}`, `./cloud-auth.js?v=${VERSION}`, `./cloud-sync.js?v=${VERSION}`, `./cloud-roster-sync.js?v=${VERSION}`, `./cloud-grading-sync.js?v=${VERSION}`, `./admin-ui.js?v=3.4.11-web.3-r2`, `./program-manager-dashboard.js?v=${VERSION}`, `./majcom-manager-dashboard.js?v=${VERSION}`, `./enterprise-dashboard.js?v=${VERSION}`,
+  `./tiers.js?v=${VERSION}`, `./branding.js?v=${VERSION}`, `./supabase-config.js?v=${VERSION}`, `./cloud-auth.js?v=${VERSION}`, `./cloud-sync.js?v=${VERSION}`, `./cloud-roster-sync.js?v=${VERSION}`, `./cloud-grading-sync.js?v=${VERSION}`, `./admin-ui.js?v=3.4.11-web.4-r2`, `./program-manager-dashboard.js?v=${VERSION}`, `./majcom-manager-dashboard.js?v=${VERSION}`, `./enterprise-dashboard.js?v=${VERSION}`,
   `./installations.js?v=${VERSION}`, `./app.js?v=${VERSION}`,
   './manifest.webmanifest', './assets/app-icon.png', './assets/icon-192.png',
   './assets/icon-512.png', './assets/splash-background.png'
@@ -15,8 +15,18 @@ self.addEventListener('install', event => event.waitUntil(
 ));
 self.addEventListener('activate', event => event.waitUntil(
   caches.keys()
-    .then(keys => Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))))
+    .then(keys => Promise.all(
+      keys
+        .filter(key => key.startsWith('tccc-eval-web-') && key !== CACHE_NAME)
+        .map(key => caches.delete(key))
+    ))
     .then(() => self.clients.claim())
+    .then(() => self.clients.matchAll({ type:'window', includeUncontrolled:true }))
+    .then(clients => {
+      for (const client of clients) {
+        client.postMessage({ type:'RAPS_SW_ACTIVATED', version:VERSION });
+      }
+    })
 ));
 self.addEventListener('fetch', event => {
   const request = event.request;
