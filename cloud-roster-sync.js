@@ -24,6 +24,29 @@ function msFromIso(value) {
 function isVoidedEvaluation(row) {
   return String(row?.status || '').toLowerCase() === 'voided';
 }
+function reconcileClassLifecycleFromEvaluations(classes, events, evaluations) {
+  const classIdByEventId = new Map(
+    (events || []).map(event => [String(event.id), String(event.class_id || '')])
+  );
+  const startedClassIds = new Set();
+
+  for (const row of evaluations || []) {
+    if (isVoidedEvaluation(row) || !row?.started_at) continue;
+    const classId = classIdByEventId.get(String(row.event_id || ''));
+    if (classId) startedClassIds.add(classId);
+  }
+
+  let changed = 0;
+  for (const c of classes || []) {
+    if (!c || c.deletedAt || c.closedAt || c.status === 'closed') continue;
+    const nextStatus = startedClassIds.has(String(c.id)) ? 'active' : 'draft';
+    if (c.status === nextStatus) continue;
+    c.status = nextStatus;
+    changed++;
+  }
+
+  return changed;
+}
 function removeLocalAttemptByEvaluationId(c, s, evaluationId) {
   if (!s?.attempts || !evaluationId) return false;
 
@@ -398,6 +421,17 @@ async function pullRosterAndShells() {
     .in('event_id', eventIds);
   if (evalError) throw evalError;
 
+  // Evaluation lifecycle is authoritative for whether an open class has
+  // started. A second browser may pull the class row while it still says
+  // "draft", then discover an already-started evaluation moments later.
+  // Reconcile the local lifecycle from non-voided started evaluations before
+  // the push phase so both the local UI and server class/event status converge.
+  const lifecycleChanges = reconcileClassLifecycleFromEvaluations(
+    classes,
+    events || [],
+    evals || []
+  );
+
   // Pull the full class roster even when participants do not yet have
   // evaluation rows.  pushParticipants() persists app_data.classId for
   // this purpose; relying only on evaluations made fresh rosters invisible
@@ -508,7 +542,7 @@ async function pullRosterAndShells() {
     }
   }
 
-  if (participantImports || evaluationImports || evaluationTombstones) {
+  if (participantImports || evaluationImports || evaluationTombstones || lifecycleChanges) {
     store.persistCloudMerge?.();
   }
 
@@ -523,7 +557,8 @@ async function pullRosterAndShells() {
   return {
     participants: participantImports,
     evaluations: evaluationImports,
-    tombstones: evaluationTombstones
+    tombstones: evaluationTombstones,
+    lifecycleChanges
   };
 }
 
@@ -596,6 +631,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.5';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.6';
 
 })();
