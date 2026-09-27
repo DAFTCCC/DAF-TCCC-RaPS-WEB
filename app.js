@@ -1734,10 +1734,244 @@ renderHome();
 })();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
-if ('serviceWorker' in navigator && window.isSecureContext) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
-      .catch(e => console.warn('Service worker registration failed', e));
+(function initRapsPwaUpdateManager(){
+  const UPDATE_BUILD = '3.4.11-web.4';
+  const MIN_CHECK_INTERVAL_MS = 60 * 1000;
+  const PERIODIC_CHECK_MS = 15 * 60 * 1000;
+
+  let registration = null;
+  let lastCheckAt = 0;
+  let pendingVersion = '';
+  let safeReloadWatcher = null;
+  let reloadStarted = false;
+
+  function loadedVersion(){
+    return String(window.TCCC_BUILD?.versionName || '').trim();
+  }
+
+  function assessmentIsOpen(){
+    const view = document.getElementById('evalView');
+    return !!view && !view.classList.contains('hidden');
+  }
+
+  function reloadKey(version){
+    return `raps-pwa-update-reload:${version}`;
+  }
+
+  function removeBanner(){
+    document.getElementById('rapsUpdateBanner')?.remove();
+    if (safeReloadWatcher) {
+      clearInterval(safeReloadWatcher);
+      safeReloadWatcher = null;
+    }
+  }
+
+  function showUpdateBanner(version){
+    pendingVersion = version;
+
+    let banner = document.getElementById('rapsUpdateBanner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'rapsUpdateBanner';
+      banner.className = 'rapsUpdateBanner';
+      banner.setAttribute('role', 'status');
+      banner.setAttribute('aria-live', 'polite');
+
+      const copy = document.createElement('div');
+      copy.className = 'rapsUpdateBannerCopy';
+
+      const title = document.createElement('strong');
+      title.textContent = 'RaPS update ready';
+
+      const message = document.createElement('span');
+      message.id = 'rapsUpdateBannerMessage';
+
+      copy.append(title, message);
+
+      const button = document.createElement('button');
+      button.id = 'rapsUpdateReloadBtn';
+      button.type = 'button';
+      button.className = 'action primary compact';
+      button.textContent = 'Reload & Update';
+      button.addEventListener('click', () => {
+        if (assessmentIsOpen()) return;
+        try { sessionStorage.removeItem(reloadKey(pendingVersion)); } catch {}
+        location.reload();
+      });
+
+      banner.append(copy, button);
+      document.body.appendChild(banner);
+    }
+
+    const message = document.getElementById('rapsUpdateBannerMessage');
+    const button = document.getElementById('rapsUpdateReloadBtn');
+    const active = assessmentIsOpen();
+
+    if (message) {
+      message.textContent = active
+        ? `v${version} is ready. Finish or void the current assessment; RaPS will update when it is safe.`
+        : `v${version} is ready. Reload to use the latest release.`;
+    }
+
+    if (button) {
+      button.disabled = active;
+      button.title = active ? 'Finish or void the current assessment before updating.' : '';
+    }
+
+    if (!safeReloadWatcher) {
+      safeReloadWatcher = setInterval(() => {
+        if (!pendingVersion) return;
+        if (!assessmentIsOpen()) {
+          clearInterval(safeReloadWatcher);
+          safeReloadWatcher = null;
+          applyAvailableVersion(pendingVersion);
+        } else {
+          const b = document.getElementById('rapsUpdateReloadBtn');
+          if (b) b.disabled = true;
+        }
+      }, 1000);
+    }
+  }
+
+  function applyAvailableVersion(version){
+    version = String(version || '').trim();
+    if (!version) return;
+
+    const loaded = loadedVersion();
+    window.RAPS_PWA_UPDATE_STATE = Object.freeze({
+      loadedVersion: loaded,
+      availableVersion: version,
+      updateReady: !!loaded && version !== loaded
+    });
+
+    if (!loaded || version === loaded) {
+      pendingVersion = '';
+      removeBanner();
+      try { sessionStorage.removeItem(reloadKey(version)); } catch {}
+      return;
+    }
+
+    pendingVersion = version;
+
+    if (assessmentIsOpen()) {
+      showUpdateBanner(version);
+      return;
+    }
+
+    let alreadyReloaded = false;
+    try {
+      alreadyReloaded = sessionStorage.getItem(reloadKey(version)) === '1';
+    } catch {}
+
+    if (alreadyReloaded || reloadStarted) {
+      showUpdateBanner(version);
+      return;
+    }
+
+    reloadStarted = true;
+    try { sessionStorage.setItem(reloadKey(version), '1'); } catch {}
+    location.reload();
+  }
+
+  async function fetchLatestVersion(){
+    const url = new URL('./version.js', location.href);
+    url.searchParams.set('v', String(Date.now()));
+
+    const response = await fetch(url.href, {
+      cache: 'no-store',
+      credentials: 'same-origin'
+    });
+
+    if (!response.ok) {
+      throw new Error(`Version check failed with HTTP ${response.status}`);
+    }
+
+    const body = await response.text();
+    const match = body.match(/versionName\s*:\s*['"]([^'"]+)['"]/);
+    return match?.[1]?.trim() || '';
+  }
+
+  async function checkForUpdate({force=false}={}){
+    if (!navigator.onLine) return null;
+
+    const now = Date.now();
+    if (!force && now - lastCheckAt < MIN_CHECK_INTERVAL_MS) return null;
+    lastCheckAt = now;
+
+    try {
+      if (registration) {
+        await registration.update();
+      }
+
+      const latest = await fetchLatestVersion();
+      if (latest) applyAvailableVersion(latest);
+      return latest || null;
+    } catch (error) {
+      console.warn('RaPS update check failed', error);
+      return null;
+    }
+  }
+
+  function bindRegistration(reg){
+    registration = reg;
+
+    reg.addEventListener('updatefound', () => {
+      const worker = reg.installing;
+      if (!worker) return;
+
+      worker.addEventListener('statechange', () => {
+        if (worker.state === 'installed' || worker.state === 'activated') {
+          window.setTimeout(() => checkForUpdate({force:true}), 100);
+        }
+      });
+    });
+  }
+
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      window.setTimeout(() => checkForUpdate({force:true}), 100);
+    });
+
+    navigator.serviceWorker.addEventListener('message', event => {
+      if (event.data?.type === 'RAPS_SW_ACTIVATED' && event.data?.version) {
+        applyAvailableVersion(event.data.version);
+      }
+    });
+
+    window.addEventListener('load', async () => {
+      try {
+        const reg = await navigator.serviceWorker.register('./sw.js', {
+          updateViaCache: 'none'
+        });
+        bindRegistration(reg);
+        await checkForUpdate({force:true});
+      } catch (error) {
+        console.warn('Service worker registration failed', error);
+      }
+    });
+
+    window.addEventListener('online', () => checkForUpdate({force:true}));
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') checkForUpdate();
+    });
+
+    window.addEventListener('focus', () => checkForUpdate());
+
+    window.setInterval(() => {
+      if (document.visibilityState === 'visible') checkForUpdate();
+    }, PERIODIC_CHECK_MS);
+  }
+
+  window.RAPS_PWA_UPDATE_BUILD = UPDATE_BUILD;
+  window.RAPS_PWA_UPDATE = Object.freeze({
+    checkNow: () => checkForUpdate({force:true}),
+    getState: () => window.RAPS_PWA_UPDATE_STATE || {
+      loadedVersion: loadedVersion(),
+      availableVersion: '',
+      updateReady: false
+    }
   });
-}
+})();
+
 if (navigator.storage?.persist) navigator.storage.persist().catch(() => false);
