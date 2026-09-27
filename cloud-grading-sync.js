@@ -90,6 +90,20 @@ async function pushEvaluation(c,s,a){
   const client=getClient(),cloud=getCloud();
   if(!client||!cloud?.user?.id||!navigator.onLine)return false;
 
+  // Closed classes are server-authoritative retention records. Never write
+  // grading data after closure, including from a stale browser.
+  if(c?.closedAt||c?.status==='closed'){
+    patchAttempt(a,{status:'synced',error:'',lastSyncedAt:Date.now()});
+    return true;
+  }
+  const {data:classRow,error:classError}=await client.from('classes')
+    .select('status').eq('id',c.id).maybeSingle();
+  if(classError)throw classError;
+  if(classRow?.status==='completed'){
+    patchAttempt(a,{status:'conflict',error:'Class is closed on the server. Pull authoritative state before continuing.'});
+    return false;
+  }
+
   // Terminal lifecycle is server-authoritative in v3.4.11+.
   // Criteria/timers are pushed before finalize/void; once the server marks
   // the parent terminal, background sync must not attempt a direct rewrite.
@@ -327,7 +341,7 @@ async function pullEvaluation(c,s,a){
 
 async function pullAll(){
   const store=getStore();if(!store)return 0;let n=0;
-  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled)){
+  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled && !x?.closedAt && x?.status!=='closed')){
     for(const s of c.students||[]){
       for(const a of Object.values(s.attempts||{})){
         if(!a?.id)continue;
@@ -371,6 +385,6 @@ window.addEventListener('online',()=>syncAll());
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.11-web.6';
+window.RAPS_GRADING_SYNC_BUILD='3.4.11-web.7';
 window.RAPS_GRADING_SYNC=Object.freeze({syncAll,pushEvaluation,pullEvaluation,pullAll,pushAll});
 })();
