@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tccc-eval-web-v3-4-11-web-5-r1';
+const CACHE_NAME = 'tccc-eval-web-v3-4-11-web-6-r1';
 const VERSION = '3.4.11-web.6';
 const SHELL = [
   './', './index.html',
