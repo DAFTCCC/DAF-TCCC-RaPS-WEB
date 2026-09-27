@@ -359,6 +359,46 @@ function currentAccessRole(){return String(window.RAPS_CLOUD?.role||document.bod
 function hasEnterpriseAccess(){return currentAccessRole()==='enterprise_admin';}
 function hasClassCloseAccess(){return ['program_manager','majcom_manager','enterprise_admin'].includes(currentAccessRole());}
 function currentCloudClient(){return window.RAPS_CLOUD?.client||window.RAPS_SUPABASE||null;}
+function authoritativeEvaluationClient(action='Evaluation action'){
+  const cloud=window.RAPS_CLOUD,client=currentCloudClient();
+  if(!navigator.onLine)throw new Error(`${action} requires an online connection so RaPS can preserve the server-authoritative evaluator lock.`);
+  if(!cloud?.user?.id||!client)throw new Error(`${action} requires an authenticated RaPS cloud session.`);
+  return client;
+}
+function serverTimeMs(value,fallback=now()){
+  const n=value?Date.parse(value):NaN;
+  return Number.isFinite(n)?n:fallback;
+}
+function serverActiveEvaluationText(data){
+  const eventId=data?.existingEventId||data?.eventId||'';
+  const participantId=data?.existingParticipantId||data?.participantId||'';
+  const attemptNo=Number(data?.existingAttemptNumber||data?.attemptNumber||1);
+  const c=(db.classes||[]).find(x=>String(x.id)===String(eventId));
+  const s=c?.students?.find(x=>String(x.id)===String(participantId));
+  if(c&&s)return `${s.rank?`${s.rank} `:''}${s.name||'Student'} · Attempt ${attemptNo} · ${c.name||'Class'}`;
+  return `Server evaluation ${data?.existingEvaluationId||data?.evaluationId||'already active'} · Attempt ${attemptNo}`;
+}
+async function claimEvaluationOnServer(c,s,a){
+  const client=authoritativeEvaluationClient('Starting a new assessment');
+  if(!window.RAPS_ROSTER_SYNC?.pushClassRosterAndShells)throw new Error('Cloud roster synchronization is not ready. Reload RaPS and try again.');
+  await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c);
+  const {data:eventRow,error:eventError}=await client.from('evaluation_events')
+    .select('id,curriculum_version_id,status')
+    .eq('id',c.id)
+    .maybeSingle();
+  if(eventError)throw eventError;
+  if(!eventRow?.curriculum_version_id)throw new Error('The authoritative evaluation event is not ready on the server.');
+  const {data,error}=await client.rpc('claim_evaluation_authoritatively',{
+    p_evaluation_id:a.id,
+    p_event_id:c.id,
+    p_participant_id:s.id,
+    p_curriculum_version_id:eventRow.curriculum_version_id,
+    p_attempt_number:Number(a.attemptNo||1),
+    p_source_device_id:db.deviceId||null
+  });
+  if(error)throw error;
+  return {client,data};
+}
 function archiveDate(value){if(!value)return '—';const d=new Date(value);return Number.isFinite(d.getTime())?d.toLocaleString():'—';}
 function archiveIntegrityShort(value){return value?String(value).slice(0,12)+'…':'—';}
 function renderHome(){
@@ -838,7 +878,67 @@ function openEvaluation(studentId,attemptNo){
   const remediationFields=attemptNo===2?`<div class="remediationStart"><label><span>Remediation reason *</span><select id="remediationReason" required><option value="">Select</option><option>Critical task failure</option><option>Knowledge gap</option><option>Skill execution gap</option><option>Sequencing / prioritization gap</option><option>Timing standard</option><option>Other</option></select></label><label><span>Corrective action completed / planned *</span><textarea id="remediationAction" rows="2" placeholder="e.g., coached repetition, deliberate practice, knowledge review"></textarea></label></div>`:'';
   $('formModalBody').innerHTML=`<div class="startGate"><p><b>${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</b></p><p>Tier ${esc(c.tierId)} · ${esc(c.name)}</p>${remediationFields}<div class="startWarning"><b>Evaluator ready check</b><br>Confirm the correct student, tier, scenario, and attempt before starting. The evaluation clock begins only after you press <b>Begin Assessment</b>.</div><label class="safetyAckRow"><input id="beginAttemptAck" type="checkbox"><span>I am ready to begin direct observation of this assessment.</span></label><div class="formActions"><button id="beginAttemptBtn" class="action primary" disabled>Begin Assessment</button></div></div>`;
   $('beginAttemptAck').onchange=e=>$('beginAttemptBtn').disabled=!e.target.checked;
-  $('beginAttemptBtn').onclick=()=>{const activeLock=findActiveEvaluationLock();if(activeLock&&!evaluationTargetMatchesLock(activeLock,c.id,studentId,attemptNo)){alert(`Another evaluation became active:\n\n${activeEvaluationLockText(activeLock)}\n\nFinalize or Void it first.`);closeModal('formModal');renderClass();return;}const reason=attemptNo===2?$('remediationReason').value.trim():'',action=attemptNo===2?$('remediationAction').value.trim():'';if(attemptNo===2&&(!reason||!action)){alert('Record the remediation reason and corrective action before starting Attempt 2.');return;}currentStudentId=studentId;currentAttemptNo=attemptNo;const st=ensureAttempt();if(!st){alert('Unable to start this attempt. Verify Attempt 1 remediation eligibility and class status.');return;}if(attemptNo===2)st.remediation={reason,action,at:now()};saveDb();closeModal('formModal');renderEval();showView('evalView');requestEvalWakeLock();};
+  $('beginAttemptBtn').onclick=async()=>{
+    const activeLock=findActiveEvaluationLock();
+    if(activeLock&&!evaluationTargetMatchesLock(activeLock,c.id,studentId,attemptNo)){
+      alert(`Another evaluation became active:\n\n${activeEvaluationLockText(activeLock)}\n\nFinalize or Void it first.`);
+      closeModal('formModal');renderClass();return;
+    }
+    const reason=attemptNo===2?$('remediationReason').value.trim():'',action=attemptNo===2?$('remediationAction').value.trim():'';
+    if(attemptNo===2&&(!reason||!action)){alert('Record the remediation reason and corrective action before starting Attempt 2.');return;}
+    const btn=$('beginAttemptBtn');
+    if(btn){btn.disabled=true;btn.textContent='CLAIMING ASSESSMENT…';}
+    let claimClient=null,claimedId='';
+    try{
+      const candidate=makeAttempt(c,s,attemptNo);
+      if(attemptNo===2)candidate.remediation={reason,action,at:now()};
+      const claim=await claimEvaluationOnServer(c,s,candidate);
+      claimClient=claim.client;
+      const data=claim.data||{};
+      if(!data.claimed){
+        const detail=serverActiveEvaluationText(data);
+        if(data.reason==='active_evaluation_exists'){
+          alert(`ASSESSMENT NOT STARTED\n\nYou already have an active server evaluation:\n\n${detail}\n\nFinalize or Void that evaluation before starting another. No local attempt was created.`);
+        }else if(data.reason==='evaluation_owned_by_other_evaluator'){
+          alert('ASSESSMENT NOT STARTED\n\nThis participant attempt is already owned by another evaluator. Refresh/sync the class or contact the program manager if the assignment is incorrect.');
+        }else{
+          alert(`ASSESSMENT NOT STARTED\n\nThe server did not grant the evaluator claim (${data.reason||'unknown reason'}). No local attempt was created.`);
+        }
+        return;
+      }
+      claimedId=String(data.evaluationId||candidate.id);
+      if(data.alreadyClaimed){
+        alert(`ASSESSMENT ALREADY ACTIVE\n\n${serverActiveEvaluationText(data)}\n\nRaPS found the authoritative assessment already in progress. Use Sync Classes to pull/resume that record instead of creating a second local attempt.`);
+        return;
+      }
+      candidate.id=claimedId;
+      candidate.startedAt=serverTimeMs(data.startedAt,candidate.startedAt||now());
+      candidate.serverClaimedAt=candidate.startedAt;
+      candidate.serverClaimedBy=currentCloudUserId();
+      candidate.serverClaimMode='authoritative-v1';
+      s.attempts=s.attempts||{};
+      currentStudentId=studentId;currentAttemptNo=attemptNo;
+      c.status='active';
+      s.attempts[String(attemptNo)]=candidate;
+      saveDb();
+      closeModal('formModal');
+      renderEval();showView('evalView');requestEvalWakeLock();
+    }catch(error){
+      console.error('Authoritative evaluation claim failed',error);
+      if(claimedId&&claimClient&&!s.attempts?.[String(attemptNo)]){
+        try{
+          await claimClient.rpc('void_evaluation_authoritatively',{
+            p_evaluation_id:claimedId,
+            p_reason:'Automatic release after local start failure',
+            p_source_device_id:db.deviceId||null
+          });
+        }catch{}
+      }
+      alert('ASSESSMENT NOT STARTED\n\n'+(error?.message||error)+'\n\nRaPS did not create a local evaluation.');
+    }finally{
+      if(btn&&document.body.contains(btn)){btn.textContent='Begin Assessment';btn.disabled=!$('beginAttemptAck')?.checked;}
+    }
+  };
   openModal('formModal');
 }
 function isObserveMode(st=evalState()){return st?.observeMode!==false;}
@@ -1187,16 +1287,93 @@ function reviewFinalize(){
   $('confirmFinalizeBtn').textContent=p.activeTimers.length?'Stop / resolve active timers':p.result==='INCOMPLETE'?'Resolve Items Before Finalizing':`Finalize ${p.result}`;
   openModal('reportModal');
 }
-function finalizeEvaluation(){ const st=evalState(),p=proficiency();if(p.result==='INCOMPLETE'){alert(p.activeTimers.length?'Stop or administratively resolve all active/paused timers before finalization.':'Resolve all required criteria and timing standards before finalization.');return;}if(!confirm(`Finalize this evaluation as ${p.result}? Finalized attempts become read-only and the evaluator lock will be released.`))return;st.finalizedAt=now();st.finalResult=p.result;event('Evaluation finalized',`${p.result} · ${p.score.percentText}`);saveDb();closeModal('reportModal');renderEval(); }
+async function finalizeEvaluation(){
+  const c=cls(),s=student(),st=evalState(),p=proficiency();
+  if(!c||!s||!st||st.finalizedAt)return;
+  if(p.result==='INCOMPLETE'){
+    alert(p.activeTimers.length?'Stop or administratively resolve all active/paused timers before finalization.':'Resolve all required criteria and timing standards before finalization.');
+    return;
+  }
+  if(!confirm(`Submit this evaluation for server verification?\n\nLocal review result: ${p.result}\nScore: ${p.score.percentText}\n\nThe server will independently validate completeness and derive the authoritative PASS/FAIL result. Finalized attempts become read-only and release the evaluator lock.`))return;
+  const btn=$('confirmFinalizeBtn');
+  if(btn){btn.disabled=true;btn.textContent='VERIFYING & FINALIZING…';}
+  try{
+    const client=authoritativeEvaluationClient('Finalizing an evaluation');
+    if(!window.RAPS_GRADING_SYNC?.pushEvaluation)throw new Error('Cloud grading synchronization is not ready. Reload RaPS and try again.');
+    const pushed=await window.RAPS_GRADING_SYNC.pushEvaluation(c,s,st);
+    if(!pushed)throw new Error(st.cloudGrading?.error||'The latest grading record did not synchronize to the server.');
+    const {data,error}=await client.rpc('finalize_evaluation_authoritatively',{
+      p_evaluation_id:st.id,
+      p_source_device_id:db.deviceId||null
+    });
+    if(error)throw error;
+    if(!data?.finalized){
+      const issues=Array.isArray(data?.issues)?data.issues:[];
+      const detail=issues.length?issues.slice(0,12).join('\n'):(data?.reason||'The server did not finalize this evaluation.');
+      alert('EVALUATION NOT FINALIZED\n\n'+detail+(issues.length>12?'\n+ '+(issues.length-12)+' more':'')+'\n\nThe local attempt remains editable.');
+      return;
+    }
+    st.finalizedAt=serverTimeMs(data.completedAt,now());
+    st.finalResult=String(data.result||p.result||'').toUpperCase();
+    st.serverFinalization={
+      mode:'server_authoritative',
+      finalizedAt:st.finalizedAt,
+      result:st.finalResult,
+      scoreNumerator:Number(data.scoreNumerator??p.score.pass??0),
+      scoreDenominator:Number(data.scoreDenominator??p.score.denom??0),
+      criticalFailureCount:Number(data.criticalFailureCount??0),
+      globalTimerNotMet:!!data.globalTimerNotMet
+    };
+    st.events.push({at:st.finalizedAt,elapsed:Math.max(0,st.finalizedAt-st.startedAt),label:'Evaluation finalized',detail:`Server-authoritative ${st.finalResult} · ${data.scoreNumerator??p.score.pass}/${data.scoreDenominator??p.score.denom}`});
+    saveDb();
+    closeModal('reportModal');
+    renderEval();
+    alert(`Evaluation finalized by the server as ${st.finalResult}.`);
+  }catch(error){
+    console.error('Authoritative evaluation finalization failed',error);
+    alert('EVALUATION NOT FINALIZED\n\n'+(error?.message||error)+'\n\nRaPS left the local attempt editable. Reconnect/sync and try again.');
+  }finally{
+    if(btn&&!st.finalizedAt){btn.disabled=false;btn.textContent=`Finalize ${p.result}`;}
+  }
+}
 
-function voidCurrentAttempt(){
+async function voidCurrentAttempt(){
   const c=cls(),s=student(),st=evalState();if(!c||!s||!st||st.finalizedAt||isClassClosed(c))return;
   const token=prompt(`VOID IN-PROGRESS ATTEMPT ${st.attemptNo}
 
-Use this only for an accidental or invalid start. This removes the unfinished local attempt.
+Use this only for an accidental or invalid start. RaPS will retain the synchronized server record as VOIDED and remove the unfinished attempt from this local working copy.
 
-Type VOID to continue.`);if(token!=='VOID')return;
-  delete s.attempts[String(st.attemptNo)];if(!hasStartedClass(c))c.status='draft';saveDb();releaseEvalWakeLock();openClass(c.id);
+Type VOID to continue.`);
+  if(token!=='VOID')return;
+  const btn=$('voidAttemptBtn');
+  if(btn){btn.disabled=true;btn.textContent='VOIDING…';}
+  try{
+    const client=authoritativeEvaluationClient('Voiding an evaluation');
+    if(!window.RAPS_GRADING_SYNC?.pushEvaluation)throw new Error('Cloud grading synchronization is not ready. Reload RaPS and try again.');
+    const pushed=await window.RAPS_GRADING_SYNC.pushEvaluation(c,s,st);
+    if(!pushed)throw new Error(st.cloudGrading?.error||'The current evaluation could not be synchronized before voiding.');
+    const {data,error}=await client.rpc('void_evaluation_authoritatively',{
+      p_evaluation_id:st.id,
+      p_reason:'Evaluator voided accidental or invalid in-progress attempt from RaPS v3.4.11-web.1',
+      p_source_device_id:db.deviceId||null
+    });
+    if(error)throw error;
+    if(!data?.voided){
+      alert(`ATTEMPT NOT VOIDED\n\n${data?.reason||'The server did not confirm the void.'}\n\nThe local attempt remains in progress.`);
+      return;
+    }
+    delete s.attempts[String(st.attemptNo)];
+    if(!hasStartedClass(c))c.status='draft';
+    saveDb();
+    releaseEvalWakeLock();
+    openClass(c.id);
+    alert('Attempt voided on the server. The local unfinished attempt was removed; synchronized server evidence remains retained as VOIDED.');
+  }catch(error){
+    console.error('Authoritative evaluation void failed',error);
+    alert('ATTEMPT NOT VOIDED\n\n'+(error?.message||error)+'\n\nRaPS kept the local attempt in progress.');
+  }finally{
+    if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent='Void In-Progress Attempt';}
+  }
 }
 
 // ---------- Export ----------
