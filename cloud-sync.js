@@ -7,6 +7,7 @@ const COURSE_TO_TIER = Object.freeze({ ASM:'1', CLS:'2', CMC:'3', CPP:'4' });
 let refs = null;
 let syncing = false;
 let lastIdentityUserId = null;
+const classPushTails = new Map();
 
 const getStore = () => window.RAPS_CLASS_STORE;
 const getCloud = () => window.RAPS_CLOUD;
@@ -141,7 +142,7 @@ async function fetchRemoteById(id) {
   return data || null;
 }
 
-async function pushClass(c) {
+async function pushClassUnlocked(c) {
   const client = getClient();
   const cloud = getCloud();
   if (!client || !cloud?.user?.id) return false;
@@ -201,18 +202,13 @@ async function pushClass(c) {
     source_device_id: getStore()?.deviceId?.() || null
   };
 
-  let result;
-
-  if (existing) {
-    result = await client
-      .from('classes')
-      .update(payload)
-      .eq('id', c.id);
-  } else {
-    result = await client
-      .from('classes')
-      .insert(payload);
-  }
+  // Use an idempotent upsert so simultaneous first-sync paths (class sync,
+  // roster sync, or another browser holding the same class UUID) cannot
+  // collide with a duplicate-key HTTP 409. The conflict/newer-cloud guard
+  // above still protects against overwriting a genuinely newer remote copy.
+  const result = await client
+    .from('classes')
+    .upsert(payload, { onConflict:'id' });
 
   if (result.error) {
     patchState(c.id, {
@@ -246,6 +242,27 @@ async function pushClass(c) {
     remoteModifiedAt: remoteMs
   });
   return true;
+}
+
+// Serialize writes per class instead of deduplicating them. If a second sync
+// request arrives while the first is running, it executes afterward and reads
+// the class's latest local state (for example draft -> active after A1 starts).
+// This prevents out-of-order writes from regressing lifecycle state.
+function pushClass(c) {
+  if (!c?.id) return Promise.resolve(false);
+
+  const previous = classPushTails.get(c.id) || Promise.resolve();
+  const task = previous
+    .catch(() => {})
+    .then(() => pushClassUnlocked(c));
+
+  classPushTails.set(c.id, task);
+
+  return task.finally(() => {
+    if (classPushTails.get(c.id) === task) {
+      classPushTails.delete(c.id);
+    }
+  });
 }
 
 function remoteToLocal(row, loadedRefs) {
@@ -476,7 +493,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.5';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.6';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,
