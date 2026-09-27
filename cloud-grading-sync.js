@@ -11,7 +11,7 @@ const getClient=()=>window.RAPS_SUPABASE;
 const getCloud=()=>window.RAPS_CLOUD;
 const getStore=()=>window.RAPS_CLASS_STORE;
 
-function iso(ms){return Number.isFinite(Number(ms))?new Date(Number(ms)).toISOString():null}
+function iso(ms){if(ms===null||ms===undefined||ms==='')return null;const n=Number(ms);return Number.isFinite(n)?new Date(n).toISOString():null}
 function ms(v){const n=v?Date.parse(v):NaN;return Number.isFinite(n)?n:0}
 function err(e){return String(e?.message||e||'Unknown sync error').slice(0,240)}
 function tierFor(c){return c?.tierSnapshot||window.TCCC_TIERS?.[String(c?.tierId||'')]||null}
@@ -69,6 +69,14 @@ function timerStandardMs(def){
 async function pushEvaluation(c,s,a){
   const client=getClient(),cloud=getCloud();
   if(!client||!cloud?.user?.id||!navigator.onLine)return false;
+
+  // Terminal lifecycle is server-authoritative in v3.4.11+.
+  // Criteria/timers are pushed before finalize/void; once the server marks
+  // the parent terminal, background sync must not attempt a direct rewrite.
+  if(a?.finalizedAt||a?.voidedAt){
+    patchAttempt(a,{status:'synced',error:'',lastSyncedAt:Date.now()});
+    return true;
+  }
 
   if(window.RAPS_ROSTER_SYNC?.pushClassRosterAndShells) await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c);
 
@@ -202,12 +210,12 @@ async function pushEvaluation(c,s,a){
 
   const {data:updated,error:updateError}=await client.from('evaluations').update({
     evaluator_id:remote?.evaluator_id||cloud.user.id,
-    status:evalStatus(a),
-    overall_result:finalResult(a),
+    status:a?.startedAt?'in_progress':'draft',
+    overall_result:null,
     score_numerator:sc.pass,
     score_denominator:sc.denom,
     started_at:iso(a.startedAt),
-    completed_at:iso(a.finalizedAt),
+    completed_at:null,
     app_data:appData,
     client_modified_at:iso(localMs),
     source_device_id:getStore()?.deviceId?.()||null
@@ -336,5 +344,6 @@ window.addEventListener('online',()=>syncAll());
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
+window.RAPS_GRADING_SYNC_BUILD='3.4.11-web.1';
 window.RAPS_GRADING_SYNC=Object.freeze({syncAll,pushEvaluation,pullEvaluation,pullAll,pushAll});
 })();
