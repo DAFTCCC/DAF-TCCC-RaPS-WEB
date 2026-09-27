@@ -295,11 +295,12 @@ async function pushClassRosterAndShells(c) {
 }
 
 function makeShellAttempt(row, c, s) {
-  const nowMs = msFromIso(row.started_at) || Date.now();
+  const startedMs = msFromIso(row.started_at) || null;
+  const modifiedMs = msFromIso(row.client_modified_at || row.updated_at) || Date.now();
   return {
     id: row.id,
     attemptNo: Number(row.attempt_number || 1),
-    startedAt: nowMs,
+    startedAt: startedMs,
     finalizedAt: null,
     finalResult: null,
     section: c.tierSnapshot?.sections?.[0]?.code || window.TCCC_TIERS?.[c.tierId]?.sections?.[0]?.code || 'CUF',
@@ -322,13 +323,15 @@ function makeShellAttempt(row, c, s) {
     overallNotes:'',
     showNt:false,
     appVersion: window.TCCC_BUILD?.versionName || '',
-    createdAt: nowMs,
-    modifiedAt: msFromIso(row.client_modified_at || row.updated_at) || nowMs,
+    createdAt: startedMs || modifiedMs,
+    modifiedAt: modifiedMs,
     deviceId:'',
     lastModifiedDeviceId: row.source_device_id || '',
     syncStatus:'CLOUD_SHELL',
     classId:c.id,
     participantId:s.id,
+    cloudStatus:String(row.status||'draft'),
+    cloudEvaluatorUserId:row.evaluator_id||'',
     curriculumId:c.curriculumId || `TCCC-TIER${c.tierId}`,
     contentVersion:c.contentVersion || '',
     scenarioVersion:c.scenarioVersion || '1',
@@ -357,7 +360,7 @@ async function pullRosterAndShells() {
 
   const { data: evals, error: evalError } = await client
     .from('evaluations')
-    .select('id, event_id, participant_id, attempt_number, status, started_at, updated_at, client_modified_at, source_device_id, app_data')
+    .select('id, event_id, participant_id, evaluator_id, attempt_number, status, started_at, updated_at, client_modified_at, source_device_id, app_data')
     .in('event_id', eventIds);
   if (evalError) throw evalError;
 
@@ -499,6 +502,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.1';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.2';
 
 })();
