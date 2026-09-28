@@ -35,6 +35,35 @@ function finalResult(a){
 function attemptState(a){a.cloudGrading=a.cloudGrading||{status:'local',error:'',lastSyncedAt:0,remoteModifiedAt:0};return a.cloudGrading}
 function persist(){getStore()?.persistCloudMerge?.()}
 function patchAttempt(a,patch){a.cloudGrading={...attemptState(a),...patch};persist()}
+function cloneJson(value){return JSON.parse(JSON.stringify(value))}
+function snapshotLocalAttempt(a){
+  return cloneJson({
+    capturedAt:Date.now(),
+    modifiedAt:Number(a?.modifiedAt||0),
+    ratings:a?.ratings||{},
+    methods:a?.methods||{},
+    stamps:a?.stamps||{},
+    ntReasons:a?.ntReasons||{},
+    failureDetails:a?.failureDetails||{},
+    notes:a?.notes||{},
+    timers:a?.timers||{},
+    timerForced:a?.timerForced||{},
+    events:a?.events||[],
+    instants:a?.instants||{},
+    overallNotes:a?.overallNotes||''
+  });
+}
+function saveConflictRecovery(a,inspection,strategy){
+  const history=Array.isArray(a?.conflictRecoveryHistory)?a.conflictRecoveryHistory:[];
+  history.push({
+    capturedAt:Date.now(),
+    strategy,
+    local:snapshotLocalAttempt(a),
+    server:cloneJson(inspection)
+  });
+  a.conflictRecoveryHistory=history.slice(-3);
+  persist();
+}
 function removeLocalAttemptByEvaluationId(c,s,evaluationId){
   if(!s?.attempts||!evaluationId)return false;
   let removed=false,attemptNumber=null;
@@ -86,8 +115,11 @@ function timerStandardMs(def){
   return null;
 }
 
-async function pushEvaluation(c,s,a){
+async function pushEvaluation(c,s,a,options={}){
   const client=getClient(),cloud=getCloud();
+  const forceConflict=options?.forceConflict===true;
+  const expectedRemoteModifiedAt=Number(options?.expectedRemoteModifiedAt||0);
+  const skipRosterSync=options?.skipRosterSync===true;
   if(!client||!cloud?.user?.id||!navigator.onLine)return false;
 
   // Closed classes are server-authoritative retention records. Never write
@@ -112,7 +144,15 @@ async function pushEvaluation(c,s,a){
     return true;
   }
 
-  if(window.RAPS_ROSTER_SYNC?.pushClassRosterAndShells) await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c);
+  if(attemptState(a).status==='conflict'&&!forceConflict){
+    patchAttempt(a,{
+      status:'conflict',
+      error:attemptState(a).error||'Resolve the grading conflict before syncing this evaluation.'
+    });
+    return false;
+  }
+
+  if(!skipRosterSync&&window.RAPS_ROSTER_SYNC?.pushClassRosterAndShells) await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c);
 
   const curriculumId=await curriculumIdFor(c);
   const crit=await criteriaFor(curriculumId);
@@ -126,7 +166,17 @@ async function pushEvaluation(c,s,a){
   const localMs=Number(a.modifiedAt||a.startedAt||Date.now());
   const remoteMs=ms(remote?.client_modified_at||remote?.updated_at);
   const lastSeen=Number(attemptState(a).remoteModifiedAt||0);
-  if(remote&&remote.source_device_id&&remote.source_device_id!==getStore()?.deviceId?.()&&remoteMs>localMs+1000&&remoteMs>lastSeen+1000){
+
+  if(forceConflict&&expectedRemoteModifiedAt&&Math.abs(remoteMs-expectedRemoteModifiedAt)>10){
+    patchAttempt(a,{
+      status:'conflict',
+      error:'Cloud evaluation changed again while resolving the conflict. Review the latest server version before choosing again.',
+      remoteModifiedAt:remoteMs
+    });
+    return false;
+  }
+
+  if(!forceConflict&&remote&&remote.source_device_id&&remote.source_device_id!==getStore()?.deviceId?.()&&remoteMs>localMs+1000&&remoteMs>lastSeen+1000){
     patchAttempt(a,{status:'conflict',error:'Newer cloud evaluation exists. Pull before overwriting.',remoteModifiedAt:remoteMs});
     return false;
   }
@@ -263,8 +313,9 @@ async function pushEvaluation(c,s,a){
 function freshTimerStore(t){
   const out={};for(const d of (t?.timers||[]))out[d.id]={instances:[],currentIndex:-1};return out;
 }
-async function pullEvaluation(c,s,a){
+async function pullEvaluation(c,s,a,options={}){
   const client=getClient();
+  const force=options?.force===true;
   const {data:row,error}=await client.from('evaluations')
     .select('id,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id,curriculum_version_id,evaluator_id')
     .eq('id',a.id).maybeSingle();
@@ -281,9 +332,9 @@ async function pullEvaluation(c,s,a){
   const localMs=Number(a.modifiedAt||0);
   const state=attemptState(a);
   const lastSeen=Number(state.remoteModifiedAt||0);
-  if(!a.cloudShellOnly&&lastSeen&&localMs>lastSeen+10)return false;
-  if(!a.cloudShellOnly&&!lastSeen&&localMs>remoteMs+1000)return false;
-  if(!a.cloudShellOnly&&remoteMs<=lastSeen+10)return false;
+  if(!force&&!a.cloudShellOnly&&lastSeen&&localMs>lastSeen+10)return false;
+  if(!force&&!a.cloudShellOnly&&!lastSeen&&localMs>remoteMs+1000)return false;
+  if(!force&&!a.cloudShellOnly&&remoteMs<=lastSeen+10)return false;
 
   const crit=await criteriaFor(row.curriculum_version_id);
   const [{data:cr,error:crErr},{data:tr,error:trErr}]=await Promise.all([
@@ -339,6 +390,97 @@ async function pullEvaluation(c,s,a){
   return true;
 }
 
+async function inspectConflict(c,s,a){
+  const client=getClient();
+  if(!client||!navigator.onLine)throw new Error('Conflict resolution requires an online connection.');
+
+  const {data:row,error}=await client.from('evaluations')
+    .select('id,status,client_modified_at,updated_at,source_device_id,curriculum_version_id')
+    .eq('id',a.id).maybeSingle();
+  if(error)throw error;
+  if(!row)throw new Error('The server evaluation no longer exists.');
+
+  const crit=await criteriaFor(row.curriculum_version_id||await curriculumIdFor(c));
+  const [{data:cr,error:crErr},{data:tr,error:trErr}]=await Promise.all([
+    client.from('criterion_results')
+      .select('criterion_id,result,failure_mode,primary_contributor,evaluator_note,graded_at,app_data,client_modified_at,source_device_id')
+      .eq('evaluation_id',a.id),
+    client.from('timer_results')
+      .select('criterion_id,timer_name,started_at,stopped_at,elapsed_ms,standard_ms,standard_met,sync_key,app_data,client_modified_at,source_device_id')
+      .eq('evaluation_id',a.id)
+  ]);
+  if(crErr)throw crErr;
+  if(trErr)throw trErr;
+
+  const remoteRatings={};
+  for(const r of cr||[]){
+    const code=crit.byId.get(r.criterion_id)?.criterion_code;
+    if(code)remoteRatings[code]=RESULT_FROM_DB[r.result]||'nt';
+  }
+
+  return {
+    evaluationId:a.id,
+    remoteModifiedAt:ms(row.client_modified_at||row.updated_at),
+    remoteDeviceId:row.source_device_id||'',
+    remoteStatus:row.status||'',
+    localModifiedAt:Number(a.modifiedAt||0),
+    localDeviceId:getStore()?.deviceId?.()||'',
+    localRatings:cloneJson(a.ratings||{}),
+    remoteRatings,
+    localTimerKeys:Object.entries(a.timers||{}).flatMap(([timerId,store])=>
+      (store?.instances||[]).filter(x=>x?.wallStart).map(x=>`${timerId}:${x.id||x.index||1}`)
+    ).sort(),
+    remoteTimerKeys:(tr||[]).map(r=>r.sync_key).filter(Boolean).sort()
+  };
+}
+
+async function resolveConflict(c,s,a,strategy){
+  strategy=String(strategy||'').toLowerCase();
+  if(!['server','local'].includes(strategy))throw new Error('Conflict resolution must choose SERVER or LOCAL.');
+  if(attemptState(a).status!=='conflict')throw new Error('This evaluation is not currently in conflict.');
+
+  const inspection=await inspectConflict(c,s,a);
+  const expected=Number(attemptState(a).remoteModifiedAt||0);
+  if(expected&&Math.abs(inspection.remoteModifiedAt-expected)>10){
+    patchAttempt(a,{
+      status:'conflict',
+      error:'Cloud evaluation changed again while resolving the conflict. Review the latest server version before choosing again.',
+      remoteModifiedAt:inspection.remoteModifiedAt
+    });
+    throw new Error('The server evaluation changed again. Review the conflict again before resolving it.');
+  }
+
+  saveConflictRecovery(a,inspection,strategy);
+
+  if(strategy==='server'){
+    const ok=await pullEvaluation(c,s,a,{force:true});
+    if(!ok)throw new Error('Unable to load the authoritative server evaluation.');
+    a.conflictResolution={
+      resolvedAt:Date.now(),
+      strategy:'server',
+      preservedBackup:true,
+      previousRemoteModifiedAt:inspection.remoteModifiedAt
+    };
+    persist();
+    return true;
+  }
+
+  const ok=await pushEvaluation(c,s,a,{
+    forceConflict:true,
+    expectedRemoteModifiedAt:inspection.remoteModifiedAt,
+    skipRosterSync:true
+  });
+  if(!ok)throw new Error(attemptState(a).error||'Unable to preserve this device as the authoritative grading version.');
+  a.conflictResolution={
+    resolvedAt:Date.now(),
+    strategy:'local',
+    preservedBackup:true,
+    previousRemoteModifiedAt:inspection.remoteModifiedAt
+  };
+  persist();
+  return true;
+}
+
 async function pullAll(){
   const store=getStore();if(!store)return 0;let n=0;
   for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled)){
@@ -385,6 +527,14 @@ window.addEventListener('online',()=>syncAll());
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.11-web.7';
-window.RAPS_GRADING_SYNC=Object.freeze({syncAll,pushEvaluation,pullEvaluation,pullAll,pushAll});
+window.RAPS_GRADING_SYNC_BUILD='3.4.11-web.8';
+window.RAPS_GRADING_SYNC=Object.freeze({
+  syncAll,
+  pushEvaluation,
+  pullEvaluation,
+  pullAll,
+  pushAll,
+  inspectConflict,
+  resolveConflict
+});
 })();
