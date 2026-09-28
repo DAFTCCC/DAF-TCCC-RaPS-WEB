@@ -338,6 +338,28 @@ async function pushClassUnlocked(c, options={}) {
     return false;
   }
 
+  // Server-only metadata change: this browser has no competing metadata edit,
+  // so adopt the server branch instead of writing stale local metadata back.
+  if (!forceConflict && metadata.hasBaseline && metadata.remoteChanged && !metadata.localChanged) {
+    getStore()?.upsertFromCloud?.(remote,{preserveStudents:true});
+    const active=getStore()?.getClass?.(c.id);
+    if (active) {
+      active.cloudSync={
+        ...(active.cloudSync||{}),
+        enabled:true,
+        status:'synced',
+        error:'',
+        createdBy:existing?.created_by||active.cloudSync?.createdBy||'',
+        lastSyncedAt:Date.now(),
+        localModifiedAt:remoteModified,
+        remoteModifiedAt:remoteModified,
+        baseMetadataSignature:metadata.remoteSignature
+      };
+      getStore()?.persistCloudMerge?.();
+    }
+    return true;
+  }
+
   // Upgrade safety: if an older build left a conflict without a metadata
   // baseline and the branches are genuinely different, do not guess.
   if (!forceConflict && String(c?.cloudSync?.status||'')==='conflict' && !metadata.hasBaseline) {
@@ -629,8 +651,9 @@ async function pullVisibleClasses() {
 
   let imported = 0;
   for (const row of data || []) {
-    const remote = remoteToLocal(row, loadedRefs);
-    const local = store.getClass(row.id);
+    const remote=remoteToLocal(row,loadedRefs);
+    remote.cloudSync={...(remote.cloudSync||{}),baseMetadataSignature:classMetadataSignature(remote)};
+    const local=store.getClass(row.id);
     if (!local) {
       store.upsertFromCloud(remote);
       imported++;
@@ -771,6 +794,7 @@ async function resolveClassConflict(c, strategy) {
   if (strategy==='server') {
     const loadedRefs=await loadRefs();
     const remote=remoteToLocal(inspection.serverSnapshot,loadedRefs);
+    remote.cloudSync={...(remote.cloudSync||{}),baseMetadataSignature:classMetadataSignature(remote)};
     getStore()?.upsertFromCloud?.(remote,{preserveStudents:true});
     const active=getStore()?.getClass?.(c.id);
     if (active) {
