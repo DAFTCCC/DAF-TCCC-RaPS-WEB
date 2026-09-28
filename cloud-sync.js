@@ -23,38 +23,72 @@ function msFromIso(value) {
 function shortError(error) {
   return String(error?.message || error || 'Unknown sync error').slice(0, 240);
 }
-function classRevisionState(c, row, localModified, remoteModified, priorStatus='') {
-  const baseline=Number(c?.cloudSync?.remoteModifiedAt||0);
-  const localDeviceId=getStore()?.deviceId?.()||'';
-  const remoteDeviceId=row?.source_device_id||'';
-  const hasBaseline=baseline>0;
-  const locallyDirty=['pending','offline','error'].includes(String(priorStatus||''));
-  const localChanged=hasBaseline ? localModified>baseline+10 : locallyDirty;
-  const remoteChanged=hasBaseline ? remoteModified>baseline+10 : !!row&&remoteModified>0;
-  const differentWriter=!remoteDeviceId||!localDeviceId||remoteDeviceId!==localDeviceId;
+function classMetadataSnapshot(c) {
   return {
-    baseline,
-    localModified,
-    remoteModified,
-    localDeviceId,
-    remoteDeviceId,
+    name:String(c?.name||''),
+    tierId:String(c?.tierId||''),
+    roster:String(c?.roster||''),
+    date:String(c?.date||''),
+    scenario:String(c?.scenario||''),
+    scenarioVersion:String(c?.scenarioVersion||'1'),
+    siteCode:String(c?.siteCode||''),
+    courseType:String(c?.courseType||'initial'),
+    scenarioDifficulty:String(c?.scenarioDifficulty||'standard'),
+    scenarioProfile:String(c?.scenarioProfile||''),
+    leadEvaluator:String(c?.leadEvaluator||''),
+    evaluatorId:String(c?.evaluatorId||''),
+    curriculumId:String(c?.curriculumId||''),
+    component:String(c?.component||'ACTIVE_DUTY'),
+    majcom:String(c?.majcom||''),
+    unit:String(c?.unit||''),
+    exercise:String(c?.exercise||''),
+    homeInstallationId:String(c?.homeInstallationId||''),
+    homeInstallationName:String(c?.homeInstallationName||''),
+    homeInstallationState:String(c?.homeInstallationState||''),
+    homeInstallationCountry:String(c?.homeInstallationCountry||''),
+    trainingLocationType:String(c?.trainingLocationType||'SAME_AS_HOME'),
+    trainingInstallationId:String(c?.trainingInstallationId||''),
+    trainingLocationName:String(c?.trainingLocationName||''),
+    trainingLocationState:String(c?.trainingLocationState||''),
+    trainingLocationCountry:String(c?.trainingLocationCountry||''),
+    location:String(c?.location||''),
+    scenarioNT:[...(Array.isArray(c?.scenarioNT)?c.scenarioNT:[])].map(String).sort()
+  };
+}
+function classMetadataSignature(c) {
+  return JSON.stringify(classMetadataSnapshot(c));
+}
+function classMetadataState(c, remote, remoteModified) {
+  const state=c?.cloudSync||{};
+  const baselineSignature=String(state.baseMetadataSignature||'');
+  const localSignature=classMetadataSignature(c);
+  const remoteSignature=remote?classMetadataSignature(remote):'';
+  const hasBaseline=!!baselineSignature;
+  const localChanged=hasBaseline&&localSignature!==baselineSignature;
+  const remoteChanged=hasBaseline&&remoteSignature!==baselineSignature;
+  const sameMetadata=!!remote&&localSignature===remoteSignature;
+  return {
+    baselineSignature,
+    localSignature,
+    remoteSignature,
     hasBaseline,
     localChanged,
     remoteChanged,
-    differentWriter,
-    // Device IDs are diagnostic only. Two tabs can share one persistent
-    // device ID and still hold independent in-memory branches.
-    conflict:!!row&&localChanged&&remoteChanged
+    sameMetadata,
+    remoteModified:Number(remoteModified||0),
+    conflict:!!remote&&hasBaseline&&localChanged&&remoteChanged&&!sameMetadata
   };
 }
-function markClassConflict(c, revision, message) {
+function markClassConflict(c, metadata, message) {
   patchState(c.id,{
     enabled:true,
     status:'conflict',
-    error:message||'This class changed both locally and on another device since the last synchronized revision.',
-    conflictBaseRemoteModifiedAt:Number(revision?.baseline||0),
-    localModifiedAt:Number(revision?.localModified||c?.modifiedAt||0),
-    remoteModifiedAt:Number(revision?.remoteModified||0)
+    error:message||'Class metadata changed on this browser and another device since the last synchronized metadata baseline.',
+    conflictBaseMetadataSignature:String(metadata?.baselineSignature||''),
+    localMetadataSignature:String(metadata?.localSignature||classMetadataSignature(c)),
+    remoteMetadataSignature:String(metadata?.remoteSignature||''),
+    localModifiedAt:Number(c?.modifiedAt||0),
+    remoteModifiedAt:Number(metadata?.remoteModified||0)
   });
 }
 function cloneJson(value) {
@@ -254,51 +288,92 @@ async function pushClassUnlocked(c, options={}) {
 
   // A stale browser may still think the class is open. Check the server
   // before writing so an authoritative completed class is pull-only.
-  const existing = await fetchRemoteById(c.id);
-  if (existing?.status === 'completed') {
-    const remoteMs = msFromIso(existing.client_modified_at || existing.updated_at);
-    patchState(c.id, {
+  const existing=await fetchRemoteById(c.id);
+  const loadedRefs=await loadRefs();
+  const remote=existing?remoteToLocal(existing,loadedRefs):null;
+  const remoteModified=msFromIso(existing?.client_modified_at||existing?.updated_at);
+  const metadata=classMetadataState(c,remote,remoteModified);
+
+  if (existing?.status==='completed') {
+    patchState(c.id,{
       enabled:true,
       status:'synced',
       error:'',
-      createdBy:existing.created_by || c.cloudSync?.createdBy || '',
+      createdBy:existing.created_by||c.cloudSync?.createdBy||'',
       lastSyncedAt:Date.now(),
-      remoteModifiedAt:remoteMs
+      remoteModifiedAt:remoteModified,
+      baseMetadataSignature:metadata.remoteSignature
     });
     return true;
   }
 
-  const priorStatus=String(c?.cloudSync?.status||'');
-  const localModified=Number(c.modifiedAt||c.createdAt||Date.now());
-  const remoteModified=msFromIso(existing?.client_modified_at||existing?.updated_at);
-  const revision=classRevisionState(c,existing,localModified,remoteModified,priorStatus);
+  // web.12 migration repair: web.11 could mark a timestamp-only conflict
+  // even when the class metadata was identical. Identical metadata is not a
+  // conflict; converge immediately and establish the metadata baseline.
+  if (!forceConflict && remote && metadata.sameMetadata) {
+    patchState(c.id,{
+      enabled:true,
+      status:'synced',
+      error:'',
+      createdBy:existing?.created_by||c.cloudSync?.createdBy||'',
+      lastSyncedAt:Date.now(),
+      localModifiedAt:Number(c.modifiedAt||0),
+      remoteModifiedAt:remoteModified,
+      baseMetadataSignature:metadata.remoteSignature,
+      conflictBaseMetadataSignature:'',
+      localMetadataSignature:'',
+      remoteMetadataSignature:''
+    });
+    return true;
+  }
 
-  // A conflict is branch divergence from the last synchronized server
-  // revision. Wall-clock ordering between the two edits is irrelevant.
-  if (!forceConflict && revision.conflict) {
+  // Once a web.12 baseline exists, conflict is based on the actual class
+  // metadata branches, never the class-wide modifiedAt timestamp.
+  if (!forceConflict && metadata.conflict) {
     markClassConflict(
       c,
-      revision,
-      'Class metadata changed on this browser and another device since the last synchronization. Choose SERVER or LOCAL before continuing.'
+      metadata,
+      'Class metadata changed on this browser and another device since the last synchronized metadata baseline. Choose SERVER or LOCAL before continuing.'
     );
     return false;
   }
 
-  const publishModified = forceConflict
-    ? Math.max(Date.now(), localModified + 1, remoteModified + 1, expectedRemoteModifiedAt + 1)
-    : localModified;
-
-  if (forceConflict && expectedRemoteModifiedAt && Math.abs(remoteModified - expectedRemoteModifiedAt) > 10) {
-    markClassConflict(c,{
-      ...revision,
-      remoteModified
-    },'Cloud class changed again while resolving the conflict. Review the latest server version before choosing again.');
+  // Upgrade safety: if an older build left a conflict without a metadata
+  // baseline and the branches are genuinely different, do not guess.
+  if (!forceConflict && String(c?.cloudSync?.status||'')==='conflict' && !metadata.hasBaseline) {
+    markClassConflict(
+      c,
+      metadata,
+      'Class metadata differs from the server, but this browser predates metadata fingerprints. Choose SERVER or LOCAL before continuing.'
+    );
     return false;
   }
 
-  const loadedRefs = await loadRefs();
-  const base = resolveBaseForClass(c, loadedRefs);
-  const curriculum = resolveCurriculumForClass(c, loadedRefs);
+  const localModified=Number(c.modifiedAt||c.createdAt||Date.now());
+  const publishModified=forceConflict
+    ? Math.max(Date.now(),localModified+1,remoteModified+1,expectedRemoteModifiedAt+1)
+    : localModified;
+
+  if (forceConflict && expectedRemoteModifiedAt && Math.abs(remoteModified-expectedRemoteModifiedAt)>10) {
+    const latest=await fetchRemoteById(c.id);
+    const latestRemote=latest?remoteToLocal(latest,loadedRefs):null;
+    const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
+    const latestMetadata=classMetadataState(c,latestRemote,latestModified);
+    if (latestMetadata.sameMetadata) {
+      patchState(c.id,{
+        enabled:true,status:'synced',error:'',
+        lastSyncedAt:Date.now(),
+        remoteModifiedAt:latestModified,
+        baseMetadataSignature:latestMetadata.remoteSignature
+      });
+      return true;
+    }
+    markClassConflict(c,latestMetadata,'Cloud class metadata changed again while resolving the conflict. Review the latest server version before choosing again.');
+    return false;
+  }
+
+  const base=resolveBaseForClass(c,loadedRefs);
+  const curriculum=resolveCurriculumForClass(c,loadedRefs);
 
   if (!base) {
     patchState(c.id, {
@@ -365,11 +440,21 @@ async function pushClassUnlocked(c, options={}) {
 
     if (!result.data) {
       const latest=await fetchRemoteById(c.id);
+      const latestRemote=latest?remoteToLocal(latest,loadedRefs):null;
       const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
-      markClassConflict(c,{
-        ...revision,
-        remoteModified:latestModified
-      },'Cloud class changed during synchronization. No local data was overwritten; choose SERVER or LOCAL before continuing.');
+      const latestMetadata=classMetadataState(c,latestRemote,latestModified);
+      if (latestMetadata.sameMetadata) {
+        patchState(c.id,{
+          enabled:true,status:'synced',error:'',
+          createdBy:latest?.created_by||c.cloudSync?.createdBy||'',
+          lastSyncedAt:Date.now(),
+          localModifiedAt:Number(c.modifiedAt||0),
+          remoteModifiedAt:latestModified,
+          baseMetadataSignature:latestMetadata.remoteSignature
+        });
+        return true;
+      }
+      markClassConflict(c,latestMetadata,'Cloud class metadata changed during synchronization. No local metadata was overwritten; choose SERVER or LOCAL before continuing.');
       return false;
     }
     data=result.data;
@@ -383,11 +468,21 @@ async function pushClassUnlocked(c, options={}) {
     if (result.error) {
       if (String(result.error?.code||'')==='23505') {
         const latest=await fetchRemoteById(c.id);
+        const latestRemote=latest?remoteToLocal(latest,loadedRefs):null;
         const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
-        markClassConflict(c,{
-          ...revision,
-          remoteModified:latestModified
-        },'This class appeared on the server while this browser was creating it. Choose SERVER or LOCAL before continuing.');
+        const latestMetadata=classMetadataState(c,latestRemote,latestModified);
+        if (latestMetadata.sameMetadata) {
+          patchState(c.id,{
+            enabled:true,status:'synced',error:'',
+            createdBy:latest?.created_by||c.cloudSync?.createdBy||'',
+            lastSyncedAt:Date.now(),
+            localModifiedAt:Number(c.modifiedAt||0),
+            remoteModifiedAt:latestModified,
+            baseMetadataSignature:latestMetadata.remoteSignature
+          });
+          return true;
+        }
+        markClassConflict(c,latestMetadata,'This class appeared on the server with different metadata while this browser was creating it. Choose SERVER or LOCAL before continuing.');
         return false;
       }
       patchState(c.id,{
@@ -412,14 +507,20 @@ async function pushClassUnlocked(c, options={}) {
     c.lastModifiedDeviceId=getStore()?.deviceId?.()||c.lastModifiedDeviceId||'';
     c.syncStatus='CLOUD';
   }
-  patchState(c.id, {
-    enabled: true,
-    status: 'synced',
-    error: '',
-    createdBy: data.created_by || payload.created_by,
-    lastSyncedAt: Date.now(),
-    localModifiedAt: remoteMs,
-    remoteModifiedAt: remoteMs
+  const savedRemote=remoteToLocal(data,loadedRefs);
+  const savedSignature=classMetadataSignature(savedRemote);
+  patchState(c.id,{
+    enabled:true,
+    status:'synced',
+    error:'',
+    createdBy:data.created_by||payload.created_by,
+    lastSyncedAt:Date.now(),
+    localModifiedAt:remoteMs,
+    remoteModifiedAt:remoteMs,
+    baseMetadataSignature:savedSignature,
+    conflictBaseMetadataSignature:'',
+    localMetadataSignature:'',
+    remoteMetadataSignature:''
   });
   return true;
 }
@@ -501,13 +602,14 @@ function remoteToLocal(row, loadedRefs) {
     trainingLocationCountry: appData.trainingLocationCountry || appData.homeInstallationCountry || '',
     location: appData.location || appData.trainingLocationName || appData.homeInstallationName || base?.name || '',
     cloudSync: {
-      enabled: true,
-      status: 'synced',
-      error: '',
-      createdBy: row.created_by || '',
-      lastSyncedAt: Date.now(),
-      localModifiedAt: remoteModifiedAt,
-      remoteModifiedAt
+      enabled:true,
+      status:'synced',
+      error:'',
+      createdBy:row.created_by||'',
+      lastSyncedAt:Date.now(),
+      localModifiedAt:remoteModifiedAt,
+      remoteModifiedAt,
+      baseMetadataSignature:''
     }
   };
 }
@@ -539,41 +641,79 @@ async function pullVisibleClasses() {
     const localMs=Number(local.modifiedAt||0);
     const state=local.cloudSync||{};
     const priorStatus=String(state.status||'');
-    const revision=classRevisionState(local,row,localMs,remoteMs,priorStatus);
+    const metadata=classMetadataState(local,remote,remoteMs);
 
-    // Once conflicted, normal pulls are read-only with respect to the active
-    // local branch. Track a later server revision but never replace local
-    // metadata until the evaluator explicitly chooses SERVER or LOCAL.
-    if (priorStatus==='conflict') {
-      if (remoteMs>Number(state.remoteModifiedAt||0)+10) {
-        patchState(local.id,{
-          enabled:true,
-          status:'conflict',
-          error:'Cloud class changed again while this conflict is unresolved. Review the latest server version before choosing a winner.',
-          remoteModifiedAt:remoteMs
-        });
-      }
+    // Identical metadata always converges, including migration from a false
+    // web.11 timestamp-only conflict.
+    if (metadata.sameMetadata) {
+      patchState(local.id,{
+        enabled:true,
+        status:'synced',
+        error:'',
+        createdBy:row.created_by||state.createdBy||'',
+        lastSyncedAt:Date.now(),
+        remoteModifiedAt:remoteMs,
+        localModifiedAt:localMs,
+        baseMetadataSignature:metadata.remoteSignature,
+        conflictBaseMetadataSignature:'',
+        localMetadataSignature:'',
+        remoteMetadataSignature:''
+      });
       continue;
     }
 
-    // Detect two independently changed branches against their common
-    // synchronized baseline. Do not use "remote newer than local" as the
-    // definition of conflict; offline edits may legitimately have later
-    // wall-clock timestamps than the competing server edit.
-    if (revision.conflict) {
+    // Existing web.12 conflict: never overwrite the local branch. Refresh the
+    // observed remote signature/revision so the resolver inspects current data.
+    if (priorStatus==='conflict'&&metadata.hasBaseline) {
+      patchState(local.id,{
+        enabled:true,
+        status:'conflict',
+        error:'Class metadata conflict is unresolved. Review the current SERVER and LOCAL branches before choosing a winner.',
+        remoteModifiedAt:remoteMs,
+        remoteMetadataSignature:metadata.remoteSignature
+      });
+      continue;
+    }
+
+    if (metadata.conflict) {
       markClassConflict(
         local,
-        revision,
-        'Class metadata changed on this browser and another device since the last synchronization. Choose SERVER or LOCAL before continuing.'
+        metadata,
+        'Class metadata changed on this browser and another device since the last synchronized metadata baseline. Choose SERVER or LOCAL before continuing.'
       );
       continue;
     }
 
-    const localDirty=['pending','offline','error'].includes(priorStatus)&&revision.localChanged;
+    // Upgrade safety for a pre-web.12 conflict with genuinely different
+    // metadata. Preserve both branches rather than inventing a baseline.
+    if (priorStatus==='conflict'&&!metadata.hasBaseline) {
+      markClassConflict(
+        local,
+        metadata,
+        'Class metadata differs from the server, but this browser predates metadata fingerprints. Choose SERVER or LOCAL before continuing.'
+      );
+      continue;
+    }
+
+    const localDirty=['pending','offline','error'].includes(priorStatus) &&
+      (metadata.hasBaseline ? metadata.localChanged : localMs>Number(state.remoteModifiedAt||0)+10);
     if (localDirty) continue;
 
-    if (remoteMs>localMs+10) {
+    if (metadata.hasBaseline && metadata.remoteChanged && !metadata.localChanged) {
       store.upsertFromCloud(remote,{preserveStudents:true});
+      const active=store.getClass(row.id);
+      if (active) {
+        active.cloudSync={...(active.cloudSync||{}),baseMetadataSignature:metadata.remoteSignature};
+        store.persistCloudMerge?.();
+      }
+      imported++;
+    } else if (!metadata.hasBaseline && remoteMs>localMs+10) {
+      store.upsertFromCloud(remote,{preserveStudents:true});
+      const active=store.getClass(row.id);
+      if (active) {
+        active.cloudSync={...(active.cloudSync||{}),baseMetadataSignature:metadata.remoteSignature};
+        store.persistCloudMerge?.();
+      }
       imported++;
     } else {
       patchState(local.id,{
@@ -583,7 +723,8 @@ async function pullVisibleClasses() {
         createdBy:row.created_by||state.createdBy||'',
         lastSyncedAt:Date.now(),
         remoteModifiedAt:remoteMs,
-        localModifiedAt:localMs
+        localModifiedAt:localMs,
+        baseMetadataSignature:metadata.remoteSignature
       });
     }
   }
@@ -790,7 +931,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.11';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.12';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,
