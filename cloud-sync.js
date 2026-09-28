@@ -23,6 +23,50 @@ function msFromIso(value) {
 function shortError(error) {
   return String(error?.message || error || 'Unknown sync error').slice(0, 240);
 }
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+function snapshotLocalClass(c) {
+  return {
+    capturedAt: Date.now(),
+    class: {
+      id:c?.id||'',
+      name:c?.name||'',
+      roster:c?.roster||'',
+      date:c?.date||'',
+      scenario:c?.scenario||'',
+      scenarioVersion:c?.scenarioVersion||'1',
+      siteCode:c?.siteCode||'',
+      courseType:c?.courseType||'initial',
+      scenarioDifficulty:c?.scenarioDifficulty||'standard',
+      scenarioProfile:c?.scenarioProfile||'',
+      leadEvaluator:c?.leadEvaluator||'',
+      evaluatorId:c?.evaluatorId||'',
+      component:c?.component||'ACTIVE_DUTY',
+      majcom:c?.majcom||'',
+      unit:c?.unit||'',
+      exercise:c?.exercise||'',
+      homeInstallationId:c?.homeInstallationId||'',
+      homeInstallationName:c?.homeInstallationName||'',
+      trainingLocationType:c?.trainingLocationType||'SAME_AS_HOME',
+      trainingInstallationId:c?.trainingInstallationId||'',
+      trainingLocationName:c?.trainingLocationName||'',
+      location:c?.location||'',
+      modifiedAt:Number(c?.modifiedAt||0),
+      lastModifiedDeviceId:c?.lastModifiedDeviceId||''
+    }
+  };
+}
+function saveClassConflictRecovery(c, inspection, strategy) {
+  const history=Array.isArray(c?.classConflictRecoveryHistory)?c.classConflictRecoveryHistory:[];
+  history.push({
+    capturedAt:Date.now(),
+    strategy,
+    local:snapshotLocalClass(c),
+    server:cloneJson(inspection)
+  });
+  c.classConflictRecoveryHistory=history.slice(-3);
+}
 function isClosedClass(c) {
   return !!c && (!!c.closedAt || c.status === 'closed');
 }
@@ -145,7 +189,9 @@ async function fetchRemoteById(id) {
   return data || null;
 }
 
-async function pushClassUnlocked(c) {
+async function pushClassUnlocked(c, options={}) {
+  const forceConflict=options?.forceConflict===true;
+  const expectedRemoteModifiedAt=Number(options?.expectedRemoteModifiedAt||0);
   const client = getClient();
   const cloud = getCloud();
   if (!client || !cloud?.user?.id) return false;
@@ -207,8 +253,21 @@ async function pushClassUnlocked(c) {
   const localModified = Number(c.modifiedAt || c.createdAt || Date.now());
   const remoteModified = msFromIso(existing?.client_modified_at || existing?.updated_at);
   const lastRemoteSeen = Number(c.cloudSync?.remoteModifiedAt || 0);
+  const publishModified = forceConflict
+    ? Math.max(Date.now(), localModified + 1, remoteModified + 1, expectedRemoteModifiedAt + 1)
+    : localModified;
 
-  if (existing && remoteModified > localModified + 1000 && remoteModified > lastRemoteSeen + 1000) {
+  if (forceConflict && expectedRemoteModifiedAt && Math.abs(remoteModified - expectedRemoteModifiedAt) > 10) {
+    patchState(c.id, {
+      enabled:true,
+      status:'conflict',
+      error:'Cloud class changed again while resolving the conflict. Review the latest server version before choosing again.',
+      remoteModifiedAt:remoteModified
+    });
+    return false;
+  }
+
+  if (!forceConflict && existing && remoteModified > localModified + 1000 && remoteModified > lastRemoteSeen + 1000) {
     patchState(c.id, {
       enabled: true,
       status: 'conflict',
@@ -229,7 +288,7 @@ async function pushClassUnlocked(c) {
     status: mapLocalStatusToCloud(c),
     created_by: existing?.created_by || c.cloudSync?.createdBy || cloud.user.id,
     app_data: serializeAppData(c),
-    client_modified_at: isoFromMs(localModified),
+    client_modified_at: isoFromMs(publishModified),
     source_device_id: getStore()?.deviceId?.() || null
   };
 
@@ -262,14 +321,19 @@ async function pushClassUnlocked(c) {
     throw error;
   }
 
-  const remoteMs = msFromIso(data.client_modified_at || data.updated_at) || localModified;
+  const remoteMs = msFromIso(data.client_modified_at || data.updated_at) || publishModified;
+  if (forceConflict) {
+    c.modifiedAt=remoteMs;
+    c.lastModifiedDeviceId=getStore()?.deviceId?.()||c.lastModifiedDeviceId||'';
+    c.syncStatus='CLOUD';
+  }
   patchState(c.id, {
     enabled: true,
     status: 'synced',
     error: '',
     createdBy: data.created_by || payload.created_by,
     lastSyncedAt: Date.now(),
-    localModifiedAt: localModified,
+    localModifiedAt: remoteMs,
     remoteModifiedAt: remoteMs
   });
   return true;
@@ -279,13 +343,13 @@ async function pushClassUnlocked(c) {
 // request arrives while the first is running, it executes afterward and reads
 // the class's latest local state (for example draft -> active after A1 starts).
 // This prevents out-of-order writes from regressing lifecycle state.
-function pushClass(c) {
+function pushClass(c, options={}) {
   if (!c?.id) return Promise.resolve(false);
 
   const previous = classPushTails.get(c.id) || Promise.resolve();
   const task = previous
     .catch(() => {})
-    .then(() => pushClassUnlocked(c));
+    .then(() => pushClassUnlocked(c, options));
 
   classPushTails.set(c.id, task);
 
@@ -390,7 +454,7 @@ async function pullVisibleClasses() {
     const localMs = Number(local.modifiedAt || 0);
     const state = local.cloudSync || {};
 
-    if ((state.status === 'pending' || state.status === 'offline' || state.status === 'error') && localMs > Number(state.remoteModifiedAt || 0) + 1000) {
+    if ((state.status === 'pending' || state.status === 'offline' || state.status === 'error' || state.status === 'conflict') && localMs > Number(state.remoteModifiedAt || 0) + 10) {
       continue;
     }
 
@@ -410,6 +474,76 @@ async function pullVisibleClasses() {
     }
   }
   return imported;
+}
+
+async function inspectClassConflict(c) {
+  if (!c?.id) throw new Error('Class is unavailable.');
+  if (!navigator.onLine) throw new Error('Class conflict resolution requires an online connection.');
+  const loadedRefs=await loadRefs();
+  const row=await fetchRemoteById(c.id);
+  if (!row) throw new Error('The server class no longer exists.');
+  const remote=remoteToLocal(row,loadedRefs);
+  return {
+    classId:c.id,
+    localModifiedAt:Number(c.modifiedAt||0),
+    remoteModifiedAt:Number(remote.modifiedAt||0),
+    localDeviceId:getStore()?.deviceId?.()||'',
+    remoteDeviceId:row.source_device_id||'',
+    localSummary:snapshotLocalClass(c).class,
+    remoteSummary:snapshotLocalClass(remote).class,
+    serverSnapshot:cloneJson(row)
+  };
+}
+
+async function resolveClassConflict(c, strategy) {
+  strategy=String(strategy||'').toLowerCase();
+  if (!['server','local'].includes(strategy)) throw new Error('Class conflict resolution must choose SERVER or LOCAL.');
+  if (String(c?.cloudSync?.status||'')!=='conflict') throw new Error('This class is not currently in conflict.');
+
+  const inspection=await inspectClassConflict(c);
+  const expected=Number(c.cloudSync?.remoteModifiedAt||0);
+  if (expected && Math.abs(inspection.remoteModifiedAt-expected)>10) {
+    patchState(c.id,{
+      status:'conflict',
+      error:'Cloud class changed again while resolving the conflict. Review the latest server version before choosing again.',
+      remoteModifiedAt:inspection.remoteModifiedAt
+    });
+    return false;
+  }
+
+  saveClassConflictRecovery(c,inspection,strategy);
+
+  if (strategy==='server') {
+    const loadedRefs=await loadRefs();
+    const remote=remoteToLocal(inspection.serverSnapshot,loadedRefs);
+    getStore()?.upsertFromCloud?.(remote,{preserveStudents:true});
+    const active=getStore()?.getClass?.(c.id);
+    if (active) {
+      active.classConflictRecoveryHistory=c.classConflictRecoveryHistory;
+      active.classConflictResolution={
+        resolvedAt:Date.now(),
+        strategy:'server',
+        preservedBackup:true,
+        previousRemoteModifiedAt:inspection.remoteModifiedAt
+      };
+      getStore()?.persistCloudMerge?.();
+    }
+    return true;
+  }
+
+  const ok=await pushClass(c,{
+    forceConflict:true,
+    expectedRemoteModifiedAt:inspection.remoteModifiedAt
+  });
+  if (!ok) return false;
+  c.classConflictResolution={
+    resolvedAt:Date.now(),
+    strategy:'local',
+    preservedBackup:true,
+    previousRemoteModifiedAt:inspection.remoteModifiedAt
+  };
+  getStore()?.persistCloudMerge?.();
+  return true;
 }
 
 async function pushPendingClasses() {
@@ -534,12 +668,14 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.8';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.10';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,
   pushClass,
-  pullVisibleClasses
+  pullVisibleClasses,
+  inspectClassConflict,
+  resolveClassConflict
 });
 
 })();
