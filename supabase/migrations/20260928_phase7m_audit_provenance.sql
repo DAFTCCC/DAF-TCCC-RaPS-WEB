@@ -125,6 +125,11 @@ revoke all privileges on table public.audit_log from anon;
 revoke all privileges on table public.audit_log from authenticated;
 grant select on table public.audit_log to authenticated;
 
+-- Service-role Edge Functions may append explicit semantic admin events, but
+-- they may not rewrite or erase existing audit evidence.
+revoke update, delete, truncate on table public.audit_log from service_role;
+grant select, insert on table public.audit_log to service_role;
+
 -- -------------------------------------------------------------------------
 -- Provenance-review indexes
 -- -------------------------------------------------------------------------
