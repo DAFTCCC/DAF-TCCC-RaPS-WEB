@@ -108,7 +108,7 @@ Deno.serve(async (req) => {
 
   const userId = inviteData.user.id;
 
-  const { error: profileError } = await adminClient
+  const { error: profileError } = await userClient
     .from('profiles')
     .update({
       display_name: displayName || email.split('@')[0],
@@ -131,7 +131,7 @@ Deno.serve(async (req) => {
     created_by: caller.id
   };
 
-  const { data: membershipData, error: insertError } = await adminClient
+  const { data: membershipData, error: insertError } = await userClient
     .from('memberships')
     .insert(membership)
     .select('id, user_id, role, base_id, majcom_id, active')
@@ -144,6 +144,39 @@ Deno.serve(async (req) => {
       code:'INVITE_MEMBERSHIP',
       error: 'The invitation could not be completed because the RaPS role was not assigned. No active account was retained.',
       detail: insertError.message
+    }, 500);
+  }
+
+  const { error: auditError } = await adminClient
+    .from('audit_log')
+    .insert({
+      actor_user_id: caller.id,
+      action: 'user_invited',
+      entity_type: 'user_account',
+      entity_id: userId,
+      new_value: {
+        email,
+        display_name: displayName || email.split('@')[0],
+        membership: membershipData,
+        source: 'admin-invite-user'
+      },
+      reason: 'Enterprise Admin invitation and initial RaPS role assignment completed'
+    });
+
+  if (auditError) {
+    console.error('invite-audit-failed', auditError.message);
+    try {
+      await userClient
+        .from('memberships')
+        .delete()
+        .eq('id', membershipData.id);
+    } catch {}
+    try { await adminClient.auth.admin.deleteUser(userId); } catch {}
+
+    return json({
+      code:'INVITE_AUDIT',
+      error:'The invitation could not be retained because its administrative audit record could not be written. No active account was retained.',
+      detail:auditError.message
     }, 500);
   }
 
