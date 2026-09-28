@@ -329,6 +329,13 @@ async function pushClassRosterAndShells(c) {
   const cloud = getCloud();
   if (!client || !cloud?.user?.id || !c?.id) return false;
   if (!navigator.onLine) return false;
+  if (String(c?.cloudSync?.status||'')==='conflict') {
+    getStore()?.patchRosterCloudState?.(c.id,{
+      status:'conflict',
+      error:'Resolve the class metadata conflict before syncing roster/event data.'
+    });
+    return false;
+  }
 
   // Closed classes are retention records. All normal browser synchronization
   // becomes pull-only after authoritative closure.
@@ -664,6 +671,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.8';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.10';
 
 })();
