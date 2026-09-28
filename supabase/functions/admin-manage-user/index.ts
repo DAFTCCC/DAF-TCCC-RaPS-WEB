@@ -124,9 +124,67 @@ Deno.serve(async (req) => {
     }, 409);
   }
 
+  const { data: membershipHistory, error: membershipHistoryError } = await adminClient
+    .from('memberships')
+    .select('id, role, base_id, majcom_id, active, starts_at, ends_at')
+    .eq('user_id', userId);
+
+  if (membershipHistoryError) {
+    return json({
+      code:'ADMIN_MEMBERSHIP_HISTORY',
+      error:'Unable to capture membership provenance before account deletion.',
+      detail:membershipHistoryError.message
+    }, 500);
+  }
+
+  const auditBase = {
+    actor_user_id: caller.id,
+    entity_type: 'user_account',
+    entity_id: userId,
+    old_value: {
+      email: targetUserData.user.email || null,
+      memberships: membershipHistory || [],
+      source: 'admin-manage-user'
+    }
+  };
+
+  const { error: deleteRequestAuditError } = await adminClient
+    .from('audit_log')
+    .insert({
+      ...auditBase,
+      action:'user_account_delete_requested',
+      reason:'Enterprise Admin authorized permanent deletion after access and operational-history checks'
+    });
+
+  if (deleteRequestAuditError) {
+    console.error('admin-delete-audit-request-failed', deleteRequestAuditError.message);
+    return json({
+      code:'ADMIN_AUDIT_REQUIRED',
+      error:'Account deletion was blocked because the required audit record could not be written.',
+      detail:deleteRequestAuditError.message
+    }, 500);
+  }
+
   const { error: deleteError } = await adminClient.auth.admin.deleteUser(userId);
   if (deleteError) {
     console.error('admin-delete-user-failed', deleteError.message);
+
+    const { error: failureAuditError } = await adminClient
+      .from('audit_log')
+      .insert({
+        actor_user_id:caller.id,
+        action:'user_account_delete_failed',
+        entity_type:'user_account',
+        entity_id:userId,
+        old_value:auditBase.old_value,
+        new_value:{ deleted:false, source:'admin-manage-user' },
+        reason:deleteError.message
+      });
+
+    if (failureAuditError) {
+      console.error('admin-delete-failure-audit-failed', failureAuditError.message);
+    }
+
     return json({
       code:'ADMIN_DELETE_FAILED',
       error:'Supabase could not permanently delete this account.',
@@ -134,9 +192,26 @@ Deno.serve(async (req) => {
     }, 500);
   }
 
+  const { error: completionAuditError } = await adminClient
+    .from('audit_log')
+    .insert({
+      actor_user_id:caller.id,
+      action:'user_account_deleted',
+      entity_type:'user_account',
+      entity_id:userId,
+      old_value:auditBase.old_value,
+      new_value:{ deleted:true, source:'admin-manage-user' },
+      reason:'Enterprise Admin permanent account deletion completed'
+    });
+
+  if (completionAuditError) {
+    console.error('admin-delete-completion-audit-failed', completionAuditError.message);
+  }
+
   return json({
     ok:true,
     deleted_user_id:userId,
-    email:targetUserData.user.email || null
+    email:targetUserData.user.email || null,
+    audit_warning:completionAuditError ? 'Account deleted, but the completion audit event could not be written.' : null
   });
 });
