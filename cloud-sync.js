@@ -276,7 +276,7 @@ async function pushClassUnlocked(c, options={}) {
     return false;
   }
 
-  if (!forceConflict && existing && remoteModified > localModified + 1000 && remoteModified > lastRemoteSeen + 1000) {
+  if (!forceConflict && existing && remoteModified > localModified + 10 && remoteModified > lastRemoteSeen + 10) {
     patchState(c.id, {
       enabled: true,
       status: 'conflict',
@@ -467,7 +467,7 @@ async function pullVisibleClasses() {
       continue;
     }
 
-    if (remoteMs > localMs + 1000) {
+    if (remoteMs > localMs + 10) {
       store.upsertFromCloud(remote, { preserveStudents:true });
       imported++;
     } else {
