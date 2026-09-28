@@ -371,6 +371,24 @@ async function pushClassUnlocked(c, options={}) {
     return false;
   }
 
+  // One-time migration guard for pending/offline/error states created by
+  // web.11. If both the old timestamp baseline and the server advanced while
+  // local work is pending, preserve both branches rather than overwrite.
+  if (!forceConflict && existing && !metadata.hasBaseline && !metadata.sameMetadata) {
+    const oldBaselineMs=Number(c?.cloudSync?.remoteModifiedAt||0);
+    const priorStatus=String(c?.cloudSync?.status||'');
+    const legacyLocalDirty=['pending','offline','error'].includes(priorStatus);
+    const legacyRemoteAdvanced=oldBaselineMs>0&&remoteModified>oldBaselineMs+10;
+    if (legacyLocalDirty&&legacyRemoteAdvanced) {
+      markClassConflict(
+        c,
+        metadata,
+        'Class metadata differs during the web.12 fingerprint migration and the server also advanced. Choose SERVER or LOCAL before continuing.'
+      );
+      return false;
+    }
+  }
+
   const localModified=Number(c.modifiedAt||c.createdAt||Date.now());
   const publishModified=forceConflict
     ? Math.max(Date.now(),localModified+1,remoteModified+1,expectedRemoteModifiedAt+1)
