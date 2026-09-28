@@ -174,7 +174,7 @@ function saveDb(){
   }
   if(c){
     const state=c.cloudSync||{};
-    if(state.enabled===true && state.status!=='syncing'){
+    if(state.enabled===true && state.status!=='syncing' && state.status!=='conflict'){
       state.status=navigator.onLine?'pending':'offline';
       state.error='';
       state.localModifiedAt=ts;
@@ -640,8 +640,9 @@ function renderClass(){
   $('classSub').textContent=`Tier ${c.tierId} — ${t.name} · ${t.source}`;
   $('classState').textContent=life;$('classState').className=`statusPill ${life.toLowerCase()}`;
   ensureLocationFields(c);const home=installationById(c.homeInstallationId);
-  const rosterCloud=c.cloudRosterSync||{};const rosterCloudLabel=!c.cloudSync?.enabled?'Local only':rosterCloud.status==='synced'?'Synced':rosterCloud.status==='error'?'Sync error':rosterCloud.status==='offline'?'Offline':rosterCloud.status==='pending'?'Pending':'Not synced';
-  $('classMeta').innerHTML=[['Roster',c.roster||'—'],['Roster cloud',rosterCloudLabel],['Course type',String(c.courseType||'initial').replace(/-/g,' ')],['Supported MAJCOM',c.majcom?commandName(c.majcom):'—'],['Home installation',c.homeInstallationName||'—'],['Host command',home?.hostCommand?commandName(home.hostCommand):'—'],['Unit / organization',c.unit||'—'],['Training location',c.trainingLocationName||'—'],['Site code',c.siteCode||'—'],['Exercise / event',c.exercise||'—'],['Scenario',`${c.scenario||'—'} · v${c.scenarioVersion||'1'}`],['Scenario difficulty',String(c.scenarioDifficulty||'standard').replace(/-/g,' ')],['Scenario profile',c.scenarioProfile||'—'],['Date',c.date||'—'],['Lead Evaluator',c.leadEvaluator||'—'],['Evaluator ID',c.evaluatorId||'—'],['Curriculum ID',c.curriculumId||`TCCC-TIER${c.tierId}`],['Content',c.contentVersion||t.source],['Status',life],['Closed',c.closedAt?`${new Date(c.closedAt).toLocaleString()}${c.closedBy?` · ${c.closedBy}`:''}`:'—']].map(([a,b])=>`<div class="metaCell"><small>${esc(a)}</small><b>${esc(b)}</b></div>`).join('');
+  const rosterCloud=c.cloudRosterSync||{};const rosterCloudLabel=!c.cloudSync?.enabled?'Local only':rosterCloud.status==='synced'?'Synced':rosterCloud.status==='error'?'Sync error':rosterCloud.status==='offline'?'Offline':rosterCloud.status==='pending'?'Pending':rosterCloud.status==='conflict'?'Blocked by class conflict':'Not synced';
+  const classCloud=c.cloudSync||{};const classCloudLabel=!classCloud.enabled?'Local only':classCloud.status==='synced'?'Synced':classCloud.status==='syncing'?'Syncing':classCloud.status==='conflict'?'CONFLICT':classCloud.status==='error'?'Sync error':classCloud.status==='offline'?'Offline':classCloud.status==='pending'?'Pending':'Not synced';
+  $('classMeta').innerHTML=[['Roster',c.roster||'—'],['Class cloud',classCloudLabel],['Roster cloud',rosterCloudLabel],['Course type',String(c.courseType||'initial').replace(/-/g,' ')],['Supported MAJCOM',c.majcom?commandName(c.majcom):'—'],['Home installation',c.homeInstallationName||'—'],['Host command',home?.hostCommand?commandName(home.hostCommand):'—'],['Unit / organization',c.unit||'—'],['Training location',c.trainingLocationName||'—'],['Site code',c.siteCode||'—'],['Exercise / event',c.exercise||'—'],['Scenario',`${c.scenario||'—'} · v${c.scenarioVersion||'1'}`],['Scenario difficulty',String(c.scenarioDifficulty||'standard').replace(/-/g,' ')],['Scenario profile',c.scenarioProfile||'—'],['Date',c.date||'—'],['Lead Evaluator',c.leadEvaluator||'—'],['Evaluator ID',c.evaluatorId||'—'],['Curriculum ID',c.curriculumId||`TCCC-TIER${c.tierId}`],['Content',c.contentVersion||t.source],['Status',life],['Closed',c.closedAt?`${new Date(c.closedAt).toLocaleString()}${c.closedBy?` · ${c.closedBy}`:''}`:'—']].map(([a,b])=>`<div class="metaCell"><small>${esc(a)}</small><b>${esc(b)}</b></div>`).join('');
   const items=allItems(t),critical=items.filter(i=>i.critical).length,noncrit=items.filter(i=>!i.critical).length;
   $('scenarioCoverage').textContent=`${critical} critical required · ${noncrit-(c.scenarioNT||[]).length}/${noncrit} noncritical active`;
   $('scenarioBtn').textContent=closed?'Scenario NT (closed)':hasStartedClass(c)?'View Scenario NT (locked)':'Configure Scenario NT';
@@ -654,6 +655,13 @@ function renderClass(){
   renderClassAnalytics(c,t);
   if($('analyticsScope'))$('analyticsScope').textContent=`${classAttempt1s(c).length} finalized A1 · normalized rates`;
   $('editClassBtn').disabled=closed;$('scenarioBtn').disabled=closed;$('addStudentBtn').disabled=closed;$('importRosterBtn').disabled=closed;
+  const classConflictBtn=$('resolveClassConflictBtn');
+  if(classConflictBtn){
+    const conflicted=!closed&&String(c.cloudSync?.status||'')==='conflict';
+    classConflictBtn.classList.toggle('hidden',!conflicted);
+    classConflictBtn.disabled=!conflicted;
+    classConflictBtn.title=c.cloudSync?.error||'Resolve class metadata conflict';
+  }
   const closeBtn=$('closeClassBtn'),canClose=hasClassCloseAccess();if(closeBtn){closeBtn.classList.toggle('hidden',closed||!canClose);closeBtn.disabled=!canClose;closeBtn.textContent='Verify & Close Class';}$('closedBanner').classList.toggle('hidden',!closed);
   const deleteBtn=$('deleteClassBtn');
   if(deleteBtn){
@@ -701,6 +709,52 @@ function rosterRow(c,s){
     buttons+=` <button class="ghost small danger" data-delete-student="${s.id}"${lock?' disabled aria-disabled="true" title="Roster deletion is locked while an evaluation is in progress."':''}>Delete</button>`;
   }
   return `<div class="rosterRow"><div><div class="rowTitle">${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</div><div class="rowSub">${esc(s.trainingId||'No training ID')} · <span class="statusPill ${clsx}">${status}</span>${best?` · ${scoreStats(c.tierSnapshot,best).percentText} ${gradingSyncBadge(best)}`:a1?` ${gradingSyncBadge(a1)}`:''}</div></div><div class="rowActions">${buttons}</div></div>`;
+}
+function classConflictSummary(x){
+  if(!x)return 'Unavailable';
+  return [
+    ['Name',x.name],
+    ['Roster',x.roster],
+    ['Date',x.date],
+    ['Scenario',x.scenario],
+    ['Site',x.siteCode],
+    ['Unit',x.unit],
+    ['Exercise',x.exercise],
+    ['Lead evaluator',x.leadEvaluator]
+  ].filter(([,v])=>String(v||'').trim()).map(([k,v])=>`${k}: ${v}`).join('\n')||'No descriptive metadata';
+}
+async function resolveClassMetadataConflict(){
+  const c=cls(),sync=window.RAPS_CLASS_SYNC;
+  if(!c||!sync?.inspectClassConflict||!sync?.resolveClassConflict){
+    alert('Class conflict recovery is not available. Reload RaPS and try again.');
+    return;
+  }
+  try{
+    const inspection=await sync.inspectClassConflict(c);
+    const choice=String(prompt(
+      'CLASS METADATA SYNC CONFLICT\n\n'+
+      'Another device changed this class after this browser last synchronized. RaPS will not choose a winner automatically.\n\n'+
+      'THIS DEVICE:\n'+classConflictSummary(inspection.localSummary)+'\n\n'+
+      'SERVER:\n'+classConflictSummary(inspection.remoteSummary)+'\n\n'+
+      'Type SERVER to replace this browser metadata with the authoritative server version.\n'+
+      'Type LOCAL to replace the server metadata with this browser version.\n\n'+
+      'Before either choice, RaPS stores both metadata branches in local recovery history.'
+    )||'').trim().toUpperCase();
+    if(!['SERVER','LOCAL'].includes(choice))return;
+
+    const warning=choice==='SERVER'
+      ? 'Use SERVER class metadata?\n\nThis browser metadata will be replaced. Roster and grading records are preserved.'
+      : 'Use LOCAL class metadata?\n\nThis will replace the newer server class metadata. Roster and grading records are preserved.';
+    if(!confirm(warning))return;
+
+    const ok=await sync.resolveClassConflict(c,choice.toLowerCase());
+    if(!ok)throw new Error('Class conflict resolution did not complete.');
+    renderClass();
+    alert(`CLASS CONFLICT RESOLVED\n\n${choice} is now the active class metadata version. Both pre-resolution branches were preserved locally.`);
+  }catch(error){
+    alert('CLASS CONFLICT NOT RESOLVED\n\n'+String(error?.message||error));
+    renderClass();
+  }
 }
 function conflictRatingsText(ratings){
   const rows=Object.entries(ratings||{}).sort(([a],[b])=>a.localeCompare(b));
@@ -1662,7 +1716,7 @@ function bindEvalDynamic(){
 if($('activeTimers'))$('activeTimers').onclick=e=>{const b=e.target.closest('[data-active-timer-stop]');if(!b||b.disabled)return;timerAction(b.dataset.activeTimerStop,'stop');};
 document.querySelectorAll('[data-home-area]').forEach(b=>b.onclick=()=>setHomeArea(b.dataset.homeArea));
 $('newClassBtn').onclick=()=>newClassForm();$('importBackupBtn').onclick=()=>$('backupImportFile').click();$('backupImportFile').onchange=e=>e.target.files[0]&&restoreBackup(e.target.files[0]);
-$('backHome').onclick=()=>{releaseEvalWakeLock();showHome();};$('editClassBtn').onclick=()=>newClassForm(cls());$('addStudentBtn').onclick=addStudentForm;$('importRosterBtn').onclick=()=>$('rosterFile').click();$('rosterFile').onchange=e=>e.target.files[0]&&importRoster(e.target.files[0]);$('scenarioBtn').onclick=scenarioForm;
+$('backHome').onclick=()=>{releaseEvalWakeLock();showHome();};$('editClassBtn').onclick=()=>newClassForm(cls());if($('resolveClassConflictBtn'))$('resolveClassConflictBtn').onclick=resolveClassMetadataConflict;$('addStudentBtn').onclick=addStudentForm;$('importRosterBtn').onclick=()=>$('rosterFile').click();$('rosterFile').onchange=e=>e.target.files[0]&&importRoster(e.target.files[0]);$('scenarioBtn').onclick=scenarioForm;
 if($('rosterSearch'))$('rosterSearch').oninput=e=>{rosterSearchTerm=e.target.value;renderClass();};document.querySelectorAll('[data-roster-filter]').forEach(b=>b.onclick=()=>{rosterFilter=b.dataset.rosterFilter;renderClass();});
 $('backRoster').onclick=()=>navigateBackSafely();$('nextUnresolvedBottomBtn').onclick=nextUnresolved;$('nextUnresolvedBtn').onclick=nextUnresolved;if($('observeModeBtn'))$('observeModeBtn').onclick=()=>{const st=evalState();st.observeMode=true;st.fieldMode=true;saveDb();renderEval();};if($('reviewModeBtn'))$('reviewModeBtn').onclick=()=>{const st=evalState();st.observeMode=false;st.fieldMode=false;saveDb();renderEval();};$('showNtToggle').onchange=e=>{const st=evalState();st.showNt=e.target.checked;saveDb();renderSection();bindEvalDynamic();};
 $('prevPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i>0){st.section=t.sections[i-1].code;saveDb();renderEval();}};$('nextPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i<t.sections.length-1){st.section=t.sections[i+1].code;saveDb();renderEval();}};
@@ -1800,7 +1854,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.11-web.9';
+  const UPDATE_BUILD = '3.4.11-web.10';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
