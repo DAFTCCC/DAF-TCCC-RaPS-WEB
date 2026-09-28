@@ -194,6 +194,15 @@ async function pushClassUnlocked(c, options={}) {
   const expectedRemoteModifiedAt=Number(options?.expectedRemoteModifiedAt||0);
   const client = getClient();
   const cloud = getCloud();
+
+  if (String(c?.cloudSync?.status||'')==='conflict' && !forceConflict) {
+    patchState(c.id,{
+      enabled:true,
+      status:'conflict',
+      error:c.cloudSync?.error||'Resolve the class metadata conflict before syncing this class.'
+    });
+    return false;
+  }
   if (!client || !cloud?.user?.id) return false;
 
   // Closed classes are server-authoritative retention records. Never push
@@ -604,6 +613,14 @@ function queueClass(classId) {
   const store = getStore();
   const c = store?.getClass(classId);
   if (!c) return;
+  if (String(c?.cloudSync?.status||'')==='conflict') {
+    patchState(classId,{
+      enabled:true,
+      status:'conflict',
+      error:c.cloudSync?.error||'Resolve the class metadata conflict before syncing this class.'
+    });
+    return;
+  }
   if (isClosedClass(c)) {
     patchState(classId, {
       enabled:true,
