@@ -157,6 +157,12 @@ async function pushEvaluation(c,s,a,options={}){
   const localMs=Number(a.modifiedAt||a.startedAt||Date.now());
   const remoteMs=ms(remote?.client_modified_at||remote?.updated_at);
   const lastSeen=Number(attemptState(a).remoteModifiedAt||0);
+  // A LOCAL conflict winner is a new authoritative revision, not a replay of
+  // the older offline timestamp. Publish it strictly after both branches so
+  // every other device can observe and pull the chosen winner.
+  const publishMs=forceConflict
+    ? Math.max(Date.now(),localMs+1,remoteMs+1,expectedRemoteModifiedAt+1)
+    : localMs;
 
   if(forceConflict&&expectedRemoteModifiedAt&&Math.abs(remoteMs-expectedRemoteModifiedAt)>10){
     patchAttempt(a,{
@@ -292,12 +298,18 @@ async function pushEvaluation(c,s,a,options={}){
     started_at:iso(a.startedAt),
     completed_at:null,
     app_data:appData,
-    client_modified_at:iso(localMs),
+    client_modified_at:iso(publishMs),
     source_device_id:getStore()?.deviceId?.()||null
   }).eq('id',a.id).select('client_modified_at,updated_at').single();
   if(updateError)throw updateError;
 
-  patchAttempt(a,{status:'synced',error:'',lastSyncedAt:Date.now(),remoteModifiedAt:ms(updated?.client_modified_at||updated?.updated_at)||localMs});
+  const acceptedMs=ms(updated?.client_modified_at||updated?.updated_at)||publishMs;
+  if(forceConflict){
+    a.modifiedAt=acceptedMs;
+    a.lastModifiedDeviceId=getStore()?.deviceId?.()||a.lastModifiedDeviceId||'';
+    a.syncStatus='CLOUD';
+  }
+  patchAttempt(a,{status:'synced',error:'',lastSyncedAt:Date.now(),remoteModifiedAt:acceptedMs});
   return true;
 }
 
