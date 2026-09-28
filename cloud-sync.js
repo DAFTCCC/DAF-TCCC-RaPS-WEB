@@ -260,6 +260,7 @@ async function fetchRemoteById(id) {
 async function pushClassUnlocked(c, options={}) {
   const forceConflict=options?.forceConflict===true;
   const expectedRemoteModifiedAt=Number(options?.expectedRemoteModifiedAt||0);
+  const casRetry=Number(options?.casRetry||0);
   const client = getClient();
   const cloud = getCloud();
 
@@ -483,6 +484,7 @@ async function pushClassUnlocked(c, options={}) {
       const latestRemote=latest?remoteToLocal(latest,loadedRefs):null;
       const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
       const latestMetadata=classMetadataState(c,latestRemote,latestModified);
+
       if (latestMetadata.sameMetadata) {
         patchState(c.id,{
           enabled:true,status:'synced',error:'',
@@ -494,7 +496,40 @@ async function pushClassUnlocked(c, options={}) {
         });
         return true;
       }
-      markClassConflict(c,latestMetadata,'Cloud class metadata changed during synchronization. No local metadata was overwritten; choose SERVER or LOCAL before continuing.');
+
+      if (!forceConflict && latestMetadata.hasBaseline &&
+          latestMetadata.remoteChanged && !latestMetadata.localChanged) {
+        getStore()?.upsertFromCloud?.(latestRemote,{preserveStudents:true});
+        const active=getStore()?.getClass?.(c.id);
+        if (active) {
+          active.cloudSync={
+            ...(active.cloudSync||{}),
+            enabled:true,status:'synced',error:'',
+            createdBy:latest?.created_by||active.cloudSync?.createdBy||'',
+            lastSyncedAt:Date.now(),
+            localModifiedAt:latestModified,
+            remoteModifiedAt:latestModified,
+            baseMetadataSignature:latestMetadata.remoteSignature
+          };
+          getStore()?.persistCloudMerge?.();
+        }
+        return true;
+      }
+
+      if (!forceConflict && latestMetadata.hasBaseline &&
+          latestMetadata.localChanged && !latestMetadata.remoteChanged &&
+          casRetry<1) {
+        return pushClassUnlocked(c,{...options,casRetry:casRetry+1});
+      }
+
+      if (!forceConflict && latestMetadata.conflict) {
+        markClassConflict(c,latestMetadata,'Cloud class metadata changed during synchronization. No local metadata was overwritten; choose SERVER or LOCAL before continuing.');
+        return false;
+      }
+
+      // No fingerprint baseline means this is an upgrade-era race. Preserve
+      // both differing branches instead of guessing which one should win.
+      markClassConflict(c,latestMetadata,'Cloud class metadata changed during synchronization before a fingerprint baseline was established. Choose SERVER or LOCAL before continuing.');
       return false;
     }
     data=result.data;
