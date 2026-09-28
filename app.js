@@ -687,12 +687,55 @@ function rosterRow(c,s){
     if(a2)buttons+=a2.cloudShellOnly?` <button class="action compact" data-start="${s.id}" data-attempt="2"${attrs(2)}>Cloud A2 Shell</button>`:` <button class="action compact${!a2.finalizedAt?' primary':''}" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,a2.finalizedAt?'View A2':'Continue A2')}</button>`;
     else if(a1?.finalizedAt&&a1.finalResult==='FAIL')buttons+=` <button class="action compact primary" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,'Start A2 Remediation')}</button>`;
     else if(a1?.finalizedAt&&a1.finalResult==='PASS')buttons+=` <span class="rowSub">A2 not indicated after A1 PASS</span>`;
+    if(a1?.cloudGrading?.status==='conflict')buttons+=` <button class="ghost small" data-resolve-grade-conflict="${s.id}" data-attempt="1">Resolve Grade Conflict</button>`;
+    if(a2?.cloudGrading?.status==='conflict')buttons+=` <button class="ghost small" data-resolve-grade-conflict="${s.id}" data-attempt="2">Resolve Grade Conflict</button>`;
     buttons+=` <button class="ghost small danger" data-delete-student="${s.id}"${lock?' disabled aria-disabled="true" title="Roster deletion is locked while an evaluation is in progress."':''}>Delete</button>`;
   }
   return `<div class="rosterRow"><div><div class="rowTitle">${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</div><div class="rowSub">${esc(s.trainingId||'No training ID')} · <span class="statusPill ${clsx}">${status}</span>${best?` · ${scoreStats(c.tierSnapshot,best).percentText} ${gradingSyncBadge(best)}`:a1?` ${gradingSyncBadge(a1)}`:''}</div></div><div class="rowActions">${buttons}</div></div>`;
 }
+function conflictRatingsText(ratings){
+  const rows=Object.entries(ratings||{}).sort(([a],[b])=>a.localeCompare(b));
+  return rows.length?rows.map(([code,result])=>`${code}=${String(result).toUpperCase()}`).join(', '):'No graded criteria';
+}
+async function resolveGradeConflict(studentId,attemptNo){
+  const c=cls();
+  const s=c?.students?.find(x=>x.id===studentId);
+  const a=s?.attempts?.[String(attemptNo)];
+  const sync=window.RAPS_GRADING_SYNC;
+  if(!c||!s||!a||!sync?.inspectConflict||!sync?.resolveConflict){
+    alert('Conflict recovery is not available. Reload RaPS and try again.');
+    return;
+  }
+  try{
+    const inspection=await sync.inspectConflict(c,s,a);
+    const choice=String(prompt(
+      'GRADING SYNC CONFLICT\n\n'+
+      'Another device changed this evaluation after this browser last synchronized. RaPS will not choose a winner automatically.\n\n'+
+      'THIS DEVICE:\n'+conflictRatingsText(inspection.localRatings)+'\n\n'+
+      'SERVER:\n'+conflictRatingsText(inspection.remoteRatings)+'\n\n'+
+      'Type SERVER to replace this browser with the authoritative server version.\n'+
+      'Type LOCAL to replace the server grading with this browser version.\n\n'+
+      'Before either choice, RaPS stores both branches in a local recovery snapshot.'
+    )||'').trim().toUpperCase();
+    if(!['SERVER','LOCAL'].includes(choice))return;
+
+    const warning=choice==='SERVER'
+      ? 'Use SERVER version?\n\nThe current browser grading will be replaced on screen. A recovery snapshot of both branches will be retained locally.'
+      : 'Use LOCAL version?\n\nThis will replace the newer server grading, including criteria entered from another device. A recovery snapshot of both branches will be retained locally.';
+    if(!confirm(warning))return;
+
+    const ok=await sync.resolveConflict(c,s,a,choice.toLowerCase());
+    if(!ok)throw new Error('Conflict resolution did not complete.');
+    renderClass();
+    alert(`GRADING CONFLICT RESOLVED\n\n${choice} is now the active grading version. Both pre-resolution branches were preserved in the local recovery history.`);
+  }catch(error){
+    alert('GRADING CONFLICT NOT RESOLVED\n\n'+String(error?.message||error));
+    renderClass();
+  }
+}
 function bindRosterRows(){
   document.querySelectorAll('[data-start]').forEach(b=>b.onclick=()=>openEvaluation(b.dataset.start,Number(b.dataset.attempt)));
+  document.querySelectorAll('[data-resolve-grade-conflict]').forEach(b=>b.onclick=()=>resolveGradeConflict(b.dataset.resolveGradeConflict,Number(b.dataset.attempt)));
   document.querySelectorAll('[data-delete-student]').forEach(b=>b.onclick=()=>{const c=cls();if(isClassClosed(c))return;const st=c.students.find(x=>x.id===b.dataset.deleteStudent);if(confirm(`Delete ${st?.name||'student'} and all attempts?`)){c.students=c.students.filter(x=>x.id!==b.dataset.deleteStudent);saveDb();renderClass();}});
 }
 function closureIssues(c){
@@ -1748,7 +1791,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.11-web.7';
+  const UPDATE_BUILD = '3.4.11-web.8';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
