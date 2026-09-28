@@ -23,6 +23,40 @@ function msFromIso(value) {
 function shortError(error) {
   return String(error?.message || error || 'Unknown sync error').slice(0, 240);
 }
+function classRevisionState(c, row, localModified, remoteModified, priorStatus='') {
+  const baseline=Number(c?.cloudSync?.remoteModifiedAt||0);
+  const localDeviceId=getStore()?.deviceId?.()||'';
+  const remoteDeviceId=row?.source_device_id||'';
+  const hasBaseline=baseline>0;
+  const locallyDirty=['pending','offline','error'].includes(String(priorStatus||''));
+  const localChanged=hasBaseline ? localModified>baseline+10 : locallyDirty;
+  const remoteChanged=hasBaseline ? remoteModified>baseline+10 : !!row&&remoteModified>0;
+  const differentWriter=!remoteDeviceId||!localDeviceId||remoteDeviceId!==localDeviceId;
+  return {
+    baseline,
+    localModified,
+    remoteModified,
+    localDeviceId,
+    remoteDeviceId,
+    hasBaseline,
+    localChanged,
+    remoteChanged,
+    differentWriter,
+    // Device IDs are diagnostic only. Two tabs can share one persistent
+    // device ID and still hold independent in-memory branches.
+    conflict:!!row&&localChanged&&remoteChanged
+  };
+}
+function markClassConflict(c, revision, message) {
+  patchState(c.id,{
+    enabled:true,
+    status:'conflict',
+    error:message||'This class changed both locally and on another device since the last synchronized revision.',
+    conflictBaseRemoteModifiedAt:Number(revision?.baseline||0),
+    localModifiedAt:Number(revision?.localModified||c?.modifiedAt||0),
+    remoteModifiedAt:Number(revision?.remoteModified||0)
+  });
+}
 function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -234,6 +268,34 @@ async function pushClassUnlocked(c, options={}) {
     return true;
   }
 
+  const priorStatus=String(c?.cloudSync?.status||'');
+  const localModified=Number(c.modifiedAt||c.createdAt||Date.now());
+  const remoteModified=msFromIso(existing?.client_modified_at||existing?.updated_at);
+  const revision=classRevisionState(c,existing,localModified,remoteModified,priorStatus);
+
+  // A conflict is branch divergence from the last synchronized server
+  // revision. Wall-clock ordering between the two edits is irrelevant.
+  if (!forceConflict && revision.conflict) {
+    markClassConflict(
+      c,
+      revision,
+      'Class metadata changed on this browser and another device since the last synchronization. Choose SERVER or LOCAL before continuing.'
+    );
+    return false;
+  }
+
+  const publishModified = forceConflict
+    ? Math.max(Date.now(), localModified + 1, remoteModified + 1, expectedRemoteModifiedAt + 1)
+    : localModified;
+
+  if (forceConflict && expectedRemoteModifiedAt && Math.abs(remoteModified - expectedRemoteModifiedAt) > 10) {
+    markClassConflict(c,{
+      ...revision,
+      remoteModified
+    },'Cloud class changed again while resolving the conflict. Review the latest server version before choosing again.');
+    return false;
+  }
+
   const loadedRefs = await loadRefs();
   const base = resolveBaseForClass(c, loadedRefs);
   const curriculum = resolveCurriculumForClass(c, loadedRefs);
@@ -259,33 +321,6 @@ async function pushClassUnlocked(c, options={}) {
 
   patchState(c.id, { enabled:true, status:'syncing', error:'', lastAttemptAt:Date.now() });
 
-  const localModified = Number(c.modifiedAt || c.createdAt || Date.now());
-  const remoteModified = msFromIso(existing?.client_modified_at || existing?.updated_at);
-  const lastRemoteSeen = Number(c.cloudSync?.remoteModifiedAt || 0);
-  const publishModified = forceConflict
-    ? Math.max(Date.now(), localModified + 1, remoteModified + 1, expectedRemoteModifiedAt + 1)
-    : localModified;
-
-  if (forceConflict && expectedRemoteModifiedAt && Math.abs(remoteModified - expectedRemoteModifiedAt) > 10) {
-    patchState(c.id, {
-      enabled:true,
-      status:'conflict',
-      error:'Cloud class changed again while resolving the conflict. Review the latest server version before choosing again.',
-      remoteModifiedAt:remoteModified
-    });
-    return false;
-  }
-
-  if (!forceConflict && existing && remoteModified > localModified + 10 && remoteModified > lastRemoteSeen + 10) {
-    patchState(c.id, {
-      enabled: true,
-      status: 'conflict',
-      error: 'A newer cloud version exists. Pull before overwriting.',
-      remoteModifiedAt: remoteModified
-    });
-    return false;
-  }
-
   const payload = {
     id: c.id,
     base_id: base.id,
@@ -301,32 +336,73 @@ async function pushClassUnlocked(c, options={}) {
     source_device_id: getStore()?.deviceId?.() || null
   };
 
-  // Use an idempotent upsert so simultaneous first-sync paths (class sync,
-  // roster sync, or another browser holding the same class UUID) cannot
-  // collide with a duplicate-key HTTP 409. The conflict/newer-cloud guard
-  // above still protects against overwriting a genuinely newer remote copy.
-  const result = await client
-    .from('classes')
-    .upsert(payload, { onConflict:'id' });
+  // Compare-and-swap the exact revision inspected above. This closes the
+  // fetch -> write race: if another browser changes the row after our preflight
+  // read, the conditional update affects zero rows and becomes a conflict
+  // instead of silently overwriting the newer server branch.
+  let data=null;
 
-  if (result.error) {
-    patchState(c.id, {
-      enabled:true,
-      status:navigator.onLine ? 'error' : 'offline',
-      error:shortError(result.error)
-    });
-    throw result.error;
+  if (existing) {
+    let write=client.from('classes').update(payload).eq('id',c.id);
+    if (existing.client_modified_at) {
+      write=write.eq('client_modified_at',existing.client_modified_at);
+    } else if (existing.updated_at) {
+      write=write.eq('updated_at',existing.updated_at);
+    }
+
+    const result=await write
+      .select('id, base_id, name, course_type, curriculum_version_id, start_date, end_date, status, created_by, created_at, updated_at, app_data, client_modified_at, source_device_id')
+      .maybeSingle();
+
+    if (result.error) {
+      patchState(c.id,{
+        enabled:true,
+        status:navigator.onLine?'error':'offline',
+        error:shortError(result.error)
+      });
+      throw result.error;
+    }
+
+    if (!result.data) {
+      const latest=await fetchRemoteById(c.id);
+      const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
+      markClassConflict(c,{
+        ...revision,
+        remoteModified:latestModified
+      },'Cloud class changed during synchronization. No local data was overwritten; choose SERVER or LOCAL before continuing.');
+      return false;
+    }
+    data=result.data;
+  } else {
+    const result=await client
+      .from('classes')
+      .insert(payload)
+      .select('id, base_id, name, course_type, curriculum_version_id, start_date, end_date, status, created_by, created_at, updated_at, app_data, client_modified_at, source_device_id')
+      .single();
+
+    if (result.error) {
+      if (String(result.error?.code||'')==='23505') {
+        const latest=await fetchRemoteById(c.id);
+        const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
+        markClassConflict(c,{
+          ...revision,
+          remoteModified:latestModified
+        },'This class appeared on the server while this browser was creating it. Choose SERVER or LOCAL before continuing.');
+        return false;
+      }
+      patchState(c.id,{
+        enabled:true,
+        status:navigator.onLine?'error':'offline',
+        error:shortError(result.error)
+      });
+      throw result.error;
+    }
+    data=result.data;
   }
 
-  const data = await fetchRemoteById(c.id);
-
   if (!data) {
-    const error = new Error('Class write completed but the saved class could not be read back.');
-    patchState(c.id, {
-      enabled:true,
-      status:'error',
-      error:error.message
-    });
+    const error=new Error('Class write completed without a returned server revision.');
+    patchState(c.id,{enabled:true,status:'error',error:error.message});
     throw error;
   }
 
@@ -459,26 +535,55 @@ async function pullVisibleClasses() {
       continue;
     }
 
-    const remoteMs = Number(remote.modifiedAt || 0);
-    const localMs = Number(local.modifiedAt || 0);
-    const state = local.cloudSync || {};
+    const remoteMs=Number(remote.modifiedAt||0);
+    const localMs=Number(local.modifiedAt||0);
+    const state=local.cloudSync||{};
+    const priorStatus=String(state.status||'');
+    const revision=classRevisionState(local,row,localMs,remoteMs,priorStatus);
 
-    if ((state.status === 'pending' || state.status === 'offline' || state.status === 'error' || state.status === 'conflict') && localMs > Number(state.remoteModifiedAt || 0) + 10) {
+    // Once conflicted, normal pulls are read-only with respect to the active
+    // local branch. Track a later server revision but never replace local
+    // metadata until the evaluator explicitly chooses SERVER or LOCAL.
+    if (priorStatus==='conflict') {
+      if (remoteMs>Number(state.remoteModifiedAt||0)+10) {
+        patchState(local.id,{
+          enabled:true,
+          status:'conflict',
+          error:'Cloud class changed again while this conflict is unresolved. Review the latest server version before choosing a winner.',
+          remoteModifiedAt:remoteMs
+        });
+      }
       continue;
     }
 
-    if (remoteMs > localMs + 10) {
-      store.upsertFromCloud(remote, { preserveStudents:true });
+    // Detect two independently changed branches against their common
+    // synchronized baseline. Do not use "remote newer than local" as the
+    // definition of conflict; offline edits may legitimately have later
+    // wall-clock timestamps than the competing server edit.
+    if (revision.conflict) {
+      markClassConflict(
+        local,
+        revision,
+        'Class metadata changed on this browser and another device since the last synchronization. Choose SERVER or LOCAL before continuing.'
+      );
+      continue;
+    }
+
+    const localDirty=['pending','offline','error'].includes(priorStatus)&&revision.localChanged;
+    if (localDirty) continue;
+
+    if (remoteMs>localMs+10) {
+      store.upsertFromCloud(remote,{preserveStudents:true});
       imported++;
     } else {
-      patchState(local.id, {
-        enabled: true,
-        status: 'synced',
-        error: '',
-        createdBy: row.created_by || state.createdBy || '',
-        lastSyncedAt: Date.now(),
-        remoteModifiedAt: remoteMs,
-        localModifiedAt: localMs
+      patchState(local.id,{
+        enabled:true,
+        status:'synced',
+        error:'',
+        createdBy:row.created_by||state.createdBy||'',
+        lastSyncedAt:Date.now(),
+        remoteModifiedAt:remoteMs,
+        localModifiedAt:localMs
       });
     }
   }
@@ -685,7 +790,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.10';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.11';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,

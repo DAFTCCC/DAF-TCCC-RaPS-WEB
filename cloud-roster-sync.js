@@ -671,6 +671,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.10';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.11';
 
 })();
