@@ -180,6 +180,15 @@ function saveDb(){
       state.localModifiedAt=ts;
       c.cloudSync=state;
     }
+    const a=evalState();
+    if(a&&!a.finalizedAt&&!a.voidedAt){
+      const grading=a.cloudGrading||{status:'local',error:'',lastSyncedAt:0,remoteModifiedAt:0};
+      if(grading.status!=='conflict'&&grading.status!=='syncing'){
+        grading.status=navigator.onLine?'pending':'offline';
+        grading.error=navigator.onLine?'':'Changes saved locally; grading will sync when the connection returns.';
+        a.cloudGrading=grading;
+      }
+    }
   }
   localStorage.setItem(DB_KEY,JSON.stringify(db));
   if(c?.cloudSync?.enabled===true && c.cloudSync.status!=='syncing'){
@@ -1791,7 +1800,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.11-web.8';
+  const UPDATE_BUILD = '3.4.11-web.9';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
