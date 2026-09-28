@@ -37,21 +37,12 @@ function persist(){getStore()?.persistCloudMerge?.()}
 function patchAttempt(a,patch){a.cloudGrading={...attemptState(a),...patch};persist()}
 function cloneJson(value){return JSON.parse(JSON.stringify(value))}
 function snapshotLocalAttempt(a){
-  return cloneJson({
+  const copy=cloneJson(a||{});
+  delete copy.conflictRecoveryHistory;
+  return {
     capturedAt:Date.now(),
-    modifiedAt:Number(a?.modifiedAt||0),
-    ratings:a?.ratings||{},
-    methods:a?.methods||{},
-    stamps:a?.stamps||{},
-    ntReasons:a?.ntReasons||{},
-    failureDetails:a?.failureDetails||{},
-    notes:a?.notes||{},
-    timers:a?.timers||{},
-    timerForced:a?.timerForced||{},
-    events:a?.events||[],
-    instants:a?.instants||{},
-    overallNotes:a?.overallNotes||''
-  });
+    attempt:copy
+  };
 }
 function saveConflictRecovery(a,inspection,strategy){
   const history=Array.isArray(a?.conflictRecoveryHistory)?a.conflictRecoveryHistory:[];
@@ -395,7 +386,7 @@ async function inspectConflict(c,s,a){
   if(!client||!navigator.onLine)throw new Error('Conflict resolution requires an online connection.');
 
   const {data:row,error}=await client.from('evaluations')
-    .select('id,status,client_modified_at,updated_at,source_device_id,curriculum_version_id')
+    .select('id,event_id,participant_id,evaluator_id,curriculum_version_id,attempt_number,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id')
     .eq('id',a.id).maybeSingle();
   if(error)throw error;
   if(!row)throw new Error('The server evaluation no longer exists.');
@@ -430,7 +421,13 @@ async function inspectConflict(c,s,a){
     localTimerKeys:Object.entries(a.timers||{}).flatMap(([timerId,store])=>
       (store?.instances||[]).filter(x=>x?.wallStart).map(x=>`${timerId}:${x.id||x.index||1}`)
     ).sort(),
-    remoteTimerKeys:(tr||[]).map(r=>r.sync_key).filter(Boolean).sort()
+    remoteTimerKeys:(tr||[]).map(r=>r.sync_key).filter(Boolean).sort(),
+    serverSnapshot:{
+      capturedAt:Date.now(),
+      evaluation:cloneJson(row),
+      criteria:cloneJson(cr||[]),
+      timers:cloneJson(tr||[])
+    }
   };
 }
 
