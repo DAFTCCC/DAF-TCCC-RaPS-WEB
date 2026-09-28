@@ -42,7 +42,9 @@ function classRevisionState(c, row, localModified, remoteModified, priorStatus='
     localChanged,
     remoteChanged,
     differentWriter,
-    conflict:!!row&&differentWriter&&localChanged&&remoteChanged
+    // Device IDs are diagnostic only. Two tabs can share one persistent
+    // device ID and still hold independent in-memory branches.
+    conflict:!!row&&localChanged&&remoteChanged
   };
 }
 function markClassConflict(c, revision, message) {
