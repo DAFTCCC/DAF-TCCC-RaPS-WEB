@@ -212,7 +212,7 @@ async function pushEvaluation(c,s,a,options={}){
     if(error)throw error;
   }
   const {data:existingCrit,error:existingCritError}=await client.from('criterion_results')
-    .select('id,criterion_id').eq('evaluation_id',a.id);
+    .select('id,criterion_id').eq('evaluation_id',canonicalId);
   if(existingCritError)throw existingCritError;
   const staleCrit=(existingCrit||[]).filter(r=>!currentCriterionIds.has(r.criterion_id)).map(r=>r.id);
   if(staleCrit.length){
@@ -252,7 +252,7 @@ async function pushEvaluation(c,s,a,options={}){
     if(error)throw error;
   }
   const {data:existingTimers,error:existingTimerError}=await client.from('timer_results')
-    .select('id,sync_key').eq('evaluation_id',a.id);
+    .select('id,sync_key').eq('evaluation_id',canonicalId);
   if(existingTimerError)throw existingTimerError;
   const staleTimers=(existingTimers||[]).filter(r=>!liveTimerKeys.has(r.sync_key)).map(r=>r.id);
   if(staleTimers.length){
@@ -348,8 +348,8 @@ async function pullEvaluation(c,s,a,options={}){
 
   const crit=await criteriaFor(row.curriculum_version_id);
   const [{data:cr,error:crErr},{data:tr,error:trErr}]=await Promise.all([
-    client.from('criterion_results').select('criterion_id,result,failure_mode,primary_contributor,evaluator_note,graded_at,app_data,client_modified_at').eq('evaluation_id',a.id),
-    client.from('timer_results').select('criterion_id,timer_name,started_at,stopped_at,elapsed_ms,standard_ms,standard_met,sync_key,app_data,client_modified_at,source_device_id').eq('evaluation_id',a.id)
+    client.from('criterion_results').select('criterion_id,result,failure_mode,primary_contributor,evaluator_note,graded_at,app_data,client_modified_at').eq('evaluation_id',canonicalId),
+    client.from('timer_results').select('criterion_id,timer_name,started_at,stopped_at,elapsed_ms,standard_ms,standard_met,sync_key,app_data,client_modified_at,source_device_id').eq('evaluation_id',canonicalId)
   ]);
   if(crErr)throw crErr;if(trErr)throw trErr;
 
@@ -408,16 +408,28 @@ async function inspectConflict(c,s,a){
     .select('id,event_id,participant_id,evaluator_id,curriculum_version_id,attempt_number,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id')
     .eq('id',a.id).maybeSingle();
   if(error)throw error;
-  if(!row)throw new Error('The server evaluation no longer exists.');
+  if(!row){
+    const fallback=await client.from('evaluations')
+      .select('id,event_id,participant_id,evaluator_id,curriculum_version_id,attempt_number,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id')
+      .eq('event_id',c.id)
+      .eq('participant_id',s.id)
+      .eq('attempt_number',Number(a.attemptNo||1))
+      .neq('status','voided')
+      .maybeSingle();
+    if(fallback.error)throw fallback.error;
+    row=fallback.data||null;
+  }
+  if(!row)throw new Error('No authoritative server evaluation exists for this student and attempt.');
 
+  const canonicalId=String(row.id);
   const crit=await criteriaFor(row.curriculum_version_id||await curriculumIdFor(c));
   const [{data:cr,error:crErr},{data:tr,error:trErr}]=await Promise.all([
     client.from('criterion_results')
       .select('criterion_id,result,failure_mode,primary_contributor,evaluator_note,graded_at,app_data,client_modified_at,source_device_id')
-      .eq('evaluation_id',a.id),
+      .eq('evaluation_id',canonicalId),
     client.from('timer_results')
       .select('criterion_id,timer_name,started_at,stopped_at,elapsed_ms,standard_ms,standard_met,sync_key,app_data,client_modified_at,source_device_id')
-      .eq('evaluation_id',a.id)
+      .eq('evaluation_id',canonicalId)
   ]);
   if(crErr)throw crErr;
   if(trErr)throw trErr;
@@ -429,7 +441,9 @@ async function inspectConflict(c,s,a){
   }
 
   return {
-    evaluationId:a.id,
+    evaluationId:canonicalId,
+    localEvaluationId:String(a.id||''),
+    canonicalEvaluationId:canonicalId,
     remoteModifiedAt:ms(row.client_modified_at||row.updated_at),
     remoteDeviceId:row.source_device_id||'',
     remoteStatus:row.status||'',
