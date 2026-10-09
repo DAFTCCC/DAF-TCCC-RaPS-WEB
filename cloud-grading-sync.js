@@ -608,8 +608,34 @@ async function reconcileOfflineAttempt(c,s,a){
         criticalFailureCount:Number(result.criticalFailureCount||0),
         globalTimerNotMet:!!result.globalTimerNotMet
       };
+      if(serverResult&&fieldResult&&serverResult!==fieldResult){
+        a.serverVerificationStatus='conflict';
+      }else{
+        const fieldStartedIso=iso(a.fieldStartedAt||a.startedAt||a.createdAt);
+        const fieldFinalizedIso=iso(a.fieldFinalizedAt||a.finalizedAt);
+        const {data:auditData,error:auditError}=await client.rpc('confirm_offline_evaluation_audit',{
+          p_evaluation_id:a.id,
+          p_field_started_at:fieldStartedIso,
+          p_field_finalized_at:fieldFinalizedIso,
+          p_field_result:fieldResult||serverResult,
+          p_source_device_id:store?.deviceId?.()||null
+        });
+        if(auditError)throw auditError;
+        if(!auditData?.confirmed){
+          a.serverVerificationStatus='conflict';
+          patchAttempt(a,{
+            status:'conflict',
+            error:'Server audit confirmation rejected the offline field evidence: '+String(auditData?.reason||'unknown reason')+'. Record preserved for review.'
+          });
+          return false;
+        }
+        a.serverVerificationStatus='verified';
+        a.serverAuditConfirmation={
+          confirmedAt:ms(auditData.confirmedAt)||Date.now(),
+          serverModifiedAt:ms(auditData.serverModifiedAt)||Date.now()
+        };
+      }
       a.pendingServerFinalization=false;
-      a.serverVerificationStatus=serverResult&&fieldResult&&serverResult!==fieldResult?'conflict':'verified';
       a.finalizedAt=a.fieldFinalizedAt||a.finalizedAt||Date.now();
       if(!a.fieldFinalizedAt)a.fieldFinalizedAt=a.finalizedAt;
       if(!a.fieldFinalResult)a.fieldFinalResult=fieldResult||serverResult;
