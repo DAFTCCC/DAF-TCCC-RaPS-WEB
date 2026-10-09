@@ -404,7 +404,7 @@ async function inspectConflict(c,s,a){
   const client=getClient();
   if(!client||!navigator.onLine)throw new Error('Conflict resolution requires an online connection.');
 
-  const {data:row,error}=await client.from('evaluations')
+  let {data:row,error}=await client.from('evaluations')
     .select('id,event_id,participant_id,evaluator_id,curriculum_version_id,attempt_number,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id')
     .eq('id',a.id).maybeSingle();
   if(error)throw error;
@@ -786,7 +786,7 @@ window.addEventListener('online',()=>{
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.12-offline-field-ops.3';
+window.RAPS_GRADING_SYNC_BUILD='3.4.12-offline-field-ops.4';
 window.RAPS_GRADING_SYNC=Object.freeze({
   syncAll,
   reconcilePendingOffline,
