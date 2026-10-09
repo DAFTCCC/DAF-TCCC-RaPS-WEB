@@ -483,6 +483,13 @@ async function resolveConflict(c,s,a,strategy){
   saveConflictRecovery(a,inspection,strategy);
 
   if(strategy==='server'){
+    const localEvaluationId=String(a.id||'');
+    const canonicalEvaluationId=String(inspection.canonicalEvaluationId||inspection.evaluationId||'');
+    if(!canonicalEvaluationId)throw new Error('Authoritative server evaluation ID is unavailable.');
+    if(canonicalEvaluationId!==localEvaluationId){
+      a.replacedLocalEvaluationId=localEvaluationId;
+      a.id=canonicalEvaluationId;
+    }
     const ok=await pullEvaluation(c,s,a,{force:true});
     if(!ok)throw new Error('Unable to load the authoritative server evaluation.');
     const serverRow=inspection.serverSnapshot?.evaluation||{};
@@ -779,7 +786,7 @@ window.addEventListener('online',()=>{
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.12-offline-field-ops.2';
+window.RAPS_GRADING_SYNC_BUILD='3.4.12-offline-field-ops.3';
 window.RAPS_GRADING_SYNC=Object.freeze({
   syncAll,
   reconcilePendingOffline,
