@@ -471,6 +471,18 @@ async function resolveConflict(c,s,a,strategy){
   if(strategy==='server'){
     const ok=await pullEvaluation(c,s,a,{force:true});
     if(!ok)throw new Error('Unable to load the authoritative server evaluation.');
+    const serverRow=inspection.serverSnapshot?.evaluation||{};
+    const serverApp=serverRow.app_data||{};
+    a.pendingServerClaim=false;
+    a.pendingServerFinalization=false;
+    if(serverApp.fieldStartedAt!==undefined)a.fieldStartedAt=Number(serverApp.fieldStartedAt)||a.fieldStartedAt||null;
+    if(serverApp.fieldFinalizedAt!==undefined)a.fieldFinalizedAt=Number(serverApp.fieldFinalizedAt)||a.fieldFinalizedAt||null;
+    if(serverApp.fieldFinalResult!==undefined)a.fieldFinalResult=String(serverApp.fieldFinalResult||'').toUpperCase()||a.fieldFinalResult||null;
+    if(serverApp.offlineStarted!==undefined)a.offlineStarted=!!serverApp.offlineStarted;
+    if(serverApp.serverClaimedAt!==undefined)a.serverClaimedAt=serverApp.serverClaimedAt;
+    if(serverApp.serverAuditConfirmation!==undefined)a.serverAuditConfirmation=cloneJson(serverApp.serverAuditConfirmation);
+    a.serverVerificationStatus=String(serverApp.serverVerificationStatus||(String(serverRow.status||'').toLowerCase()==='finalized'?'verified':'')).toLowerCase()||'server';
+    patchAttempt(a,{status:'synced',error:'',lastSyncedAt:Date.now(),remoteModifiedAt:inspection.remoteModifiedAt});
     a.conflictResolution={
       resolvedAt:Date.now(),
       strategy:'server',
@@ -753,7 +765,7 @@ window.addEventListener('online',()=>{
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.12-offline-field-ops.1';
+window.RAPS_GRADING_SYNC_BUILD='3.4.12-offline-field-ops.2';
 window.RAPS_GRADING_SYNC=Object.freeze({
   syncAll,
   reconcilePendingOffline,
