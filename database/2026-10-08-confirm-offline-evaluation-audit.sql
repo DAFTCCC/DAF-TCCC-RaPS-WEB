@@ -124,6 +124,7 @@ BEGIN
 
     UPDATE public.evaluations
     SET
+        started_at = p_field_started_at,
         app_data =
             coalesce(app_data, '{}'::jsonb)
             ||
