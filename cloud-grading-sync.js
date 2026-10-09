@@ -284,6 +284,7 @@ async function pushEvaluation(c,s,a,options={}){
     showNt:!!a.showNt,
     observeMode:a.observeMode!==false,
     remediation:a.remediation||null,
+    fieldStartedAt:a.fieldStartedAt||a.startedAt||a.createdAt||null,
     fieldFinalizedAt:a.fieldFinalizedAt||null,
     fieldFinalResult:a.fieldFinalResult||null,
     offlineStarted:!!a.offlineStarted,
@@ -300,7 +301,7 @@ async function pushEvaluation(c,s,a,options={}){
     overall_result:null,
     score_numerator:sc.pass,
     score_denominator:sc.denom,
-    started_at:iso(a.startedAt),
+    started_at:iso(a.fieldStartedAt||a.startedAt||a.createdAt),
     completed_at:null,
     app_data:appData,
     client_modified_at:iso(publishMs),
@@ -566,6 +567,7 @@ async function reconcileOfflineAttempt(c,s,a){
 
       a.pendingServerClaim=false;
       a.serverClaimMode='authoritative-v1';
+      a.fieldStartedAt=a.fieldStartedAt||a.startedAt||a.createdAt||Date.now();
       a.serverClaimedAt=ms(claim.startedAt)||Date.now();
       a.serverClaimedBy=cloud.user.id;
       a.serverVerificationStatus=a.pendingServerFinalization?'pending':'claimed';
@@ -614,7 +616,7 @@ async function reconcileOfflineAttempt(c,s,a){
       a.events=a.events||[];
       a.events.push({
         at:a.serverFinalization.finalizedAt,
-        elapsed:Math.max(0,(a.fieldFinalizedAt||a.finalizedAt)-a.startedAt),
+        elapsed:Math.max(0,(a.fieldFinalizedAt||a.finalizedAt)-(a.fieldStartedAt||a.startedAt)),
         label:'Server verification completed',
         detail:`${serverResult||fieldResult} · authoritative verification after offline field finalization`
       });
