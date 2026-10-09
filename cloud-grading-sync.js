@@ -659,7 +659,7 @@ async function reconcilePendingOffline(){
   for(const item of pending){
     if(!navigator.onLine)break;
     if(await reconcileOfflineAttempt(item.c,item.s,item.a))n++;
-    if(item.a.cloudGrading?.status==='conflict')continue;
+    if(item.a.cloudGrading?.status==='conflict')break;
     if(item.a.pendingServerClaim||item.a.pendingServerFinalization)break;
   }
   return n;
