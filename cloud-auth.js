@@ -19,6 +19,8 @@ let client = null;
 let identity = null;
 let authSubscription = null;
 let accessCatalog = { bases: [], majcoms: [] };
+let reconnectRecoveryBound = false;
+let reconnectRecoveryPromise = null;
 
 const byId = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -812,8 +814,114 @@ async function handleSignOut() {
   setGate(true, 'Signed out. Sign in to continue.', '');
 }
 
+function ensureReconnectRecoveryBound() {
+  if (reconnectRecoveryBound) return;
+  reconnectRecoveryBound = true;
+
+  window.addEventListener('online', () => {
+    if (client) return;
+    void recoverCloudClientAfterOfflineBoot();
+  });
+}
+
+async function ensureSupabaseLibrary() {
+  if (window.supabase?.createClient) return true;
+
+  const existing = document.querySelector('script[data-raps-supabase-recovery="1"]');
+  if (existing) {
+    await new Promise((resolve, reject) => {
+      if (window.supabase?.createClient) return resolve();
+      existing.addEventListener('load', resolve, { once:true });
+      existing.addEventListener('error', () => reject(new Error('Unable to reload the Supabase client library.')), { once:true });
+    });
+    return !!window.supabase?.createClient;
+  }
+
+  await new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
+    script.async = true;
+    script.dataset.rapsSupabaseRecovery = '1';
+    script.addEventListener('load', resolve, { once:true });
+    script.addEventListener('error', () => reject(new Error('Unable to reload the Supabase client library.')), { once:true });
+    document.head.appendChild(script);
+  });
+
+  return !!window.supabase?.createClient;
+}
+
+async function recoverCloudClientAfterOfflineBoot() {
+  if (client) {
+    if (identity?.user?.id) await establishIdentity(identity.user);
+    return true;
+  }
+  if (reconnectRecoveryPromise) return reconnectRecoveryPromise;
+
+  reconnectRecoveryPromise = (async () => {
+    try {
+      setStatus('checking', 'Network restored · Reconnecting RaPS cloud…');
+
+      const available = await ensureSupabaseLibrary();
+      if (!available) throw new Error('Supabase client library is unavailable.');
+
+      client = window.supabase.createClient(
+        CFG.projectUrl,
+        CFG.publishableKey,
+        {
+          auth: {
+            persistSession: true,
+            autoRefreshToken: true,
+            detectSessionInUrl: true,
+            storageKey: CFG.authStorageKey || 'raps-supabase-auth-v1'
+          }
+        }
+      );
+
+      window.RAPS_SUPABASE = client;
+
+      const { data: { session }, error } = await client.auth.getSession();
+      if (error) throw error;
+
+      if (!session?.user) {
+        setStatus('denied', 'Network restored · RaPS sign-in required');
+        setGate(true, 'Your cached offline identity remains preserved, but the cloud session is no longer available. Sign in to synchronize pending field evaluations.', 'error');
+        return false;
+      }
+
+      if (!authSubscription) {
+        const { data } = client.auth.onAuthStateChange((event, nextSession) => {
+          if (event === 'SIGNED_OUT') {
+            identity = null;
+            setStatus('denied', 'Not signed in');
+            setGate(true, 'Signed out. Sign in to continue.', '');
+            return;
+          }
+          if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') && nextSession?.user) {
+            window.setTimeout(() => establishIdentity(nextSession.user), 0);
+          }
+        });
+        authSubscription = data?.subscription || null;
+      }
+
+      await establishIdentity(session.user);
+      return true;
+    } catch (error) {
+      console.warn('RaPS reconnect recovery failed', error);
+      const cached = identity || readCachedIdentity();
+      if (cached?.user?.id) exposeIdentity(cached, 'offline');
+      setStatus('offline', 'Network restored · Cloud reconnect failed');
+      return false;
+    } finally {
+      reconnectRecoveryPromise = null;
+    }
+  })();
+
+  return reconnectRecoveryPromise;
+}
+
 async function initCloudAuth() {
   injectUi();
+  ensureReconnectRecoveryBound();
 
   if (!CFG.projectUrl || !CFG.publishableKey) {
     setStatus('denied', 'Cloud configuration missing');
