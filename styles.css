@@ -649,3 +649,12 @@ body.cloudActivationLocked{overflow:hidden}
   }
 }
 
+
+
+/* v3.4.12 offline field operations */
+.offlineReadiness{grid-column:1/-1}
+.offlineReadiness.ready{border-color:#2f8f54;background:#10251a}
+.offlineReadiness.ready b{color:#baf3ca}
+.offlineReadiness.notReady{border-color:#a66e1f;background:#2b2112}
+.offlineReadiness.notReady b{color:#ffe0a6}
+.offlineReadiness span{display:block;margin-top:5px;font-size:10px;line-height:1.45;color:var(--muted)}
