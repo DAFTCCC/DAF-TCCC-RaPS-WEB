@@ -131,6 +131,13 @@ function normalizeDb(x){
         a.startedByUserId=a.startedByUserId||a.cloudEvaluatorUserId||'';
         a.startedByDeviceId=a.startedByDeviceId||a.deviceId||'';
         a.timerForced=a.timerForced||{};
+        a.fieldFinalizedAt=a.fieldFinalizedAt||null;
+        a.fieldFinalResult=a.fieldFinalResult||null;
+        a.pendingServerClaim=!!a.pendingServerClaim;
+        a.pendingServerFinalization=!!a.pendingServerFinalization;
+        a.offlineStarted=!!a.offlineStarted;
+        a.serverClaimMode=a.serverClaimMode||'';
+        a.serverVerificationStatus=a.serverVerificationStatus||(a.pendingServerFinalization||a.pendingServerClaim?'pending':(a.serverFinalization?'verified':''));
         a.legacyRatings=a.legacyRatings||{};
         Object.entries(a.ratings||{}).forEach(([itemId,rating])=>{
           if(rating==='no'){
@@ -310,6 +317,7 @@ function makeAttempt(c,s,attemptNo){
     ratings,methods,stamps,ntReasons,failureDetails:{},notes:{},noteOpen:{},observeMode:true,fieldMode:true,timerForced:{},timers:makeTimerStore(t),events:[],instants:{},
     trainerSign:c.leadEvaluator||'',evaluatorId:c.evaluatorId||'',studentSign:'',overallNotes:'',showNt:false,appVersion:APP_VERSION,createdAt:now(),modifiedAt:now(),deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,classId:c.id,participantId:s.id,
     startedByUserId:currentCloudUserId(),startedByDeviceId:db.deviceId,cloudEvaluatorUserId:currentCloudUserId(),
+    fieldFinalizedAt:null,fieldFinalResult:null,pendingServerClaim:false,pendingServerFinalization:false,offlineStarted:false,serverClaimMode:'',serverVerificationStatus:'',
     curriculumId:c.curriculumId||`TCCC-TIER${c.tierId}`,contentVersion:c.contentVersion,scenarioVersion:c.scenarioVersion||'1',remediation:null
   };
 }
@@ -373,6 +381,46 @@ function authoritativeEvaluationClient(action='Evaluation action'){
   if(!navigator.onLine)throw new Error(`${action} requires an online connection so RaPS can preserve the server-authoritative evaluator lock.`);
   if(!cloud?.user?.id||!client)throw new Error(`${action} requires an authenticated RaPS cloud session.`);
   return client;
+}
+function isConnectivityFailure(error){
+  const message=String(error?.message||error||'').toLowerCase();
+  return !navigator.onLine
+    || window.RAPS_CLOUD?.offlineCached===true
+    || /failed to fetch|networkerror|network request failed|load failed|fetch failed|connection refused|connection reset|timeout|timed out|offline/.test(message);
+}
+function activateLocalOfflineAttempt(c,s,candidate,attemptNo){
+  const uid=currentCloudUserId();
+  if(!uid)throw new Error('Offline assessment start requires a previously verified RaPS identity on this device.');
+  candidate.startedAt=candidate.startedAt||now();
+  candidate.startedByUserId=uid;
+  candidate.cloudEvaluatorUserId=uid;
+  candidate.startedByDeviceId=db.deviceId;
+  candidate.pendingServerClaim=true;
+  candidate.pendingServerFinalization=false;
+  candidate.offlineStarted=true;
+  candidate.serverClaimMode='offline_pending';
+  candidate.serverVerificationStatus='pending';
+  candidate.cloudGrading={
+    ...(candidate.cloudGrading||{}),
+    status:'offline',
+    error:'Assessment started offline; server claim pending.',
+    lastSyncedAt:Number(candidate.cloudGrading?.lastSyncedAt||0),
+    remoteModifiedAt:Number(candidate.cloudGrading?.remoteModifiedAt||0)
+  };
+  candidate.events=candidate.events||[];
+  candidate.events.push({
+    at:candidate.startedAt,
+    elapsed:0,
+    label:'Assessment started offline',
+    detail:'Local field record created; server claim pending until connectivity returns.'
+  });
+  s.attempts=s.attempts||{};
+  currentStudentId=s.id;currentAttemptNo=attemptNo;
+  c.status='active';
+  s.attempts[String(attemptNo)]=candidate;
+  saveDb();
+  closeModal('formModal');
+  renderEval();showView('evalView');requestEvalWakeLock();
 }
 function serverTimeMs(value,fallback=now()){
   const n=value?Date.parse(value):NaN;
@@ -633,6 +681,20 @@ async function requestClosedClassArchiveDeletion(c){
   await renderClosedArchiveStatus(c);
 }
 
+function offlineReadiness(c){
+  const cloud=window.RAPS_CLOUD||{};
+  const checks=[
+    {ok:!!cloud.user?.id&&(cloud.connected===true||cloud.offlineCached===true),label:'verified identity'},
+    {ok:!!c?.tierSnapshot?.sections?.length,label:'tier curriculum'},
+    {ok:Array.isArray(c?.scenarioNT),label:'scenario profile'},
+    {ok:(c?.students||[]).length>0,label:'student roster'},
+    {ok:c?.cloudSync?.enabled!==true||c?.cloudSync?.status==='synced'||Number(c?.cloudSync?.lastSyncedAt||0)>0,label:'class sync'},
+    {ok:c?.cloudSync?.enabled!==true||c?.cloudRosterSync?.status==='synced'||Number(c?.cloudRosterSync?.lastSyncedAt||0)>0,label:'roster sync'},
+    {ok:!('serviceWorker' in navigator)||!!navigator.serviceWorker.controller,label:'offline app shell'}
+  ];
+  const missing=checks.filter(x=>!x.ok).map(x=>x.label);
+  return {ready:missing.length===0,missing};
+}
 function renderClass(){
   const c=cls(),t=tier(),stats=classStats(c);if(!c)return showHome();
   const closed=isClassClosed(c),life=lifecycleStatus(c);
@@ -642,7 +704,9 @@ function renderClass(){
   ensureLocationFields(c);const home=installationById(c.homeInstallationId);
   const rosterCloud=c.cloudRosterSync||{};const rosterCloudLabel=!c.cloudSync?.enabled?'Local only':rosterCloud.status==='synced'?'Synced':rosterCloud.status==='error'?'Sync error':rosterCloud.status==='offline'?'Offline':rosterCloud.status==='pending'?'Pending':rosterCloud.status==='conflict'?'Blocked by class conflict':'Not synced';
   const classCloud=c.cloudSync||{};const classCloudLabel=!classCloud.enabled?'Local only':classCloud.status==='synced'?'Synced':classCloud.status==='syncing'?'Syncing':classCloud.status==='conflict'?'CONFLICT':classCloud.status==='error'?'Sync error':classCloud.status==='offline'?'Offline':classCloud.status==='pending'?'Pending':'Not synced';
-  $('classMeta').innerHTML=[['Roster',c.roster||'—'],['Class cloud',classCloudLabel],['Roster cloud',rosterCloudLabel],['Course type',String(c.courseType||'initial').replace(/-/g,' ')],['Supported MAJCOM',c.majcom?commandName(c.majcom):'—'],['Home installation',c.homeInstallationName||'—'],['Host command',home?.hostCommand?commandName(home.hostCommand):'—'],['Unit / organization',c.unit||'—'],['Training location',c.trainingLocationName||'—'],['Site code',c.siteCode||'—'],['Exercise / event',c.exercise||'—'],['Scenario',`${c.scenario||'—'} · v${c.scenarioVersion||'1'}`],['Scenario difficulty',String(c.scenarioDifficulty||'standard').replace(/-/g,' ')],['Scenario profile',c.scenarioProfile||'—'],['Date',c.date||'—'],['Lead Evaluator',c.leadEvaluator||'—'],['Evaluator ID',c.evaluatorId||'—'],['Curriculum ID',c.curriculumId||`TCCC-TIER${c.tierId}`],['Content',c.contentVersion||t.source],['Status',life],['Closed',c.closedAt?`${new Date(c.closedAt).toLocaleString()}${c.closedBy?` · ${c.closedBy}`:''}`:'—']].map(([a,b])=>`<div class="metaCell"><small>${esc(a)}</small><b>${esc(b)}</b></div>`).join('');
+  const offline=offlineReadiness(c);
+  const offlineCard=`<div class="metaCell offlineReadiness ${offline.ready?'ready':'notReady'}"><small>Offline readiness</small><b>${offline.ready?'OFFLINE READY':'NOT OFFLINE READY'}</b><span>${offline.ready?'Identity, class, roster, curriculum, scenario, and app shell are available for disconnected evaluation.':'Missing: '+esc(offline.missing.join(', '))}</span></div>`;
+  $('classMeta').innerHTML=offlineCard+[['Roster',c.roster||'—'],['Class cloud',classCloudLabel],['Roster cloud',rosterCloudLabel],['Course type',String(c.courseType||'initial').replace(/-/g,' ')],['Supported MAJCOM',c.majcom?commandName(c.majcom):'—'],['Home installation',c.homeInstallationName||'—'],['Host command',home?.hostCommand?commandName(home.hostCommand):'—'],['Unit / organization',c.unit||'—'],['Training location',c.trainingLocationName||'—'],['Site code',c.siteCode||'—'],['Exercise / event',c.exercise||'—'],['Scenario',`${c.scenario||'—'} · v${c.scenarioVersion||'1'}`],['Scenario difficulty',String(c.scenarioDifficulty||'standard').replace(/-/g,' ')],['Scenario profile',c.scenarioProfile||'—'],['Date',c.date||'—'],['Lead Evaluator',c.leadEvaluator||'—'],['Evaluator ID',c.evaluatorId||'—'],['Curriculum ID',c.curriculumId||`TCCC-TIER${c.tierId}`],['Content',c.contentVersion||t.source],['Status',life],['Closed',c.closedAt?`${new Date(c.closedAt).toLocaleString()}${c.closedBy?` · ${c.closedBy}`:''}`:'—']].map(([a,b])=>`<div class="metaCell"><small>${esc(a)}</small><b>${esc(b)}</b></div>`).join('');
   const items=allItems(t),critical=items.filter(i=>i.critical).length,noncrit=items.filter(i=>!i.critical).length;
   $('scenarioCoverage').textContent=`${critical} critical required · ${noncrit-(c.scenarioNT||[]).length}/${noncrit} noncritical active`;
   $('scenarioBtn').textContent=closed?'Scenario NT (closed)':hasStartedClass(c)?'View Scenario NT (locked)':'Configure Scenario NT';
@@ -677,6 +741,8 @@ function renderClass(){
 function gradingSyncBadge(a){
   if(!a)return '';
   if(a.cloudShellOnly)return '<span class="gradeSyncBadge shell">CLOUD SHELL</span>';
+  if(a.pendingServerFinalization)return '<span class="gradeSyncBadge offline" title="Finalized on this device; server verification will occur automatically after reconnect.">FINALIZED LOCAL · VERIFY PENDING</span>';
+  if(a.pendingServerClaim)return '<span class="gradeSyncBadge offline" title="Started on this device while disconnected; authoritative server claim is pending.">OFFLINE START · CLAIM PENDING</span>';
   const st=String(a.cloudGrading?.status||'local').toLowerCase();
   const label=st==='synced'?'GRADE SYNCED':st==='syncing'?'GRADE SYNCING':st==='conflict'?'GRADE CONFLICT':st==='error'?'GRADE ERROR':st==='offline'?'GRADE OFFLINE':'GRADE LOCAL';
   return `<span class="gradeSyncBadge ${esc(st)}" title="${esc(a.cloudGrading?.error||'')}">${label}</span>`;
@@ -684,8 +750,9 @@ function gradingSyncBadge(a){
 function rosterRow(c,s){
   const a1=s.attempts?.['1'],a2=s.attempts?.['2'],closed=isClassClosed(c),lock=findActiveEvaluationLock();
   const best=a2?.finalizedAt?a2:a1?.finalizedAt?a1:null;
-  const status=a2&&!a2.finalizedAt?'A2 IN PROGRESS':a1&&!a1.finalizedAt?'A1 IN PROGRESS':best?best.finalResult:'NOT STARTED';
-  const clsx=status==='PASS'?'pass':status==='FAIL'?'fail':status.includes('IN PROGRESS')?'progress':'';
+  const pendingVerify=!!best?.pendingServerFinalization;
+  const status=a2&&!a2.finalizedAt?'A2 IN PROGRESS':a1&&!a1.finalizedAt?'A1 IN PROGRESS':best?`${best.finalResult}${pendingVerify?' · VERIFY PENDING':''}`:'NOT STARTED';
+  const clsx=best?.finalResult==='PASS'?'pass':best?.finalResult==='FAIL'?'fail':status.includes('IN PROGRESS')?'progress':'';
   const attrs=attemptNo=>{
     if(!lock)return '';
     if(evaluationTargetMatchesLock(lock,c.id,s.id,attemptNo))return '';
@@ -993,13 +1060,23 @@ function openEvaluation(studentId,attemptNo){
     }
     const reason=attemptNo===2?$('remediationReason').value.trim():'',action=attemptNo===2?$('remediationAction').value.trim():'';
     if(attemptNo===2&&(!reason||!action)){alert('Record the remediation reason and corrective action before starting Attempt 2.');return;}
+    if(unstartedCloudShell&&existing?.cloudEvaluatorUserId&&currentCloudUserId()&&String(existing.cloudEvaluatorUserId)!==currentCloudUserId()){
+      alert('ASSESSMENT NOT STARTED\n\nThe cached cloud shell is assigned to another evaluator. Reconnect and sync before using this student attempt.');
+      return;
+    }
     const btn=$('beginAttemptBtn');
-    if(btn){btn.disabled=true;btn.textContent='CLAIMING ASSESSMENT…';}
-    let claimClient=null,claimedId='';
+    if(btn){btn.disabled=true;btn.textContent=navigator.onLine?'CLAIMING ASSESSMENT…':'STARTING OFFLINE…';}
+    let claimClient=null,claimedId='',candidate=null;
     try{
-      const candidate=makeAttempt(c,s,attemptNo);
+      candidate=makeAttempt(c,s,attemptNo);
       if(unstartedCloudShell&&existing?.id)candidate.id=existing.id;
       if(attemptNo===2)candidate.remediation={reason,action,at:now()};
+
+      if(!navigator.onLine||window.RAPS_CLOUD?.offlineCached===true){
+        activateLocalOfflineAttempt(c,s,candidate,attemptNo);
+        return;
+      }
+
       const claim=await claimEvaluationOnServer(c,s,candidate);
       claimClient=claim.client;
       const data=claim.data||{};
@@ -1023,7 +1100,10 @@ function openEvaluation(studentId,attemptNo){
       candidate.startedAt=serverTimeMs(data.startedAt,candidate.startedAt||now());
       candidate.serverClaimedAt=candidate.startedAt;
       candidate.serverClaimedBy=currentCloudUserId();
+      candidate.pendingServerClaim=false;
+      candidate.offlineStarted=false;
       candidate.serverClaimMode='authoritative-v1';
+      candidate.serverVerificationStatus='claimed';
       s.attempts=s.attempts||{};
       currentStudentId=studentId;currentAttemptNo=attemptNo;
       c.status='active';
@@ -1042,6 +1122,16 @@ function openEvaluation(studentId,attemptNo){
           });
         }catch{}
       }
+      if(candidate&&isConnectivityFailure(error)&&!claimedId){
+        try{
+          activateLocalOfflineAttempt(c,s,candidate,attemptNo);
+          alert('NETWORK UNAVAILABLE\n\nRaPS started this assessment locally. Continue grading normally; the server claim will reconcile automatically when connectivity returns.');
+          return;
+        }catch(localError){
+          alert('ASSESSMENT NOT STARTED\n\n'+(localError?.message||localError));
+          return;
+        }
+      }
       alert('ASSESSMENT NOT STARTED\n\n'+(error?.message||error)+'\n\nRaPS did not create a local evaluation.');
     }finally{
       if(btn&&document.body.contains(btn)){btn.textContent='Begin Assessment';btn.disabled=!$('beginAttemptAck')?.checked;}
@@ -1054,7 +1144,7 @@ function renderEval(){
   const c=cls(),t=tier(),s=student(),st=evalState(); if(!c||!s||!st)return openClass(currentClassId);
   $('tierTitle').textContent=`Tier ${t.id} — ${t.shortName}`; $('tierSource').textContent=t.source;
   $('studentLabel').textContent=`${s.rank?`${s.rank} `:''}${s.name} · ${c.name}`;
-  $('attemptBadge').textContent=`Attempt ${st.attemptNo}${st.finalizedAt?' · FINALIZED':''}`; $('attemptLabel').textContent=`Attempt ${st.attemptNo}`; $('instructions').textContent=t.instructions;
+  $('attemptBadge').textContent=`Attempt ${st.attemptNo}${st.pendingServerFinalization?' · FINALIZED LOCALLY · VERIFY PENDING':st.finalizedAt?' · FINALIZED':''}`; $('attemptLabel').textContent=`Attempt ${st.attemptNo}`; $('instructions').textContent=t.instructions;
   $('trainerSign').value=st.trainerSign||''; $('attemptEvaluatorId').value=st.evaluatorId||c.evaluatorId||''; $('studentSign').value=st.studentSign||''; $('overallNotes').value=st.overallNotes||''; $('showNtToggle').checked=!!st.showNt;
   const observe=isObserveMode(st);$('evalView').classList.toggle('reviewMode',!observe);$('evalView').classList.toggle('observeMode',observe);
   if($('observeModeBtn')){$('observeModeBtn').classList.toggle('active',observe);$('observeModeBtn').setAttribute('aria-pressed',String(observe));}
@@ -1395,6 +1485,34 @@ function reviewFinalize(){
   $('confirmFinalizeBtn').textContent=p.activeTimers.length?'Stop / resolve active timers':p.result==='INCOMPLETE'?'Resolve Items Before Finalizing':`Finalize ${p.result}`;
   openModal('reportModal');
 }
+function finalizeLocallyPendingServer(c,s,st,p,reason='offline'){
+  const completed=now();
+  st.fieldFinalizedAt=st.fieldFinalizedAt||completed;
+  st.fieldFinalResult=String(p.result||'').toUpperCase();
+  st.finalizedAt=st.fieldFinalizedAt;
+  st.finalResult=st.fieldFinalResult;
+  st.pendingServerFinalization=true;
+  st.pendingServerClaim=st.pendingServerClaim||st.serverClaimMode!=='authoritative-v1';
+  st.serverVerificationStatus='pending';
+  st.cloudGrading={
+    ...(st.cloudGrading||{}),
+    status:navigator.onLine?'pending':'offline',
+    error:'Finalized locally; authoritative server verification pending.',
+    lastSyncedAt:Number(st.cloudGrading?.lastSyncedAt||0),
+    remoteModifiedAt:Number(st.cloudGrading?.remoteModifiedAt||0)
+  };
+  st.events=st.events||[];
+  st.events.push({
+    at:st.fieldFinalizedAt,
+    elapsed:Math.max(0,st.fieldFinalizedAt-st.startedAt),
+    label:'Evaluation finalized locally',
+    detail:`${st.fieldFinalResult} · server verification pending · ${reason}`
+  });
+  saveDb();
+  closeModal('reportModal');
+  renderEval();
+  renderClass();
+}
 async function finalizeEvaluation(){
   const c=cls(),s=student(),st=evalState(),p=proficiency();
   if(!c||!s||!st||st.finalizedAt)return;
@@ -1402,7 +1520,18 @@ async function finalizeEvaluation(){
     alert(p.activeTimers.length?'Stop or administratively resolve all active/paused timers before finalization.':'Resolve all required criteria and timing standards before finalization.');
     return;
   }
-  if(!confirm(`Submit this evaluation for server verification?\n\nLocal review result: ${p.result}\nScore: ${p.score.percentText}\n\nThe server will independently validate completeness and derive the authoritative PASS/FAIL result. Finalized attempts become read-only and release the evaluator lock.`))return;
+  const disconnected=!navigator.onLine||window.RAPS_CLOUD?.offlineCached===true;
+  const promptText=disconnected
+    ? `Finalize this evaluation locally?\n\nLocal result: ${p.result}\nScore: ${p.score.percentText}\n\nThe evaluation will become read-only immediately. RaPS will preserve it on this device and automatically submit it for authoritative server verification when connectivity returns.`
+    : `Submit this evaluation for server verification?\n\nLocal review result: ${p.result}\nScore: ${p.score.percentText}\n\nThe server will independently validate completeness and derive the authoritative PASS/FAIL result. Finalized attempts become read-only and release the evaluator lock.`;
+  if(!confirm(promptText))return;
+
+  if(disconnected){
+    finalizeLocallyPendingServer(c,s,st,p,'offline');
+    alert(`Evaluation finalized locally as ${p.result}.\n\nIt is read-only and preserved on this device. Server verification is pending until connectivity returns.`);
+    return;
+  }
+
   const btn=$('confirmFinalizeBtn');
   if(btn){btn.disabled=true;btn.textContent='VERIFYING & FINALIZING…';}
   try{
@@ -1421,25 +1550,38 @@ async function finalizeEvaluation(){
       alert('EVALUATION NOT FINALIZED\n\n'+detail+(issues.length>12?'\n+ '+(issues.length-12)+' more':'')+'\n\nThe local attempt remains editable.');
       return;
     }
-    st.finalizedAt=serverTimeMs(data.completedAt,now());
-    st.finalResult=String(data.result||p.result||'').toUpperCase();
+    const serverCompletedAt=serverTimeMs(data.completedAt,now());
+    st.fieldFinalizedAt=st.fieldFinalizedAt||serverCompletedAt;
+    st.fieldFinalResult=String(data.result||p.result||'').toUpperCase();
+    st.finalizedAt=st.fieldFinalizedAt;
+    st.finalResult=st.fieldFinalResult;
+    st.pendingServerClaim=false;
+    st.pendingServerFinalization=false;
+    st.serverVerificationStatus='verified';
+    st.serverClaimMode='authoritative-v1';
     st.serverFinalization={
       mode:'server_authoritative',
-      finalizedAt:st.finalizedAt,
+      finalizedAt:serverCompletedAt,
       result:st.finalResult,
       scoreNumerator:Number(data.scoreNumerator??p.score.pass??0),
       scoreDenominator:Number(data.scoreDenominator??p.score.denom??0),
       criticalFailureCount:Number(data.criticalFailureCount??0),
       globalTimerNotMet:!!data.globalTimerNotMet
     };
-    st.events.push({at:st.finalizedAt,elapsed:Math.max(0,st.finalizedAt-st.startedAt),label:'Evaluation finalized',detail:`Server-authoritative ${st.finalResult} · ${data.scoreNumerator??p.score.pass}/${data.scoreDenominator??p.score.denom}`});
+    st.cloudGrading={...(st.cloudGrading||{}),status:'synced',error:'',lastSyncedAt:now()};
+    st.events.push({at:serverCompletedAt,elapsed:Math.max(0,st.fieldFinalizedAt-st.startedAt),label:'Evaluation finalized',detail:`Server-authoritative ${st.finalResult} · ${data.scoreNumerator??p.score.pass}/${data.scoreDenominator??p.score.denom}`});
     saveDb();
     closeModal('reportModal');
     renderEval();
     alert(`Evaluation finalized by the server as ${st.finalResult}.`);
   }catch(error){
     console.error('Authoritative evaluation finalization failed',error);
-    alert('EVALUATION NOT FINALIZED\n\n'+(error?.message||error)+'\n\nRaPS left the local attempt editable. Reconnect/sync and try again.');
+    if(isConnectivityFailure(error)){
+      finalizeLocallyPendingServer(c,s,st,p,'connection lost during server finalization');
+      alert(`CONNECTION LOST\n\nRaPS finalized the evaluation locally as ${p.result}. The record is read-only and will be server-verified automatically after reconnect.`);
+      return;
+    }
+    alert('EVALUATION NOT FINALIZED\n\n'+(error?.message||error)+'\n\nRaPS left the local attempt editable.');
   }finally{
     if(btn&&!st.finalizedAt){btn.disabled=false;btn.textContent=`Finalize ${p.result}`;}
   }
