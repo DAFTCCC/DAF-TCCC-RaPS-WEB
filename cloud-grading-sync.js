@@ -4,6 +4,7 @@
 const RESULT_TO_DB = Object.freeze({pass:'pass',fail:'fail',nt:'not_observed',na:'not_applicable'});
 const RESULT_FROM_DB = Object.freeze({pass:'pass',fail:'fail',not_observed:'nt',not_applicable:'nt'});
 let busy=false;
+let rerunRequested=false;
 let criteriaCache=new Map();
 let timers=new Map();
 
@@ -683,14 +684,32 @@ async function pushAll(){
   return n;
 }
 async function syncAll(){
-  if(busy||!navigator.onLine||!getCloud()?.user?.id)return;
+  if(!navigator.onLine||!getCloud()?.user?.id)return;
+  if(busy){
+    rerunRequested=true;
+    return;
+  }
   busy=true;
+  rerunRequested=false;
   try{
+    // After a network transition, cloud-auth may still be refreshing the
+    // persisted Supabase session. If identity is still in cached/offline mode,
+    // wait for the raps-cloud-identity event rather than racing the old token.
+    if(getCloud()?.offlineCached===true){
+      rerunRequested=true;
+      return;
+    }
     await reconcilePendingOffline();
     await pullAll();
     await pushAll();
   }
-  finally{busy=false}
+  finally{
+    busy=false;
+    if(rerunRequested&&navigator.onLine){
+      rerunRequested=false;
+      setTimeout(()=>syncAll(),250);
+    }
+  }
 }
 function queue(classId){
   clearTimeout(timers.get(classId));
@@ -700,7 +719,10 @@ function queue(classId){
 window.addEventListener('raps-local-class-change',e=>queue(e.detail?.classId));
 window.addEventListener('raps-class-sync-complete',()=>syncAll());
 window.addEventListener('raps-cloud-identity',()=>syncAll());
-window.addEventListener('online',()=>syncAll());
+window.addEventListener('online',()=>{
+  rerunRequested=true;
+  setTimeout(()=>syncAll(),250);
+});
 
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
