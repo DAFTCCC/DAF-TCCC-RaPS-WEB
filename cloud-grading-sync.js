@@ -130,7 +130,7 @@ async function pushEvaluation(c,s,a,options={}){
   // Terminal lifecycle is server-authoritative in v3.4.11+.
   // Criteria/timers are pushed before finalize/void; once the server marks
   // the parent terminal, background sync must not attempt a direct rewrite.
-  if(a?.finalizedAt||a?.voidedAt){
+  if((a?.finalizedAt&&!a?.pendingServerFinalization)||a?.voidedAt){
     patchAttempt(a,{status:'synced',error:'',lastSyncedAt:Date.now()});
     return true;
   }
@@ -284,6 +284,11 @@ async function pushEvaluation(c,s,a,options={}){
     showNt:!!a.showNt,
     observeMode:a.observeMode!==false,
     remediation:a.remediation||null,
+    fieldFinalizedAt:a.fieldFinalizedAt||null,
+    fieldFinalResult:a.fieldFinalResult||null,
+    offlineStarted:!!a.offlineStarted,
+    serverClaimMode:a.serverClaimMode||'',
+    serverVerificationStatus:a.serverVerificationStatus||'',
     appVersion:a.appVersion||'',
     contentVersion:a.contentVersion||'',
     scenarioVersion:a.scenarioVersion||'1'
@@ -496,12 +501,170 @@ async function pullAll(){
     for(const s of c.students||[]){
       for(const a of Object.values(s.attempts||{})){
         if(!a?.id)continue;
+        if(a.pendingServerClaim||a.pendingServerFinalization)continue;
         try{if(await pullEvaluation(c,s,a))n++;}catch(e){console.warn('Evaluation pull failed',a.id,e)}
       }
     }
   }
   return n;
 }
+async function reconcileOfflineAttempt(c,s,a){
+  const client=getClient(),cloud=getCloud(),store=getStore();
+  if(!client||!cloud?.user?.id||!navigator.onLine)return false;
+  if(!a?.id||a.cloudShellOnly)return false;
+  if(!(a.pendingServerClaim||a.pendingServerFinalization))return false;
+
+  patchAttempt(a,{status:'syncing',error:'Reconciling offline field evaluation…'});
+
+  try{
+    if(window.RAPS_ROSTER_SYNC?.pushClassRosterAndShells){
+      const prepared=await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c,{skipEvaluationShells:true});
+      if(!prepared)throw new Error('Class/event/roster preparation did not complete.');
+    }
+
+    if(a.pendingServerClaim){
+      const {data:eventRow,error:eventError}=await client.from('evaluation_events')
+        .select('id,curriculum_version_id,status')
+        .eq('id',c.id)
+        .maybeSingle();
+      if(eventError)throw eventError;
+      if(!eventRow?.curriculum_version_id)throw new Error('Authoritative evaluation event is not ready.');
+
+      const {data,error}=await client.rpc('claim_evaluation_authoritatively',{
+        p_evaluation_id:a.id,
+        p_event_id:c.id,
+        p_participant_id:s.id,
+        p_curriculum_version_id:eventRow.curriculum_version_id,
+        p_attempt_number:Number(a.attemptNo||1),
+        p_source_device_id:store?.deviceId?.()||null
+      });
+      if(error)throw error;
+
+      const claim=data||{};
+      if(!claim.claimed){
+        a.serverVerificationStatus='conflict';
+        patchAttempt(a,{
+          status:'conflict',
+          error:claim.reason==='evaluation_owned_by_other_evaluator'
+            ? 'Offline evaluation conflicts with an attempt already owned by another evaluator. Review required; no data was overwritten.'
+            : claim.reason==='active_evaluation_exists'
+              ? 'Another active server evaluation blocks this offline record. Review required; no data was overwritten.'
+              : 'Server claim rejected: '+String(claim.reason||'unknown reason')+'. Review required.'
+        });
+        return false;
+      }
+
+      const canonicalId=String(claim.evaluationId||a.id);
+      if(canonicalId!==String(a.id)){
+        a.serverVerificationStatus='conflict';
+        patchAttempt(a,{
+          status:'conflict',
+          error:'The server already has a different canonical evaluation UUID for this student/attempt. Review required; RaPS did not overwrite either record.'
+        });
+        return false;
+      }
+
+      a.pendingServerClaim=false;
+      a.serverClaimMode='authoritative-v1';
+      a.serverClaimedAt=ms(claim.startedAt)||Date.now();
+      a.serverClaimedBy=cloud.user.id;
+      a.serverVerificationStatus=a.pendingServerFinalization?'pending':'claimed';
+      persist();
+    }
+
+    const pushed=await pushEvaluation(c,s,a,{skipRosterSync:true});
+    if(!pushed)throw new Error(attemptState(a).error||'Offline evaluation upload did not complete.');
+
+    if(a.pendingServerFinalization){
+      const {data,error}=await client.rpc('finalize_evaluation_authoritatively',{
+        p_evaluation_id:a.id,
+        p_source_device_id:store?.deviceId?.()||null
+      });
+      if(error)throw error;
+      const result=data||{};
+      if(!result.finalized){
+        const issues=Array.isArray(result.issues)?result.issues:[];
+        a.serverVerificationStatus='conflict';
+        patchAttempt(a,{
+          status:'conflict',
+          error:issues.length
+            ? 'Server verification rejected the locally finalized evaluation: '+issues.slice(0,5).join(' | ')
+            : 'Server verification rejected the locally finalized evaluation: '+String(result.reason||'unknown reason')
+        });
+        return false;
+      }
+
+      const serverResult=String(result.result||'').toUpperCase();
+      const fieldResult=String(a.fieldFinalResult||a.finalResult||'').toUpperCase();
+      a.serverFinalization={
+        mode:'server_authoritative',
+        finalizedAt:ms(result.completedAt)||Date.now(),
+        result:serverResult,
+        scoreNumerator:Number(result.scoreNumerator||0),
+        scoreDenominator:Number(result.scoreDenominator||0),
+        criticalFailureCount:Number(result.criticalFailureCount||0),
+        globalTimerNotMet:!!result.globalTimerNotMet
+      };
+      a.pendingServerFinalization=false;
+      a.serverVerificationStatus=serverResult&&fieldResult&&serverResult!==fieldResult?'conflict':'verified';
+      a.finalizedAt=a.fieldFinalizedAt||a.finalizedAt||Date.now();
+      if(!a.fieldFinalizedAt)a.fieldFinalizedAt=a.finalizedAt;
+      if(!a.fieldFinalResult)a.fieldFinalResult=fieldResult||serverResult;
+      a.finalResult=serverResult||fieldResult;
+      a.events=a.events||[];
+      a.events.push({
+        at:a.serverFinalization.finalizedAt,
+        elapsed:Math.max(0,(a.fieldFinalizedAt||a.finalizedAt)-a.startedAt),
+        label:'Server verification completed',
+        detail:`${serverResult||fieldResult} · authoritative verification after offline field finalization`
+      });
+
+      if(a.serverVerificationStatus==='conflict'){
+        patchAttempt(a,{
+          status:'conflict',
+          error:`Server result ${serverResult} differs from field result ${fieldResult}. Record preserved for review.`
+        });
+        return false;
+      }
+    }
+
+    patchAttempt(a,{status:'synced',error:'',lastSyncedAt:Date.now()});
+    persist();
+    return true;
+  }catch(error){
+    if(!navigator.onLine){
+      patchAttempt(a,{status:'offline',error:'Connectivity lost during reconciliation; local field record remains preserved.'});
+      return false;
+    }
+    patchAttempt(a,{status:'error',error:err(error)});
+    console.warn('Offline evaluation reconciliation failed',a.id,error);
+    return false;
+  }
+}
+
+async function reconcilePendingOffline(){
+  const store=getStore();if(!store||!navigator.onLine||!getCloud()?.user?.id)return 0;
+  const pending=[];
+  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled&&!x?.closedAt&&x?.status!=='closed')){
+    for(const s of c.students||[]){
+      for(const a of Object.values(s.attempts||{})){
+        if(a?.id&&(a.pendingServerClaim||a.pendingServerFinalization)){
+          pending.push({c,s,a});
+        }
+      }
+    }
+  }
+  pending.sort((x,y)=>Number(x.a.startedAt||x.a.createdAt||0)-Number(y.a.startedAt||y.a.createdAt||0));
+  let n=0;
+  for(const item of pending){
+    if(!navigator.onLine)break;
+    if(await reconcileOfflineAttempt(item.c,item.s,item.a))n++;
+    if(item.a.cloudGrading?.status==='conflict')continue;
+    if(item.a.pendingServerClaim||item.a.pendingServerFinalization)break;
+  }
+  return n;
+}
+
 async function pushAll(){
   const store=getStore();if(!store)return 0;let n=0;
   for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled && !x?.closedAt && x?.status!=='closed')){
@@ -520,7 +683,11 @@ async function pushAll(){
 async function syncAll(){
   if(busy||!navigator.onLine||!getCloud()?.user?.id)return;
   busy=true;
-  try{await pullAll();await pushAll();}
+  try{
+    await reconcilePendingOffline();
+    await pullAll();
+    await pushAll();
+  }
   finally{busy=false}
 }
 function queue(classId){
@@ -536,9 +703,11 @@ window.addEventListener('online',()=>syncAll());
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.11-web.8';
+window.RAPS_GRADING_SYNC_BUILD='3.4.12-offline-field-ops.1';
 window.RAPS_GRADING_SYNC=Object.freeze({
   syncAll,
+  reconcilePendingOffline,
+  reconcileOfflineAttempt,
   pushEvaluation,
   pullEvaluation,
   pullAll,
