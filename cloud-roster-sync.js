@@ -674,6 +674,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.12';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.12-offline-field-ops.1';
 
 })();
