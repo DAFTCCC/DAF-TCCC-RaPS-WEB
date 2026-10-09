@@ -212,7 +212,7 @@ async function pushEvaluation(c,s,a,options={}){
     if(error)throw error;
   }
   const {data:existingCrit,error:existingCritError}=await client.from('criterion_results')
-    .select('id,criterion_id').eq('evaluation_id',canonicalId);
+    .select('id,criterion_id').eq('evaluation_id',a.id);
   if(existingCritError)throw existingCritError;
   const staleCrit=(existingCrit||[]).filter(r=>!currentCriterionIds.has(r.criterion_id)).map(r=>r.id);
   if(staleCrit.length){
@@ -252,7 +252,7 @@ async function pushEvaluation(c,s,a,options={}){
     if(error)throw error;
   }
   const {data:existingTimers,error:existingTimerError}=await client.from('timer_results')
-    .select('id,sync_key').eq('evaluation_id',canonicalId);
+    .select('id,sync_key').eq('evaluation_id',a.id);
   if(existingTimerError)throw existingTimerError;
   const staleTimers=(existingTimers||[]).filter(r=>!liveTimerKeys.has(r.sync_key)).map(r=>r.id);
   if(staleTimers.length){
@@ -348,8 +348,8 @@ async function pullEvaluation(c,s,a,options={}){
 
   const crit=await criteriaFor(row.curriculum_version_id);
   const [{data:cr,error:crErr},{data:tr,error:trErr}]=await Promise.all([
-    client.from('criterion_results').select('criterion_id,result,failure_mode,primary_contributor,evaluator_note,graded_at,app_data,client_modified_at').eq('evaluation_id',canonicalId),
-    client.from('timer_results').select('criterion_id,timer_name,started_at,stopped_at,elapsed_ms,standard_ms,standard_met,sync_key,app_data,client_modified_at,source_device_id').eq('evaluation_id',canonicalId)
+    client.from('criterion_results').select('criterion_id,result,failure_mode,primary_contributor,evaluator_note,graded_at,app_data,client_modified_at').eq('evaluation_id',a.id),
+    client.from('timer_results').select('criterion_id,timer_name,started_at,stopped_at,elapsed_ms,standard_ms,standard_met,sync_key,app_data,client_modified_at,source_device_id').eq('evaluation_id',a.id)
   ]);
   if(crErr)throw crErr;if(trErr)throw trErr;
 
