@@ -1589,12 +1589,20 @@ async function finalizeEvaluation(){
 
 async function voidCurrentAttempt(){
   const c=cls(),s=student(),st=evalState();if(!c||!s||!st||st.finalizedAt||isClassClosed(c))return;
-  const token=prompt(`VOID IN-PROGRESS ATTEMPT ${st.attemptNo}
-
-Use this only for an accidental or invalid start. RaPS will retain the synchronized server record as VOIDED and remove the unfinished attempt from this local working copy.
-
-Type VOID to continue.`);
+  const localOnly=!!st.pendingServerClaim&&!st.serverClaimedAt&&st.serverClaimMode!=='authoritative-v1';
+  const token=prompt(localOnly
+    ? `VOID OFFLINE-ONLY ATTEMPT ${st.attemptNo}\n\nThis attempt has not reached the server. Voiding it will remove only this local unfinished record.\n\nType VOID to continue.`
+    : `VOID IN-PROGRESS ATTEMPT ${st.attemptNo}\n\nUse this only for an accidental or invalid start. RaPS will retain the synchronized server record as VOIDED and remove the unfinished attempt from this local working copy.\n\nType VOID to continue.`);
   if(token!=='VOID')return;
+  if(localOnly){
+    delete s.attempts[String(st.attemptNo)];
+    if(!hasStartedClass(c))c.status='draft';
+    saveDb();
+    releaseEvalWakeLock();
+    openClass(c.id);
+    alert('Offline-only attempt removed. No server record existed.');
+    return;
+  }
   const btn=$('voidAttemptBtn');
   if(btn){btn.disabled=true;btn.textContent='VOIDING…';}
   try{
