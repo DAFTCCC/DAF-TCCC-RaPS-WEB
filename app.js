@@ -131,6 +131,7 @@ function normalizeDb(x){
         a.startedByUserId=a.startedByUserId||a.cloudEvaluatorUserId||'';
         a.startedByDeviceId=a.startedByDeviceId||a.deviceId||'';
         a.timerForced=a.timerForced||{};
+        a.fieldStartedAt=a.fieldStartedAt||a.startedAt||a.createdAt||null;
         a.fieldFinalizedAt=a.fieldFinalizedAt||null;
         a.fieldFinalResult=a.fieldFinalResult||null;
         a.pendingServerClaim=!!a.pendingServerClaim;
@@ -313,7 +314,7 @@ function makeAttempt(c,s,attemptNo){
   const ntReasons={};
   (c.scenarioNT||[]).forEach(id=>{ const i=t.sections.flatMap(x=>x.items).find(x=>x.id===id); if(i&&!i.critical){ratings[id]='nt';methods[id]='scenario-default';stamps[id]=now();ntReasons[id]={code:'scenario-profile',label:'Class scenario profile — criterion not triggered',detail:'',at:stamps[id]};} });
   return {
-    id:uuid(),attemptNo,startedAt:now(),finalizedAt:null,finalResult:null,section:t.sections[0].code,
+    id:uuid(),attemptNo,startedAt:now(),fieldStartedAt:null,finalizedAt:null,finalResult:null,section:t.sections[0].code,
     ratings,methods,stamps,ntReasons,failureDetails:{},notes:{},noteOpen:{},observeMode:true,fieldMode:true,timerForced:{},timers:makeTimerStore(t),events:[],instants:{},
     trainerSign:c.leadEvaluator||'',evaluatorId:c.evaluatorId||'',studentSign:'',overallNotes:'',showNt:false,appVersion:APP_VERSION,createdAt:now(),modifiedAt:now(),deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,classId:c.id,participantId:s.id,
     startedByUserId:currentCloudUserId(),startedByDeviceId:db.deviceId,cloudEvaluatorUserId:currentCloudUserId(),
@@ -392,6 +393,7 @@ function activateLocalOfflineAttempt(c,s,candidate,attemptNo){
   const uid=currentCloudUserId();
   if(!uid)throw new Error('Offline assessment start requires a previously verified RaPS identity on this device.');
   candidate.startedAt=candidate.startedAt||now();
+  candidate.fieldStartedAt=candidate.fieldStartedAt||candidate.startedAt;
   candidate.startedByUserId=uid;
   candidate.cloudEvaluatorUserId=uid;
   candidate.startedByDeviceId=db.deviceId;
@@ -1097,8 +1099,9 @@ function openEvaluation(studentId,attemptNo){
         return;
       }
       candidate.id=claimedId;
-      candidate.startedAt=serverTimeMs(data.startedAt,candidate.startedAt||now());
-      candidate.serverClaimedAt=candidate.startedAt;
+      candidate.fieldStartedAt=candidate.fieldStartedAt||candidate.startedAt||now();
+      candidate.serverClaimedAt=serverTimeMs(data.startedAt,now());
+      candidate.startedAt=candidate.fieldStartedAt;
       candidate.serverClaimedBy=currentCloudUserId();
       candidate.pendingServerClaim=false;
       candidate.offlineStarted=false;
@@ -1504,7 +1507,7 @@ function finalizeLocallyPendingServer(c,s,st,p,reason='offline'){
   st.events=st.events||[];
   st.events.push({
     at:st.fieldFinalizedAt,
-    elapsed:Math.max(0,st.fieldFinalizedAt-st.startedAt),
+    elapsed:Math.max(0,st.fieldFinalizedAt-(st.fieldStartedAt||st.startedAt)),
     label:'Evaluation finalized locally',
     detail:`${st.fieldFinalResult} · server verification pending · ${reason}`
   });
