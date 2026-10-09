@@ -94,6 +94,7 @@ function eventStatus(c) {
 }
 function evaluationStatus(a) {
   if (a?.voidedAt) return 'voided';
+  if (a?.pendingServerFinalization) return a?.startedAt ? 'in_progress' : 'draft';
   if (a?.finalizedAt) return 'finalized';
   return a?.startedAt ? 'in_progress' : 'draft';
 }
@@ -324,7 +325,7 @@ async function pushEvaluationShells(c, refs) {
   if (readError) throw readError;
   return data || [];
 }
-async function pushClassRosterAndShells(c) {
+async function pushClassRosterAndShells(c, options = {}) {
   const client = getClient();
   const cloud = getCloud();
   if (!client || !cloud?.user?.id || !c?.id) return false;
@@ -360,7 +361,9 @@ async function pushClassRosterAndShells(c) {
     const refs = await lookupBaseAndCurriculum(c);
     await ensureEvent(c, refs);
     await pushParticipants(c, refs);
-    await pushEvaluationShells(c, refs);
+    if (options?.skipEvaluationShells !== true) {
+      await pushEvaluationShells(c, refs);
+    }
 
     getStore()?.patchRosterCloudState?.(c.id, {
       status:'synced',
