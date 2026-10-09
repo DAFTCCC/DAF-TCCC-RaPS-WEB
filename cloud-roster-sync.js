@@ -2,6 +2,7 @@
 'use strict';
 
 let busy = false;
+let rerunRequested = false;
 let lastIdentityUserId = null;
 const rosterPushInFlight = new Map();
 
@@ -598,7 +599,6 @@ async function pullRosterAndShells() {
 }
 
 async function syncAll({silent=false}={}) {
-  if (busy) return;
   const cloud = getCloud();
   const store = getStore();
   if (!cloud?.user?.id || !store) return;
@@ -609,7 +609,13 @@ async function syncAll({silent=false}={}) {
     return;
   }
 
+  if (busy) {
+    rerunRequested = true;
+    return;
+  }
+
   busy = true;
+  rerunRequested = false;
   try {
     await pullRosterAndShells();
     for (const c of store.getClasses().filter(x => x?.cloudSync?.enabled && !isClosedClass(x))) {
@@ -626,6 +632,10 @@ async function syncAll({silent=false}={}) {
     }
   } finally {
     busy = false;
+    if (rerunRequested && navigator.onLine) {
+      rerunRequested = false;
+      setTimeout(() => syncAll({silent:true}), 150);
+    }
   }
 }
 
@@ -660,7 +670,10 @@ window.addEventListener('raps-cloud-identity', event => {
 });
 
 window.addEventListener('online', () => syncAll({silent:true}));
-window.addEventListener('raps-class-sync-complete', () => syncAll({silent:true}));
+window.addEventListener('raps-class-sync-complete', () => {
+  rerunRequested = true;
+  syncAll({silent:true});
+});
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => syncAll({silent:true}), {once:true});
@@ -674,6 +687,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.12-offline-field-ops.1';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.12-offline-field-ops.2';
 
 })();
