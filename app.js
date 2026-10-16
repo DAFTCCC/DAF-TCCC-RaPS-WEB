@@ -1973,7 +1973,12 @@ document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>closeModal(b.
 
 let evalHeaderCollapsed=false;
 function updateEvalHeaderCollapse(){
-  const h=$('evalHeader');if(!h)return;const should=evalVisible()&&window.scrollY>150;
+  const h=$('evalHeader');if(!h)return;
+  // Scroll anchoring moves the document when the sticky header changes height.
+  // Leave room for the expanded header and use a separate near-top threshold,
+  // so the resize cannot immediately trigger the opposite state.
+  const nearTop=32,collapseAfter=Math.max(150,h.getBoundingClientRect().height+nearTop);
+  const should=evalVisible()&&(evalHeaderCollapsed?window.scrollY>nearTop:window.scrollY>collapseAfter);
   if(should!==evalHeaderCollapsed){evalHeaderCollapsed=should;h.classList.toggle('collapsed',should);}
   if(evalVisible()){
     const height=`${Math.ceil(h.getBoundingClientRect().height)}px`;
@@ -2098,7 +2103,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.1';
+  const UPDATE_BUILD = '3.4.12-web.2';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 

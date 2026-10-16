@@ -393,6 +393,42 @@ def main():
         expect(page.locator('#observationFeedbackText')).to_contain_text('timing changed')
         checks.append('undo cannot restore a prior NT after its linked clinical timer starts')
 
+        # Resizing a sticky header must not feed back into its own scroll
+        # threshold. Exercise both the old boundary and an actual collapse,
+        # using the real CSS transitions and normal browser scroll anchoring.
+        page.evaluate("window.__rapsTest.setup('3')")
+        page.locator('#reviewModeBtn').click()
+        page.evaluate('''() => {
+          window.__headerStates=[];
+          window.__headerObserver=new MutationObserver(records => {
+            for (const record of records) if (record.attributeName==='class')
+              window.__headerStates.push({y:scrollY,collapsed:record.target.classList.contains('collapsed')});
+          });
+          window.__headerObserver.observe(document.getElementById('evalHeader'),{attributes:true});
+        }''')
+        for width in (390, 1366):
+            page.set_viewport_size({'width': width, 'height': 900})
+            page.evaluate('window.scrollTo(0,0)')
+            page.wait_for_function("() => !document.getElementById('evalHeader').classList.contains('collapsed')")
+            page.wait_for_function("() => document.getElementById('evalHeader').getAnimations().every(a => a.playState !== 'running')")
+            for position in (160, 180):
+                page.evaluate('(position) => {window.__headerStates=[];window.scrollTo(0,position)}', position)
+                page.wait_for_timeout(800)
+                states=page.evaluate('window.__headerStates')
+                assert len(states)<=1, {'width':width,'position':position,'states':states}
+            page.evaluate('''() => {
+              window.__headerStates=[];
+              window.scrollTo(0,document.getElementById('evalHeader').getBoundingClientRect().height+200);
+            }''')
+            page.wait_for_timeout(800)
+            states=page.evaluate('window.__headerStates')
+            assert len(states)<=1, {'width':width,'states':states}
+            assert page.locator('#evalHeader').evaluate("node => node.classList.contains('collapsed')")
+            page.evaluate('window.scrollTo(0,0)')
+            page.wait_for_function("() => !document.getElementById('evalHeader').classList.contains('collapsed')")
+        page.evaluate('window.__headerObserver.disconnect()')
+        checks.append('review header remains stable across scroll anchoring at phone and desktop widths')
+
         assert not errors, errors
         assert not external_requests, external_requests
         assert not dialogs, dialogs

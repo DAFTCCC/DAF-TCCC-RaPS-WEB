@@ -1,4 +1,4 @@
-# DAF-TCCC-WEB — v3.4.12-web.1
+# DAF-TCCC-WEB — v3.4.12-web.2
 
 Evaluator workflow updates add immediate failure capture with audited Undo, deferred observation review, evidence-based coaching plans, persistent learner identity, stable timer controls, and daylight display. JTS criterion definitions and existing grading/timing policies are unchanged.
 
