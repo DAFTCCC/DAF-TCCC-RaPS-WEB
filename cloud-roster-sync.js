@@ -386,6 +386,7 @@ function makeShellAttempt(row, c, s) {
   if (isVoidedEvaluation(row)) return null;
   const startedMs = msFromIso(row.started_at) || null;
   const modifiedMs = msFromIso(row.client_modified_at || row.updated_at) || Date.now();
+  const app = row.app_data && typeof row.app_data === 'object' && !Array.isArray(row.app_data) ? row.app_data : {};
   return {
     id: row.id,
     attemptNo: Number(row.attempt_number || 1),
@@ -398,6 +399,8 @@ function makeShellAttempt(row, c, s) {
     stamps:{},
     ntReasons:{},
     failureDetails:{},
+    observations:JSON.parse(JSON.stringify(app.observations || {})),
+    cloudAppData:JSON.parse(JSON.stringify(app)),
     notes:{},
     noteOpen:{},
     observeMode:true,
