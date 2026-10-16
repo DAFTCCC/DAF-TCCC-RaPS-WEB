@@ -7,7 +7,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://bplevsfvpwrkgafizvao.supabase.co wss://bplevsfvpwrkgafizvao.supabase.co https://raps-supabase.asuscomm.com wss://raps-supabase.asuscomm.com;">
 <link rel="icon" type="image/png" href="assets/icon-192.png">
 <link rel="apple-touch-icon" href="assets/icon-192.png">
-<link rel="stylesheet" href="styles.css?v=3.4.11-web.12">
+<link rel="stylesheet" href="styles.css?v=3.4.12-web.1">
 <title>TCCC Evaluation Suite</title>
 </head>
 <body>
@@ -161,6 +161,7 @@
     <section class="card">
       <div class="cardHead"><span>Roster</span><span id="rosterCount"></span></div>
       <div id="activeEvaluationLockBanner" class="activeEvaluationLockBanner hidden" aria-live="polite"></div>
+      <p class="helper assessmentPreflight"><b>Connection check:</b> Starting, finalizing, and voiding assessments require online server verification. During an outage, an assessment already started on this device can continue recording locally. Confirm the student, scenario, equipment, and connection before starting.</p>
       <div class="rosterTools">
         <button id="addStudentBtn" class="action primary">+ Add Student</button>
         <button id="importRosterBtn" class="action">Import Roster CSV</button>
@@ -213,12 +214,18 @@
   <div class="brandRow">
     <button id="backRoster" class="ghost">← Roster</button>
     <div class="evalIdentity"><h1 id="tierTitle"></h1><div class="sub" id="tierSource"></div></div>
+    <button id="daylightModeBtn" class="ghost small daylightModeBtn" type="button" aria-pressed="false" title="Switch the assessment to a bright, high-contrast display">Daylight display</button>
   </div>
   <div class="studentBar"><strong id="studentLabel"></strong><span id="attemptBadge"></span></div>
+  <div class="assessmentSaveStatus" aria-label="Assessment save and connection status">
+    <span id="localSaveStatus" class="assessmentStatusChip" role="status" aria-live="polite">Local working copy</span>
+    <span id="cloudGradeStatus" class="assessmentStatusChip" role="status" aria-live="polite">Cloud not verified</span>
+    <span id="assessmentConnectivity" class="assessmentConnectivity"></span>
+  </div>
   <div class="kpis">
     <div><small>ELAPSED</small><strong id="elapsedTop">00:00</strong></div>
     <div><small>CRITICAL FAIL</small><strong id="criticalTop">0</strong></div>
-    <div><small>SCORE</small><strong id="gradedTop">—</strong></div>
+    <div class="scoreKpi"><small>SCORE</small><strong id="gradedTop">—</strong></div>
     <div><small>UNRESOLVED</small><strong id="unresolvedTop">0</strong></div>
   </div>
 </header>
@@ -235,6 +242,12 @@
       <button id="observeModeBtn" class="modeSegment active" type="button" aria-pressed="true">OBSERVE</button>
       <button id="reviewModeBtn" class="modeSegment" type="button" aria-pressed="false">REVIEW</button>
     </div>
+    <div id="observationFeedback" class="observationFeedback" role="status" aria-live="polite" aria-atomic="false">
+      <span id="observationFeedbackText"></span>
+      <button id="undoObservationBtn" class="ghost small" type="button" hidden>Undo</button>
+      <button id="reviewObservationsBtn" class="ghost small" type="button">Review observations (0)</button>
+    </div>
+    <div id="diagnosticReviewQueue" class="diagnosticReviewQueue"></div>
     <div id="observeFocus" class="observeFocus" aria-live="polite"></div>
     <div class="phaseToolbar">
       <button id="prevPhaseBtn" class="ghost small">← Previous</button>
@@ -250,6 +263,7 @@
     <div class="cardHead"><span>Clinical / Evaluation Timeline</span><span id="eventCount"></span></div>
     <div id="timeline" class="timeline"></div>
   </section>
+  <section id="learnerPracticeHistory" class="card hidden"></section>
   <section id="reviewSignoffCard" class="card signoff">
     <div class="cardHead"><span>Sign-Off / Notes</span><span>Typed acknowledgment</span></div>
     <div class="signGrid">
@@ -262,7 +276,7 @@
   <div class="actions evalActions">
     <button class="action primary" id="finalizeBtn">Review / Finalize</button>
     <button class="action danger" id="voidAttemptBtn">Void In-Progress Attempt</button>
-    <button class="action" id="individualPdfBtn">1-Page Student Summary PDF</button>
+    <button class="action" id="individualPdfBtn">Student Summary &amp; Coaching PDF</button>
     <button class="action" id="individualCsvBtn">Full Individual CSV</button>
     <button class="action" id="attemptBackupBtn">Backup JSON</button>
   </div>
@@ -277,19 +291,19 @@
 <div id="reportModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>Evaluation Review</h2><button data-close="reportModal" class="ghost">Close</button></div><pre id="aarText"></pre><div class="actions"><button id="confirmFinalizeBtn" class="action primary">Finalize Evaluation</button><button id="copyAar" class="action">Copy Review</button></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-config.js?v=3.4.11-web.12"></script>
-<script src="cloud-auth.js?v=3.4.11-web.12"></script>
-<script src="version.js?v=3.4.11-web.12"></script>
-<script src="tiers.js?v=3.4.11-web.12"></script>
-<script src="branding.js?v=3.4.11-web.12"></script>
-<script src="installations.js?v=3.4.11-web.12"></script>
-<script src="app.js?v=3.4.11-web.12"></script>
-<script src="cloud-sync.js?v=3.4.11-web.12"></script>
-<script src="cloud-roster-sync.js?v=3.4.11-web.12"></script>
-<script src="cloud-grading-sync.js?v=3.4.11-web.12"></script>
-<script src="admin-ui.js?v=3.4.11-web.12-r2"></script>
-<script src="program-manager-dashboard.js?v=3.4.11-web.12"></script>
-<script src="majcom-manager-dashboard.js?v=3.4.11-web.12"></script>
-<script src="enterprise-dashboard.js?v=3.4.11-web.12"></script>
+<script src="supabase-config.js?v=3.4.12-web.1"></script>
+<script src="cloud-auth.js?v=3.4.12-web.1"></script>
+<script src="version.js?v=3.4.12-web.1"></script>
+<script src="tiers.js?v=3.4.12-web.1"></script>
+<script src="branding.js?v=3.4.12-web.1"></script>
+<script src="installations.js?v=3.4.12-web.1"></script>
+<script src="app.js?v=3.4.12-web.1"></script>
+<script src="cloud-sync.js?v=3.4.12-web.1"></script>
+<script src="cloud-roster-sync.js?v=3.4.12-web.1"></script>
+<script src="cloud-grading-sync.js?v=3.4.12-web.1"></script>
+<script src="admin-ui.js?v=3.4.12-web.1-r2"></script>
+<script src="program-manager-dashboard.js?v=3.4.12-web.1"></script>
+<script src="majcom-manager-dashboard.js?v=3.4.12-web.1"></script>
+<script src="enterprise-dashboard.js?v=3.4.12-web.1"></script>
 </body>
 </html>

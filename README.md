@@ -1,4 +1,8 @@
-# DAF-TCCC-WEB — v3.0.1-web.1
+# DAF-TCCC-WEB — v3.4.12-web.1
+
+Evaluator workflow updates add immediate failure capture with audited Undo, deferred observation review, evidence-based coaching plans, persistent learner identity, stable timer controls, and daylight display. JTS criterion definitions and existing grading/timing policies are unchanged.
+
+See [development and assessment checks](DEVELOPMENT.md) for local startup, regression tests, diagnostic data compatibility, and a calibration/field-evaluation plan. Existing authenticated Supabase synchronization remains in use; lifecycle actions require the server.
 
 Static GitHub Pages / installable PWA synchronized to **APK v3.0.0**.
 

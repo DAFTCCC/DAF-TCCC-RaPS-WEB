@@ -36,6 +36,15 @@ function attemptState(a){a.cloudGrading=a.cloudGrading||{status:'local',error:''
 function persist(){getStore()?.persistCloudMerge?.()}
 function patchAttempt(a,patch){a.cloudGrading={...attemptState(a),...patch};persist()}
 function cloneJson(value){return JSON.parse(JSON.stringify(value))}
+function jsonObject(value){return value&&typeof value==='object'&&!Array.isArray(value)?value:{}}
+// Keep extension metadata while letting the current record map determine which
+// observations/details still exist. Empty tags and false review flags remain
+// deliberate local edits rather than being filled back in from the server.
+function preserveRecordMetadata(current,...previous){
+  return Object.fromEntries(Object.entries(jsonObject(current)).map(([key,value])=>[
+    key,Object.assign({},...previous.map(map=>jsonObject(jsonObject(map)[key])),jsonObject(value))
+  ]));
+}
 function snapshotLocalAttempt(a){
   const copy=cloneJson(a||{});
   delete copy.conflictRecoveryHistory;
@@ -150,7 +159,7 @@ async function pushEvaluation(c,s,a,options={}){
   if(!crit.rows.length)throw new Error('Supabase criteria catalog is empty for this curriculum.');
 
   const {data:remote,error:remoteError}=await client.from('evaluations')
-    .select('id,client_modified_at,updated_at,source_device_id,evaluator_id')
+    .select('id,client_modified_at,updated_at,source_device_id,evaluator_id,app_data')
     .eq('id',a.id).maybeSingle();
   if(remoteError)throw remoteError;
 
@@ -180,6 +189,13 @@ async function pushEvaluation(c,s,a,options={}){
 
   patchAttempt(a,{status:'syncing',error:''});
   const t=tierFor(c),sc=score(t,a);
+  const cachedApp=jsonObject(a.cloudAppData),remoteApp=jsonObject(remote?.app_data);
+  const failureDetails=preserveRecordMetadata(a.failureDetails,cachedApp.failureDetails,remoteApp.failureDetails);
+  const observations=preserveRecordMetadata(a.observations,cachedApp.observations,remoteApp.observations);
+  const {data:existingCrit,error:existingCritError}=await client.from('criterion_results')
+    .select('id,criterion_id,app_data').eq('evaluation_id',a.id);
+  if(existingCritError)throw existingCritError;
+  const existingCritById=new Map((existingCrit||[]).map(r=>[r.criterion_id,r]));
 
   const criterionRows=[];
   const currentCriterionIds=new Set();
@@ -187,7 +203,9 @@ async function pushEvaluation(c,s,a,options={}){
     const cr=crit.byCode.get(code),dbResult=RESULT_TO_DB[rating];
     if(!cr||!dbResult)continue;
     currentCriterionIds.add(cr.id);
-    const fd=a.failureDetails?.[code]||{};
+    const previousApp=jsonObject(existingCritById.get(cr.id)?.app_data);
+    const fd={...jsonObject(previousApp.failureDetail),...jsonObject(failureDetails[code])};
+    if(rating==='fail')failureDetails[code]=fd;
     criterionRows.push({
       evaluation_id:a.id,
       criterion_id:cr.id,
@@ -197,6 +215,7 @@ async function pushEvaluation(c,s,a,options={}){
       evaluator_note:a.notes?.[code]||null,
       graded_at:iso(a.stamps?.[code]),
       app_data:{
+        ...previousApp,
         method:a.methods?.[code]||'',
         ntReason:a.ntReasons?.[code]||null,
         failureDetail:rating==='fail'?fd:null
@@ -210,9 +229,6 @@ async function pushEvaluation(c,s,a,options={}){
       .upsert(criterionRows,{onConflict:'evaluation_id,criterion_id'});
     if(error)throw error;
   }
-  const {data:existingCrit,error:existingCritError}=await client.from('criterion_results')
-    .select('id,criterion_id').eq('evaluation_id',a.id);
-  if(existingCritError)throw existingCritError;
   const staleCrit=(existingCrit||[]).filter(r=>!currentCriterionIds.has(r.criterion_id)).map(r=>r.id);
   if(staleCrit.length){
     const {error}=await client.from('criterion_results').delete().in('id',staleCrit);
@@ -260,6 +276,8 @@ async function pushEvaluation(c,s,a,options={}){
   }
 
   const appData={
+    ...cachedApp,
+    ...remoteApp,
     schemaVersion:2,
     shellOnly:false,
     localClassId:c.id,
@@ -269,7 +287,8 @@ async function pushEvaluation(c,s,a,options={}){
     methods:a.methods||{},
     stamps:a.stamps||{},
     ntReasons:a.ntReasons||{},
-    failureDetails:a.failureDetails||{},
+    failureDetails,
+    observations,
     notes:a.notes||{},
     timerForced:a.timerForced||{},
     events:a.events||[],
@@ -303,6 +322,7 @@ async function pushEvaluation(c,s,a,options={}){
   }).eq('id',a.id).select('client_modified_at,updated_at').single();
   if(updateError)throw updateError;
 
+  a.cloudAppData=cloneJson(appData);
   const acceptedMs=ms(updated?.client_modified_at||updated?.updated_at)||publishMs;
   if(forceConflict){
     a.modifiedAt=acceptedMs;
@@ -346,14 +366,21 @@ async function pullEvaluation(c,s,a,options={}){
   ]);
   if(crErr)throw crErr;if(trErr)throw trErr;
 
-  a.ratings={};a.methods={};a.stamps={};a.ntReasons={};a.failureDetails={};a.notes={};
+  const app=jsonObject(row.app_data);
+  a.cloudAppData=cloneJson(app);
+  a.observations=cloneJson(jsonObject(app.observations));
+  a.ratings={};a.methods={};a.stamps={};a.ntReasons={};a.failureDetails=cloneJson(jsonObject(app.failureDetails));a.notes={};
   for(const r of cr||[]){
     const code=crit.byId.get(r.criterion_id)?.criterion_code;if(!code)continue;
     a.ratings[code]=RESULT_FROM_DB[r.result]||'nt';
     a.stamps[code]=ms(r.graded_at||r.client_modified_at)||remoteMs;
     a.methods[code]=r.app_data?.method||'cloud';
     if(r.app_data?.ntReason)a.ntReasons[code]=r.app_data.ntReason;
-    if(r.result==='fail')a.failureDetails[code]=r.app_data?.failureDetail||{mode:r.failure_mode||'',contributor:r.primary_contributor||''};
+    if(r.result==='fail')a.failureDetails[code]={
+      ...cloneJson(jsonObject(jsonObject(app.failureDetails)[code])),
+      mode:r.failure_mode||'',contributor:r.primary_contributor||'',
+      ...cloneJson(jsonObject(r.app_data?.failureDetail))
+    };
     if(r.evaluator_note)a.notes[code]=r.evaluator_note;
   }
 
@@ -375,7 +402,6 @@ async function pullEvaluation(c,s,a,options={}){
   }
   a.timers=stores;
 
-  const app=row.app_data||{};
   for(const k of ['section','timerForced','events','instants','trainerSign','evaluatorId','cloudEvaluatorUserId','startedByUserId','startedByDeviceId','studentSign','overallNotes','remediation'])if(app[k]!==undefined)a[k]=app[k];
   if(!a.cloudEvaluatorUserId&&row.evaluator_id)a.cloudEvaluatorUserId=row.evaluator_id;
   if(!a.startedByUserId&&a.cloudEvaluatorUserId)a.startedByUserId=a.cloudEvaluatorUserId;

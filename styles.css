@@ -649,3 +649,112 @@ body.cloudActivationLocked{overflow:hidden}
   }
 }
 
+/* Live assessment controls retain identity, save status, and clear action targets. */
+#evalHeader .brandRow{flex-wrap:wrap}
+#evalHeader .evalIdentity{flex:1;min-width:120px}
+.daylightModeBtn{margin-left:auto;max-width:150px}
+#evalHeader .studentBar{gap:10px;min-height:38px}
+#studentLabel{min-width:0;overflow-wrap:anywhere}
+#attemptBadge{flex-shrink:0;font-weight:800}
+#evalHeader.collapsed .studentBar{display:flex;margin-top:0;padding:5px 8px;min-height:30px;font-size:12px}
+#evalHeader.collapsed #studentLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.assessmentSaveStatus{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:6px;font-size:12px;line-height:1.35}
+.assessmentStatusChip{padding:3px 7px;border:1px solid #6a8293;border-radius:5px;color:#e4edf3;background:#162b38}
+.assessmentStatusChip[data-state="synced"]{border-color:#78bd9e;color:#d7f8e8;background:#143f2e}
+.assessmentStatusChip[data-state="error"],.assessmentStatusChip[data-state="conflict"]{border-color:#ffacac;color:#ffe3e3;background:#652626;font-weight:850}
+.assessmentConnectivity{flex:1 1 100%;color:#bdced9}
+.assessmentConnectivity[data-state="offline"]{color:#ffdc9b;font-weight:750}
+#evalHeader.collapsed .assessmentSaveStatus{margin-top:4px;gap:3px 7px}
+#evalHeader.collapsed .assessmentStatusChip{padding-top:1px;padding-bottom:1px}
+#evalHeader.collapsed .assessmentConnectivity{font-size:11px}
+#evalHeader.collapsed .kpis{margin-top:5px;grid-template-columns:repeat(4,minmax(0,1fr))}
+#evalHeader.collapsed .kpis small{font-size:10px!important}
+#activeTimersCard:not(.hidden){top:calc(var(--eval-header-height, 195px) + 6px);max-height:min(38dvh,330px);overflow:auto;overscroll-behavior:contain}
+.activeTimerStop{min-height:52px;min-width:106px;touch-action:manipulation}
+.activeTimerElapsed{font-variant-numeric:tabular-nums}
+.assessmentPreflight{padding:0 12px;margin:12px 0;line-height:1.5}
+.observationFeedback{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:8px 10px;padding:8px 10px;border:1px solid #49677b;border-radius:9px;background:#102431;font-size:13px;line-height:1.4}
+#observationFeedbackText{flex:1 1 200px;overflow-wrap:anywhere}
+#observationFeedbackText:empty{display:none}
+#reviewObservationsBtn{margin-left:auto}
+.diagnosticReviewQueue{margin:10px;border:1px solid #8d7342;border-radius:10px;padding:12px;background:#302a1c;font-size:13px;line-height:1.45}
+.diagnosticReviewQueue:empty,.observeMode .diagnosticReviewQueue,.observeMode #learnerPracticeHistory{display:none}
+.diagnosticReviewQueue h3{font-size:15px;margin:0 0 7px}
+.diagnosticReviewQueue p{margin:6px 0}
+.diagnosticReviewQueue button{margin:4px 5px 4px 0}
+.observationTools{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px;align-items:center}
+.observationTools button{min-height:44px;padding:8px 10px;font-size:12px;border:1px solid #658196;border-radius:8px;background:#162d3d;color:#eef4f8;cursor:pointer}
+.observationTools button[aria-pressed="true"]{background:#275b7a;border-color:#a1d7f7;box-shadow:inset 0 0 0 1px #a1d7f7}
+.observationTags{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px;font-size:12px;color:#cfe4f1}
+.observationTags span,.observationTag{padding:3px 6px;border:1px solid #4f7185;border-radius:5px}
+.observeMode .observationTags,.observeMode .diagnosticReviewButton{display:none}
+.observeMode .scoreKpi{display:none}
+.observeMode #evalHeader .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard){margin-bottom:8px}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .cardHead{padding:8px 10px;font-size:13px}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .toolCard{display:grid;grid-template-columns:72px minmax(0,1fr);align-items:center;gap:4px 8px;margin:0;padding:7px 10px;border:0;border-radius:0;background:none;box-shadow:none}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) :is(.toolTitle,.timerHistory){display:none}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .timerDisplay{font-size:23px;line-height:1.2}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .timerDisplay::after{display:none}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .timerBtns{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .timerBtn{min-height:44px;padding:7px 4px;font-size:12px}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) :is([data-act="reset"],[data-act="void"]){display:none}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .toolCard:has([aria-label*="recovery required"]) [data-act="void"]{display:block}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .timerMeta{grid-column:1/-1;margin-top:0;font-size:11px;line-height:1.35;text-align:left}
+.diagnosticContributors{margin:0;padding:9px 11px;border:1px solid var(--line);border-radius:8px;min-width:0}
+.diagnosticContributors legend{font-size:12px;color:var(--muted);padding:0 4px}
+.formGrid .diagnosticCheck{display:flex;gap:8px;align-items:flex-start;line-height:1.5;margin-top:7px}
+.formGrid .diagnosticCheck input[type="checkbox"]{width:20px;min-width:20px;min-height:20px;height:20px;margin:0;accent-color:var(--blue)}
+.diagnosticSummary{margin-top:8px;padding:8px 10px;border-left:3px solid #7fabc6;background:#14232e;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.reviewFlag{color:#ffdc9b;font-weight:850}
+.observationTools button:disabled{opacity:.5;cursor:not-allowed}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:3px solid #a8dcff;outline-offset:3px}
+.item{scroll-margin-top:calc(var(--eval-header-height, 195px) + 12px)}
+
+/* Daylight mode is a local display preference; it never changes grading. */
+:root[data-field-display="daylight"]{--bg:#f2f5f7;--card:#fff;--line:#607889;--text:#0a1721;--muted:#344e60;--blue:#135a85;--red:#a41922;--green:#125b36;--amber:#7c4b00}
+:root[data-field-display="daylight"] body{background:#f2f5f7;background-image:none;color:#0a1721}
+:root[data-field-display="daylight"] body::before{display:none}
+:root[data-field-display="daylight"] :is(.card,.kpis>div,.toolCard,.studentBar,.gradeLegend,.sheet,.metaCell,.workflow div,.closedBanner,pre,.safetySplashCard,.safetyRules>div,.safetyOwnerBox,.safetyAckRow){background:#fff;border-color:#607889;box-shadow:none;color:#0a1721}
+:root[data-field-display="daylight"] :is(.compactHeader,header#evalHeader,.cardHead){background:#edf3f7;border-color:#607889;color:#0a1721;backdrop-filter:none}
+:root[data-field-display="daylight"] :is(.cardHead span,.toolTitle,.rowTitle,.sectionHeading h2,.gradeLegend b,.programOwnership .ownershipTitle){color:#0a1721}
+:root[data-field-display="daylight"] .hero{background:#e6eff5;box-shadow:none;border-color:#607889}
+:root[data-field-display="daylight"] .hero::before,:root[data-field-display="daylight"] .hero::after{display:none}
+:root[data-field-display="daylight"] :is(.hero p,.eyebrow,.versionLine){color:#27475d}
+:root[data-field-display="daylight"] .cloudAuthCard{background:#fff;color:#0a1721;border-color:#607889}
+:root[data-field-display="daylight"] :is(.cloudAuthIntro,.cloudAuthMessage){color:#344e60}
+:root[data-field-display="daylight"] :is(.sub,.helper,.rowSub,.stamp,.timerMeta,.timerHistory,.timerInstance,.fieldHelp,.id,.eventTime,.ownershipFinePrint,.programOwnership,.safetyFinePrint,.safetyRules span,.safetyOwnerBox span,.safetyAckRow span,#instructions,.formGrid label){color:#344e60}
+:root[data-field-display="daylight"] :is(.action,.ghost,.tab,.choice,.instantBtn,.timerBtn.reset,.timerBtn.admin,.modeSegment,.areaTab){background:#e2ebf1;color:#102938;border:1px solid #4f6c81;box-shadow:none}
+:root[data-field-display="daylight"] :is(.action.primary,.tab.active,.modeSegment.active,.areaTab.active){background:#135a85;color:#fff;border-color:#0d4567}
+:root[data-field-display="daylight"] :is(.choice.sel.pass,.tab.done,.tab.active.done){background:#125b36;color:#fff;border-color:#093e24}
+:root[data-field-display="daylight"] :is(.choice.sel.fail,.tab.warn,.tab.active.warn){background:#a41922;color:#fff;border-color:#761018}
+:root[data-field-display="daylight"] .choice.sel.nt{background:#455865;color:#fff;border-color:#253c4b}
+:root[data-field-display="daylight"] .timerBtn.start{background:#125b36;color:#fff}
+:root[data-field-display="daylight"] .timerBtn.stop{background:#a41922;color:#fff}
+:root[data-field-display="daylight"] .timerBtn.pause{background:#ffcf68;color:#342300}
+:root[data-field-display="daylight"] .danger{background:#8c1821!important;color:#fff;border-color:#70121a!important}
+:root[data-field-display="daylight"] :is(input,select,textarea,.note,textarea#overallNotes,.signGrid input,.formGrid input,.formGrid select,.formGrid textarea){background:#fff;color:#0a1721;border-color:#526f83}
+:root[data-field-display="daylight"] :is(input,textarea)::placeholder{color:#4b6272;opacity:1}
+:root[data-field-display="daylight"] :is(.observeFocus,.observationFeedback,.modeSegmented,.areaIntro,.appAreaNav,.exportMenu){background:#e6eff5;color:#102938;border-color:#4f6c81}
+:root[data-field-display="daylight"] :is(.observeFocus span,.observeFocus em,.areaIntro span){color:#27475d}
+:root[data-field-display="daylight"] .assessmentStatusChip{background:#fff;color:#15364b;border-color:#526f83}
+:root[data-field-display="daylight"] .assessmentStatusChip[data-state="synced"]{background:#e0f3e7;color:#104b2c;border-color:#246c43}
+:root[data-field-display="daylight"] .assessmentStatusChip:is([data-state="error"],[data-state="conflict"]){background:#fff0f1;color:#8c1821;border-color:#a41922}
+:root[data-field-display="daylight"] .assessmentConnectivity{color:#344e60}
+:root[data-field-display="daylight"] :is(.reviewFlag,.assessmentConnectivity[data-state="offline"]){color:#754300}
+:root[data-field-display="daylight"] .diagnosticReviewQueue{background:#fff3d8;color:#3f2c00;border-color:#8b6525}
+:root[data-field-display="daylight"] :is(.diagnosticSummary,.sourceNote){background:#e6eff5;color:#23445a;border-color:#436b88}
+:root[data-field-display="daylight"] .observationTools button{background:#e2ebf1;color:#102938;border-color:#526f83}
+:root[data-field-display="daylight"] .observationTools button[aria-pressed="true"]{background:#135a85;color:#fff;border-color:#0d4567;box-shadow:inset 0 0 0 1px #fff}
+:root[data-field-display="daylight"] .observationTags{color:#23445a}
+:root[data-field-display="daylight"] :is(button,input,select,textarea,summary):focus-visible{outline-color:#004c8f}
+@media(max-width:520px){
+  #evalHeader .brandRow{gap:7px}
+  #evalHeader .brandRow h1{font-size:16px}
+  .daylightModeBtn{max-width:115px;font-size:12px;min-height:42px}
+  #evalHeader .studentBar{font-size:12px}
+  .assessmentConnectivity{font-size:11px}
+  .observationFeedback{padding:7px 8px}
+  .observationTools{gap:6px}
+}
+
