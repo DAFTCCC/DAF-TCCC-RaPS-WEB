@@ -12,9 +12,11 @@ const copy = value => JSON.parse(JSON.stringify(value));
 
 // Two independent browser globals and class stores share only this fake server.
 // The real public class-sync API runs inside each VM; no cloud writes occur.
-function sharedServer() {
+function sharedServer({ rowCap = Infinity, endRangeErrorCode = null } = {}) {
   let clock = Date.now();
   let nextUpdateHook = null;
+  let nextClassFetchPause = null;
+  let nextClassPageHook = null;
   const tick = () => ++clock;
   const tables = {
     classes: [],
@@ -23,26 +25,27 @@ function sharedServer() {
     curriculum_versions: [{ id: 'curriculum-1', course_type: 'ASM', version: 'JTS-standard', published: true }],
     evaluation_events: [], evaluations: []
   };
-  const writes = [];
+  const writes = [], reads = [];
   function client(deviceId) {
     return { from(table) {
-      const filters = [];
-      let action = 'select', payload, one = false;
+      const filters = [], equality = {}, orders = [];
+      let action = 'select', payload, one = false, from = 0, to = Infinity, limit = Infinity;
       const query = {
         select() { return query; },
-        order() { return query; },
-        eq(key, value) { filters.push(row => row[key] === value); return query; },
+        order(key, options = {}) { orders.push({ key, ascending: options.ascending !== false }); return query; },
+        range(first, last) { from = first; to = last; return query; },
+        eq(key, value) { equality[key] = value; filters.push(row => row[key] === value); return query; },
         neq(key, value) { filters.push(row => row[key] !== value); return query; },
         is(key, value) { filters.push(row => value === null ? row[key] == null : row[key] === value); return query; },
         not(key, operator, value) { filters.push(row => operator === 'is' && value === null ? row[key] != null : row[key] !== value); return query; },
         in(key, values) { filters.push(row => values.includes(row[key])); return query; },
-        limit() { return query; },
+        limit(value) { limit = value; return query; },
         maybeSingle() { one = true; return query; },
         single() { one = true; return query; },
         update(value) { action = 'update'; payload = copy(value); return query; },
         insert(value) { action = 'insert'; payload = copy(value); return query; },
         then(resolve, reject) {
-          return Promise.resolve().then(() => {
+          return Promise.resolve().then(async () => {
             const rows = tables[table] || (tables[table] = []);
             if (action === 'update' && nextUpdateHook) {
               const hook = nextUpdateHook;
@@ -59,18 +62,57 @@ function sharedServer() {
             } else if (action === 'update') {
               selected.forEach(row => Object.assign(row, payload, { updated_at: new Date(tick()).toISOString() }));
             }
-            return { data: copy(one ? selected[0] || null : selected), error: null };
+            if (action === 'select') {
+              const totalMatching = selected.length;
+              selected.sort((left, right) => {
+                for (const order of orders) {
+                  const a = left[order.key], b = right[order.key];
+                  if (a === b) continue;
+                  return (a < b ? -1 : 1) * (order.ascending ? 1 : -1);
+                }
+                return 0;
+              });
+              if (!one) selected = selected.slice(from, from + Math.min(rowCap, limit, to - from + 1));
+              reads.push({ deviceId, table, equality: copy(equality), orders: copy(orders), from, to, returned: selected.length });
+              if (table === 'classes' && !one && from > 0 && from >= totalMatching && endRangeErrorCode) {
+                return { data: null, error: { code: endRangeErrorCode, message: 'Requested range is not satisfiable', status: 416 } };
+              }
+            }
+            const response = { data: copy(one ? selected[0] || null : selected), error: null };
+            if (action === 'select' && table === 'classes' && !one && nextClassPageHook) {
+              const hook = nextClassPageHook;
+              nextClassPageHook = null;
+              hook({ deviceId, from, response });
+            }
+            if (action === 'select' && table === 'classes' && one && equality.id && nextClassFetchPause?.deviceId === deviceId) {
+              const pause = nextClassFetchPause;
+              nextClassFetchPause = null;
+              pause.snapshotCaptured();
+              await pause.releaseGate;
+            }
+            return response;
           }).then(resolve, reject);
         }
       };
       return query;
     } };
   }
-  return { tables, writes, tick, client, beforeNextUpdate(hook) { nextUpdateHook = hook; } };
+  return {
+    tables, writes, reads, tick, client,
+    beforeNextUpdate(hook) { nextUpdateHook = hook; },
+    afterNextClassPage(hook) { nextClassPageHook = hook; },
+    pauseNextClassFetch(deviceId) {
+      let snapshotCaptured, release;
+      const snapshotReady = new Promise(resolve => { snapshotCaptured = resolve; });
+      const releaseGate = new Promise(resolve => { release = resolve; });
+      nextClassFetchPause = { deviceId, snapshotCaptured, releaseGate };
+      return { snapshotReady, release };
+    }
+  };
 }
 
 function browser(server, deviceId) {
-  const classes = [];
+  const classes = [], statePatches = [];
   const tier = { id: '1', source: 'JTS-standard', sections: [{ code: 'M', items: [] }], timers: [] };
   const getClass = id => classes.find(c => c.id === id) || null;
   const store = {
@@ -80,6 +122,7 @@ function browser(server, deviceId) {
     persistCloudMerge() {},
     patchCloudState(id, patch) {
       const c = getClass(id);
+      statePatches.push({ id, patch: copy(patch) });
       if (c) c.cloudSync = { ...(c.cloudSync || {}), ...patch };
       return c;
     },
@@ -116,7 +159,7 @@ function browser(server, deviceId) {
     return c;
   }
   return {
-    api, classes, window, getClass, change,
+    api, classes, window, getClass, change, statePatches,
     createClass() {
       const now = server.tick();
       const c = { id: 'class-1', name: 'TCCC skills assessment', tierId: '1', roster: 'A', date: '2026-10-15',
@@ -134,8 +177,8 @@ function browser(server, deviceId) {
   };
 }
 
-async function twoBrowsers() {
-  const server = sharedServer();
+async function twoBrowsers(options) {
+  const server = sharedServer(options);
   const desktop = browser(server, 'desktop');
   const phone = browser(server, 'phone');
   desktop.createClass();
@@ -185,6 +228,240 @@ function useLegacyMetadataBaseline(device) {
   delete baseline.restoredAt;
   c.cloudSync.baseMetadataSignature = JSON.stringify(baseline);
 }
+
+function addNewerClasses(server, count = 4) {
+  const template = copy(server.tables.classes.find(row => row.id === 'class-1'));
+  for (let index = 0; index < count; index++) {
+    const at = new Date(server.tick()).toISOString();
+    server.tables.classes.push({ ...copy(template), id: `aaa-newer-${index}`, name: `Newer class ${index}`,
+      status: 'draft', app_data: { ...copy(template.app_data), deletedAt: null }, updated_at: at, client_modified_at: at });
+  }
+}
+
+test('disabled legacy trash outside the first capped page is published from the original desktop', async () => {
+  const { server, desktop, phone } = await twoBrowsers({ rowCap: 2 });
+  const local = desktop.getClass('class-1');
+  local.deletedAt = server.tick();
+  local.cloudSync = { ...local.cloudSync, enabled: false, status: 'local' };
+  useLegacyMetadataBaseline(desktop);
+  addNewerClasses(server);
+  await desktop.api.syncAll({ silent: true });
+  const row = server.tables.classes.find(c => c.id === 'class-1');
+  assert.equal(row.status, 'archived');
+  assert.equal(row.app_data.deletedAt, local.deletedAt);
+  await phone.api.pullVisibleClasses();
+  assert.ok(phone.getClass('class-1').deletedAt);
+});
+
+test('legacy trash falsely marked synced outside the first capped page publishes a tombstone', async () => {
+  const { server, desktop, phone } = await twoBrowsers({ rowCap: 2 });
+  const local = desktop.getClass('class-1');
+  local.deletedAt = server.tick();
+  local.cloudSync.status = 'synced';
+  useLegacyMetadataBaseline(desktop);
+  addNewerClasses(server);
+  await desktop.api.syncAll({ silent: true });
+  assert.equal(server.tables.classes.find(c => c.id === 'class-1').status, 'archived');
+  await phone.api.pullVisibleClasses();
+  assert.ok(phone.getClass('class-1').deletedAt);
+});
+
+test('phone consumes older archived rows through every capped page with deterministic ordering', async () => {
+  const { server, phone } = await twoBrowsers({ rowCap: 2 });
+  const removedAt = archiveOnServer(server);
+  addNewerClasses(server);
+  const readsBefore = server.reads.length;
+  await phone.api.pullVisibleClasses();
+  assert.equal(phone.getClass('class-1').deletedAt, removedAt);
+  assert.equal(phone.classes.length, 5);
+  const pages = server.reads.slice(readsBefore).filter(read => read.table === 'classes' && !read.equality.id);
+  assert.ok(pages.length >= 3);
+  assert.ok(pages.some(page => page.from > 0));
+  assert.ok(pages.every(page => page.orders.some(order => order.key === 'id')));
+  assert.equal(pages.at(-1).returned, 0, 'a server cap below the requested range must not be mistaken for the final page');
+});
+
+test('metadata updates between pages cannot move an archived class out of the phone pull', async () => {
+  const { server, phone } = await twoBrowsers({ rowCap: 2 });
+  const removedAt = archiveOnServer(server);
+  addNewerClasses(server);
+  server.afterNextClassPage(({ from }) => {
+    assert.equal(from, 0);
+    const row = server.tables.classes.find(c => c.id === 'class-1');
+    // updated_at ordering would move this old tombstone ahead of the cursor
+    // after the first response; ordering by immutable IDs keeps it reachable.
+    row.updated_at = new Date(server.tick()).toISOString();
+    row.app_data.externalMetadata = 'updated during pagination';
+  });
+  await phone.api.pullVisibleClasses();
+  assert.equal(phone.classes.length, 5);
+  assert.equal(phone.getClass('class-1').deletedAt, removedAt);
+});
+
+test('pagination consumes older tombstones when the terminal range returns PostgREST 416', async () => {
+  const { server, phone } = await twoBrowsers({ rowCap: 2, endRangeErrorCode: 'PGRST103' });
+  const removedAt = archiveOnServer(server);
+  addNewerClasses(server);
+  const before = server.reads.length;
+  await phone.api.pullVisibleClasses();
+  assert.equal(phone.classes.length, 5);
+  assert.equal(phone.getClass('class-1').deletedAt, removedAt);
+  const pages = server.reads.slice(before).filter(read => read.table === 'classes' && !read.equality.id);
+  assert.equal(pages.at(-1).from, 5);
+  assert.equal(pages.at(-1).returned, 0);
+});
+
+test('pagination propagates other server errors rather than treating them as the final page', async () => {
+  const server = sharedServer({ rowCap: 2, endRangeErrorCode: '42501' });
+  const desktop = browser(server, 'desktop');
+  const phone = browser(server, 'phone');
+  desktop.createClass();
+  await desktop.api.pushClass(desktop.getClass('class-1'));
+  await assert.rejects(phone.api.pullVisibleClasses(), { code: '42501' });
+});
+
+test('legacy local trash with no server row is explicitly reconciled and publishes a shared tombstone', async () => {
+  const { server, desktop, phone } = await twoBrowsers({ rowCap: 2 });
+  const local = desktop.getClass('class-1');
+  const removedAt = server.tick();
+  local.deletedAt = removedAt;
+  local.cloudSync = { ...local.cloudSync, enabled: false, status: 'local' };
+  server.tables.classes.length = 0;
+  const readsBefore = server.reads.length;
+  await desktop.api.syncAll({ silent: true });
+  const row = server.tables.classes.find(c => c.id === 'class-1');
+  assert.ok(row, 'the original deletion must not remain stranded solely in local storage');
+  assert.equal(row.status, 'archived');
+  assert.equal(row.app_data.deletedAt, removedAt);
+  assert.ok(server.reads.slice(readsBefore).some(read => read.table === 'classes' && read.equality.id === 'class-1'));
+  await phone.api.pullVisibleClasses();
+  assert.equal(phone.getClass('class-1').deletedAt, removedAt);
+});
+
+test('an active local class stays visible when its server row is absent', async () => {
+  const { server, phone } = await twoBrowsers({ rowCap: 2 });
+  server.tables.classes.length = 0;
+  const writesBefore = server.writes.length;
+  await phone.api.syncAll({ silent: true });
+  assert.equal(phone.getClass('class-1').deletedAt, null);
+  assert.equal(phone.classes.filter(c => !c.deletedAt).length, 1);
+  assert.equal(server.writes.length, writesBefore);
+});
+
+test('concurrent sync consumes a server deletion after an older in-flight parent fetch returns', async () => {
+  const { server, phone } = await twoBrowsers();
+  const pause = server.pauseNextClassFetch('phone');
+  const pushing = phone.api.pushClass(phone.getClass('class-1'));
+  await pause.snapshotReady;
+  const removedAt = archiveOnServer(server);
+  const syncing = phone.api.syncAll({ silent: true });
+  // Let the collection response arrive while the earlier push still holds
+  // the class tail. The paused fetch must then return its older active row.
+  await new Promise(resolve => setImmediate(resolve));
+  pause.release();
+  await Promise.all([pushing, syncing]);
+  assert.equal(server.tables.classes[0].status, 'archived');
+  assert.equal(phone.getClass('class-1').deletedAt, removedAt);
+  assert.equal(phone.classes.filter(c => !c.deletedAt).length, 0);
+  assert.equal(phone.getClass('class-1').cloudSync.status, 'synced');
+});
+
+test('acknowledged trash is not rescheduled or rewritten on each synchronization', async () => {
+  const { server, desktop } = await twoBrowsers({ rowCap: 2 });
+  requestTrashAction(server, desktop, 'delete');
+  await desktop.api.pushClass(desktop.getClass('class-1'));
+  const deletedAt = desktop.getClass('class-1').deletedAt;
+  const writesBefore = server.writes.length;
+  const patchesBefore = desktop.statePatches.length;
+  await desktop.api.syncAll({ silent: true });
+  await desktop.api.syncAll({ silent: true });
+  assert.equal(server.writes.length, writesBefore);
+  assert.equal(desktop.getClass('class-1').deletedAt, deletedAt);
+  assert.equal(desktop.getClass('class-1').cloudSync.status, 'synced');
+  assert.equal(desktop.getClass('class-1').cloudSync.trashAction, null);
+  assert.equal(desktop.statePatches.slice(patchesBefore).some(({ patch }) => patch.status === 'pending' || patch.trashAction?.kind === 'delete'), false);
+});
+
+test('legacy trash repair retains enterprise authorization when an older row is paginated', async () => {
+  const { server, phone } = await twoBrowsers({ rowCap: 2 });
+  phone.window.RAPS_CLOUD.role = 'evaluator';
+  phone.getClass('class-1').deletedAt = server.tick();
+  phone.getClass('class-1').cloudSync = { ...phone.getClass('class-1').cloudSync, enabled: false, status: 'local' };
+  addNewerClasses(server);
+  const writesBefore = server.writes.length;
+  await phone.api.syncAll({ silent: true });
+  assert.notEqual(server.tables.classes.find(c => c.id === 'class-1').status, 'archived');
+  assert.equal(server.writes.length, writesBefore);
+});
+
+test('a foreign-owned queued deletion cannot be published or acknowledged by the current user', async () => {
+  const { server, phone } = await twoBrowsers();
+  requestTrashAction(server, phone, 'delete');
+  const foreignEntry = copy(phone.getClass('class-1').cloudSync.trashAction);
+  const calls = { remembered: 0, acknowledged: 0 };
+  const store = phone.window.RAPS_CLASS_STORE;
+  store.ownsTrashAction = () => false;
+  store.rememberTrashAction = () => { calls.remembered++; throw new Error('Foreign outbox must not be replaced'); };
+  store.acknowledgeTrashAction = () => { calls.acknowledged++; return true; };
+  const before = server.writes.length;
+  await phone.api.syncAll({ silent: true });
+  assert.equal(server.tables.classes[0].status, 'draft');
+  assert.equal(phone.getClass('class-1').deletedAt, null);
+  assert.equal(phone.classes.filter(c => !c.deletedAt).length, 1);
+  assert.equal(server.writes.length, before);
+  assert.deepEqual(calls, { remembered: 0, acknowledged: 0 });
+  assert.equal(foreignEntry.kind, 'delete');
+});
+
+test('a foreign-owned queued deletion cannot insert a missing shared class tombstone', async () => {
+  const { server, phone } = await twoBrowsers();
+  requestTrashAction(server, phone, 'delete');
+  server.tables.classes.length = 0;
+  const calls = { remembered: 0, acknowledged: 0 };
+  const store = phone.window.RAPS_CLASS_STORE;
+  store.ownsTrashAction = () => false;
+  store.rememberTrashAction = () => { calls.remembered++; throw new Error('Foreign outbox must not be replaced'); };
+  store.acknowledgeTrashAction = () => { calls.acknowledged++; return true; };
+  const before = server.writes.length;
+  await phone.api.syncAll({ silent: true });
+  assert.equal(server.tables.classes.length, 0);
+  assert.equal(server.writes.length, before);
+  assert.deepEqual(calls, { remembered: 0, acknowledged: 0 });
+  assert.equal(phone.getClass('class-1').cloudSync.status, 'error');
+  assert.match(phone.getClass('class-1').cloudSync.error, /another signed-in user/i);
+});
+
+test('legacy trash repair adopts a newer restoration on a paginated older class', async () => {
+  const { server, phone } = await twoBrowsers({ rowCap: 2 });
+  const local = phone.getClass('class-1');
+  local.deletedAt = server.tick();
+  local.cloudSync = { ...local.cloudSync, enabled: false, status: 'local' };
+  const row = server.tables.classes[0];
+  const restoredAt = server.tick();
+  row.app_data.restoredAt = restoredAt;
+  row.client_modified_at = new Date(restoredAt).toISOString();
+  row.updated_at = new Date(restoredAt).toISOString();
+  addNewerClasses(server);
+  await phone.api.syncAll({ silent: true });
+  assert.notEqual(row.status, 'archived');
+  assert.equal(phone.getClass('class-1').deletedAt, null);
+  assert.equal(phone.getClass('class-1').restoredAt, restoredAt);
+});
+
+test('legacy trash repair adopts completed retention state on a paginated older class', async () => {
+  const { server, phone } = await twoBrowsers({ rowCap: 2 });
+  const local = phone.getClass('class-1');
+  local.deletedAt = server.tick();
+  local.cloudSync = { ...local.cloudSync, enabled: false, status: 'local' };
+  const closedAt = completeOnServer(server);
+  addNewerClasses(server);
+  const writesBefore = server.writes.length;
+  await phone.api.syncAll({ silent: true });
+  assert.equal(server.tables.classes.find(c => c.id === 'class-1').status, 'completed');
+  assert.equal(phone.getClass('class-1').closedAt, closedAt);
+  assert.equal(phone.getClass('class-1').deletedAt, null);
+  assert.equal(server.writes.length, writesBefore);
+});
 
 test('delete-only desktop change archives the cloud class and hides it after phone pull', async () => {
   const { server, desktop, phone } = await twoBrowsers();
@@ -513,21 +790,31 @@ function appLifecycleActions({ enterprise, closed = false }) {
   const source = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
   const c = { id: 'class-1', name: 'Test class', deletedAt: null, closedAt: closed ? 1 : null, restoredAt: null };
   const alerts = [], saves = [], archiveRequests = [];
+  const storage = new Map();
+  const outboxPrefix = /const TRASH_OUTBOX_PREFIX\s*=\s*'([^']+)'/.exec(source)?.[1];
+  assert.ok(outboxPrefix, 'Missing trash outbox storage key');
   let selectedClass = c;
   const context = vm.createContext({ db: { classes: [c] }, cls: () => selectedClass,
     hasEnterpriseAccess: () => enterprise, isClassClosed: value => !!value.closedAt,
     alert: value => alerts.push(value), prompt: () => 'DELETE', now: () => 123,
+    currentCloudUserId: () => 'enterprise-user', TRASH_OUTBOX_PREFIX: outboxPrefix,
+    navigator: { onLine: true }, window: {},
+    localStorage: {
+      getItem: key => storage.get(key) || null,
+      setItem: (key, value) => storage.set(key, value),
+      removeItem: key => storage.delete(key)
+    },
     saveDb: id => saves.push({ id, trashAction: copy(c.cloudSync?.trashAction || null) }),
     showHome() { selectedClass = null; }, renderHome() {},
     requestClosedClassArchiveDeletion: value => archiveRequests.push(value.id) });
-  for (const name of ['deleteClass', 'restoreDeletedClass']) {
+  for (const name of ['readTrashOutbox', 'rememberTrashAction', 'applyTrashAction', 'queueTrashAction', 'deleteClass', 'restoreDeletedClass']) {
     const marker = new RegExp(`^(?:async )?function ${name}\\(`, 'm');
     const match = marker.exec(source);
     assert.ok(match, `Missing app lifecycle function ${name}`);
     const end = source.indexOf('\n}', match.index) + 2;
     vm.runInContext(source.slice(match.index, end), context);
   }
-  return { context, c, alerts, saves, archiveRequests, atHome: () => selectedClass === null };
+  return { context, c, alerts, saves, archiveRequests, storage, outboxPrefix, atHome: () => selectedClass === null };
 }
 
 test('application delete and Home restore save the target class with explicit lifecycle markers', async () => {
@@ -543,12 +830,15 @@ test('application delete and Home restore save the target class with explicit li
   // Restoration occurs with no selected class, exactly as it does on Home.
   await vm.runInContext('restoreDeletedClass("class-1")', fixture.context);
   assert.equal(fixture.c.deletedAt, null);
-  assert.equal(fixture.c.restoredAt, 123);
+  assert.equal(fixture.c.restoredAt, 124);
   assert.equal(fixture.saves[1].id, 'class-1');
   assert.deepEqual(fixture.saves[1].trashAction, {
-    kind: 'restore', requestedAt: 123, expectedDeletedAt: 123, expectedRestoredAt: 37
+    kind: 'restore', requestedAt: 124, expectedDeletedAt: 123, expectedRestoredAt: 37
   });
   assert.equal(fixture.c.cloudSync.enabled, true);
+  assert.deepEqual(JSON.parse(fixture.storage.get(fixture.outboxPrefix + 'class-1')), {
+    classId: 'class-1', userId: 'enterprise-user', action: fixture.saves[1].trashAction
+  });
 });
 
 test('application delete and restore actions reject non-enterprise users', async () => {

@@ -70,7 +70,16 @@ window.__rapsTest = {
     };
   },
   restoreStorage(){Storage.prototype.setItem=window.__originalStorageSetItem;},
+  failTrashStorage(mode){
+    window.__originalTrashStorageSetItem=Storage.prototype.setItem;
+    Storage.prototype.setItem=function(key,value){
+      if((mode==='outbox'&&key.startsWith(TRASH_OUTBOX_PREFIX))||(mode==='database'&&key===DB_KEY))throw new DOMException('Synthetic trash storage failure','QuotaExceededError');
+      return window.__originalTrashStorageSetItem.call(this,key,value);
+    };
+  },
+  restoreTrashStorage(){Storage.prototype.setItem=window.__originalTrashStorageSetItem;},
   prepareClassTrash() {
+    localStorage.removeItem(TRASH_OUTBOX_PREFIX+'test-class');
     window.RAPS_CLOUD.role='enterprise_admin';
     this.setup();
     evalState().finalizedAt=now();evalState().finalResult='FAIL';
@@ -505,6 +514,136 @@ def main():
         assert page.evaluate('window.__classChangeEvents')==[]
         assert page.evaluate('window.__cloudOperations')==[]
         checks.append('a received cloud tombstone exits the open class, hides it on Home, and preserves local attempts without cloud operations')
+
+        # Tabs share localStorage but retain independent in-memory databases.
+        # A harmless background write from a stale tab must not discard the
+        # durable lifecycle queue, even before cloud delivery is available.
+        context.add_init_script("""
+          window.addEventListener('DOMContentLoaded',()=>{
+            window.RAPS_CLOUD.role='enterprise_admin';
+            window.dispatchEvent(new CustomEvent('raps-cloud-identity'));
+          },{once:true});
+        """)
+        page.evaluate('window.__rapsTest.prepareClassTrash()')
+        other=context.new_page()
+        other.on('pageerror',lambda error:errors.append(str(error)))
+        other.on('dialog',dismiss_dialog)
+        other.goto(ORIGIN+'/',wait_until='networkidle')
+        other.wait_for_function('!!window.__rapsTest')
+        if other.locator('#safetyAck').is_visible():
+            other.locator('#safetyAck').check()
+            other.locator('#safetyEnterBtn').click()
+        assert other.evaluate("RAPS_CLASS_STORE.getClass('test-class').cloudSync.status")=='synced'
+        page.remove_listener('dialog',dismiss_dialog)
+        page.once('dialog',confirm_delete)
+        page.locator('#deleteClassBtn').click()
+        page.on('dialog',dismiss_dialog)
+        outbox=page.evaluate("JSON.parse(localStorage.getItem('RAPS_CLASS_TRASH_OUTBOX:test-class'))")
+        assert set(outbox)=={'classId','userId','action'}, outbox
+        assert outbox['classId']=='test-class' and outbox['userId']=='test-evaluator'
+        assert set(outbox['action'])=={'kind','requestedAt','expectedDeletedAt','expectedRestoredAt'}
+        other.evaluate("RAPS_CLASS_STORE.patchRosterCloudState('test-class',{status:'synced',lastSyncedAt:Date.now()})")
+        assert page.evaluate('window.__rapsTest.stored().classes[0].deletedAt') is None
+        assert page.evaluate("JSON.parse(localStorage.getItem('RAPS_CLASS_TRASH_OUTBOX:test-class'))")==outbox
+        page.reload(wait_until='networkidle')
+        page.wait_for_function('!!window.__rapsTest')
+        recovered=page.evaluate('window.__rapsTest.stored().classes[0]')
+        assert recovered['deletedAt']==outbox['action']['requestedAt']
+        assert recovered['cloudSync']['trashAction']==outbox['action']
+        assert recovered['cloudSync']['status']=='pending'
+        expect(page.locator('#classList [data-open-class="test-class"]')).to_have_count(0)
+        checks.append('a separate deletion outbox survives another tab overwriting the class database and replays on reload without storing learner data')
+
+        page.locator('[data-home-area="manage"]').click()
+        page.locator('[data-restore-class="test-class"]').click()
+        restore_outbox=page.evaluate("JSON.parse(localStorage.getItem('RAPS_CLASS_TRASH_OUTBOX:test-class'))")
+        assert restore_outbox['action']['kind']=='restore'
+        assert not page.evaluate("action=>RAPS_CLASS_STORE.acknowledgeTrashAction('test-class',action)",outbox['action'])
+        assert page.evaluate("JSON.parse(localStorage.getItem('RAPS_CLASS_TRASH_OUTBOX:test-class'))")==restore_outbox
+        other.evaluate("RAPS_CLASS_STORE.patchRosterCloudState('test-class',{status:'synced'})")
+        page.reload(wait_until='networkidle')
+        page.wait_for_function('!!window.__rapsTest')
+        recovered=page.evaluate('window.__rapsTest.stored().classes[0]')
+        assert recovered['deletedAt'] is None
+        assert recovered['restoredAt']==restore_outbox['action']['requestedAt']
+        assert recovered['cloudSync']['trashAction']==restore_outbox['action']
+        assert page.evaluate("action=>RAPS_CLASS_STORE.acknowledgeTrashAction('test-class',action)",restore_outbox['action'])
+        assert page.evaluate("localStorage.getItem('RAPS_CLASS_TRASH_OUTBOX:test-class')") is None
+        other.close()
+        checks.append('a stale delete acknowledgement cannot clear a newer restore; restoration survives a stale tab and only its matching acknowledgement clears the outbox')
+
+        page.evaluate('window.__rapsTest.prepareClassTrash()')
+        actor_recovery=page.evaluate('''() => {
+          const key='RAPS_CLASS_TRASH_OUTBOX:test-class';
+          const action={kind:'delete',requestedAt:Date.now(),expectedDeletedAt:0,expectedRestoredAt:0};
+          localStorage.setItem(key,JSON.stringify({classId:'test-class',userId:'another-user',action}));
+          const otherUser=RAPS_CLASS_STORE.recoverTrashActions();
+          const unchangedForOtherUser=!RAPS_CLASS_STORE.getClass('test-class').deletedAt;
+          const ownedByOther=!RAPS_CLASS_STORE.ownsTrashAction('test-class');
+          let automaticRememberRejected=false;
+          try{RAPS_CLASS_STORE.rememberTrashAction('test-class',action);}catch{automaticRememberRejected=true;}
+          const actorRetained=JSON.parse(localStorage.getItem(key)).userId==='another-user';
+          localStorage.setItem(key,JSON.stringify({classId:'test-class',userId:'',action}));
+          const missingActor=RAPS_CLASS_STORE.recoverTrashActions();
+          localStorage.removeItem(key);
+          RAPS_CLASS_STORE.rememberTrashAction('test-class',action);
+          const rememberLeavesClassUnchanged=!RAPS_CLASS_STORE.getClass('test-class').deletedAt;
+          const userId=RAPS_CLOUD.user.id;RAPS_CLOUD.user.id='';
+          const signedOut=RAPS_CLASS_STORE.recoverTrashActions();
+          RAPS_CLOUD.user.id=userId;
+          RAPS_CLOUD.role='evaluator';
+          const evaluator=RAPS_CLASS_STORE.recoverTrashActions();
+          const unchangedForEvaluator=!RAPS_CLASS_STORE.getClass('test-class').deletedAt;
+          RAPS_CLOUD.role='enterprise_admin';
+          const enterprise=RAPS_CLASS_STORE.recoverTrashActions();
+          const queued=RAPS_CLASS_STORE.getClass('test-class').deletedAt===action.requestedAt;
+          RAPS_CLASS_STORE.acknowledgeTrashAction('test-class',action);
+          return {otherUser,unchangedForOtherUser,ownedByOther,automaticRememberRejected,actorRetained,missingActor,rememberLeavesClassUnchanged,signedOut,evaluator,unchangedForEvaluator,enterprise,queued};
+        }''')
+        assert actor_recovery=={'otherUser':0,'unchangedForOtherUser':True,'ownedByOther':True,'automaticRememberRejected':True,'actorRetained':True,'missingActor':0,'rememberLeavesClassUnchanged':True,'signedOut':0,'evaluator':0,'unchangedForEvaluator':True,'enterprise':1,'queued':True},actor_recovery
+        checks.append('trash recovery respects actor and Enterprise role, and automatic queuing cannot take over another account\'s pending action')
+
+        storage_alerts=[]
+
+        def confirm_delete_and_capture_alert(dialog):
+            if dialog.type=='prompt':
+                dialog.accept('DELETE')
+            else:
+                storage_alerts.append(dialog.message)
+                dialog.dismiss()
+
+        page.evaluate('window.__rapsTest.prepareClassTrash()')
+        page.evaluate("window.__rapsTest.failTrashStorage('outbox')")
+        page.remove_listener('dialog',dismiss_dialog)
+        page.on('dialog',confirm_delete_and_capture_alert)
+        page.locator('#deleteClassBtn').click()
+        page.remove_listener('dialog',confirm_delete_and_capture_alert)
+        page.on('dialog',dismiss_dialog)
+        page.evaluate('window.__rapsTest.restoreTrashStorage()')
+        assert page.evaluate('window.__rapsTest.classRecord().deletedAt') is None
+        assert page.evaluate("localStorage.getItem('RAPS_CLASS_TRASH_OUTBOX:test-class')") is None
+        expect(page.locator('#classView')).to_be_visible()
+        assert len(storage_alerts)==1 and 'not saved' in storage_alerts[0],storage_alerts
+        checks.append('failure to persist the separate trash queue reports an unsaved change and leaves the class visible')
+
+        page.evaluate('window.__rapsTest.prepareClassTrash()')
+        page.evaluate("window.__rapsTest.failTrashStorage('database')")
+        storage_alerts.clear()
+        page.remove_listener('dialog',dismiss_dialog)
+        page.on('dialog',confirm_delete_and_capture_alert)
+        page.locator('#deleteClassBtn').click()
+        page.remove_listener('dialog',confirm_delete_and_capture_alert)
+        page.on('dialog',dismiss_dialog)
+        page.evaluate('window.__rapsTest.restoreTrashStorage()')
+        durable_action=page.evaluate("JSON.parse(localStorage.getItem('RAPS_CLASS_TRASH_OUTBOX:test-class')).action")
+        assert page.evaluate('window.__rapsTest.stored().classes[0].deletedAt') is None
+        assert len(storage_alerts)==1 and 'queued on this device' in storage_alerts[0],storage_alerts
+        page.reload(wait_until='networkidle')
+        page.wait_for_function('!!window.__rapsTest')
+        assert page.evaluate('window.__rapsTest.stored().classes[0].deletedAt')==durable_action['requestedAt']
+        assert page.evaluate('window.__rapsTest.classRecord().cloudSync.trashAction')==durable_action
+        assert page.evaluate('window.__cloudOperations')==[]
+        checks.append('a database save failure reports the retained queue and recovers its deletion after reload when storage works again')
 
         assert not errors, errors
         assert not external_requests, external_requests
