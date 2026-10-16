@@ -34,6 +34,14 @@ Observation markers use `evaluations.app_data.observations`. Existing `failureDe
 
 Unknown metadata is preserved. Older records without diagnostic fields remain readable, and unknown assistance is reported as unknown. Stored evidence is retained when an evaluator subsequently corrects a grade to PASS.
 
+## Shared class trash
+
+Enterprise deletion of an open class synchronizes `classes.status='archived'` and a deletion marker in the existing `app_data` JSONB. It hides the class across devices without deleting students or assessments. Restore is an explicit operation tied to the deletion and previous restoration markers; stale metadata uploads cannot undo it. Minimal conditional patches preserve unrelated server metadata. Existing local-only trash is migrated when the Enterprise user synchronizes the original device. A newer server restoration takes precedence over old local trash.
+
+Delete and restore remain queued on the device until acknowledged. Trash shows each class's sync status, and removing a local copy is blocked while its deletion is unconfirmed. Return to the original device and use **Sync Classes**, then sync the second device. Devices also refresh classes on login, network return, window focus, and foreground return. Both devices must load the current release.
+
+Closed classes retain the existing audited archive-deletion workflow. The client checks for unfinished assessments before sharing a deletion; atomic exclusion of a simultaneous new assessment claim depends on the deployed server lifecycle functions. This release does not change those functions or deploy a database migration. Isolated two-browser sync tests exercise the real client modules with a shared fake server, and the browser workflow checks the actual Delete, Home Restore, and remote-tombstone views without production access.
+
 Unfinalized exports are labeled PROVISIONAL. Finalized results use the stored server result. New CSV diagnostic columns are appended to existing columns and identify `TCCC_DIAGNOSTICS_1.0`; downstream consumers should select columns by header. Student PDFs include paginated coaching details.
 
 Matched reassessment follows the same failed A1 criteria into finalized A2, showing retested coverage, independent/assisted/unknown passes, repeated failures, NT, and pending items. Contributor charts distinguish failed observations, learners affected, and explicitly linked episodes. These are descriptive evidence, not proof of a cause or durable retention.

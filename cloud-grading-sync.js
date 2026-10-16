@@ -121,6 +121,7 @@ async function pushEvaluation(c,s,a,options={}){
   const expectedRemoteModifiedAt=Number(options?.expectedRemoteModifiedAt||0);
   const skipRosterSync=options?.skipRosterSync===true;
   if(!client||!cloud?.user?.id||!navigator.onLine)return false;
+  if(c?.deletedAt||getStore()?.getClass?.(c?.id)?.deletedAt)return false;
 
   // Closed classes are server-authoritative retention records. Never write
   // grading data after closure, including from a stale browser.
@@ -131,6 +132,7 @@ async function pushEvaluation(c,s,a,options={}){
   const {data:classRow,error:classError}=await client.from('classes')
     .select('status').eq('id',c.id).maybeSingle();
   if(classError)throw classError;
+  if(classRow?.status==='archived')return false;
   if(classRow?.status==='completed'){
     patchAttempt(a,{status:'conflict',error:'Class is closed on the server. Pull authoritative state before continuing.'});
     return false;
@@ -152,7 +154,17 @@ async function pushEvaluation(c,s,a,options={}){
     return false;
   }
 
-  if(!skipRosterSync&&window.RAPS_ROSTER_SYNC?.pushClassRosterAndShells) await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c);
+  if(!skipRosterSync&&window.RAPS_ROSTER_SYNC?.pushClassRosterAndShells){
+    if(await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c)===false)return false;
+    const store=getStore(),current=store?.getClass?.(c.id);
+    if(store?.getClass&&!current)return false;
+    c=current||c;
+    if(c.deletedAt||c.closedAt||c.status==='closed')return false;
+    const {data:latestClass,error:latestClassError}=await client.from('classes')
+      .select('status').eq('id',c.id).maybeSingle();
+    if(latestClassError)throw latestClassError;
+    if(latestClass?.status==='archived'||latestClass?.status==='completed')return false;
+  }
 
   const curriculumId=await curriculumIdFor(c);
   const crit=await criteriaFor(curriculumId);
@@ -530,7 +542,7 @@ async function pullAll(){
 }
 async function pushAll(){
   const store=getStore();if(!store)return 0;let n=0;
-  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled && !x?.closedAt && x?.status!=='closed')){
+  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled && !x?.deletedAt && !x?.closedAt && x?.status!=='closed')){
     for(const s of c.students||[]){
       for(const a of Object.values(s.attempts||{})){
         if(!a?.id||a.cloudShellOnly)continue;

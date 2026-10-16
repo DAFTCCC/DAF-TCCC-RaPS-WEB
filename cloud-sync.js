@@ -52,6 +52,8 @@ function classMetadataSnapshot(c) {
     trainingLocationState:String(c?.trainingLocationState||''),
     trainingLocationCountry:String(c?.trainingLocationCountry||''),
     location:String(c?.location||''),
+    deletedAt:Number(c?.deletedAt||0)||null,
+    restoredAt:Number(c?.restoredAt||0)||null,
     scenarioNT:[...(Array.isArray(c?.scenarioNT)?c.scenarioNT:[])].map(String).sort()
   };
 }
@@ -60,7 +62,9 @@ function classMetadataSignature(c) {
 }
 function classMetadataState(c, remote, remoteModified) {
   const state=c?.cloudSync||{};
-  const baselineSignature=String(state.baseMetadataSignature||'');
+  let baselineSignature=String(state.baseMetadataSignature||'');
+  // Normalize fingerprints saved before shared trash added lifecycle markers.
+  try { if (baselineSignature) baselineSignature=classMetadataSignature(JSON.parse(baselineSignature)); } catch {}
   const localSignature=classMetadataSignature(c);
   const remoteSignature=remote?classMetadataSignature(remote):'';
   const hasBaseline=!!baselineSignature;
@@ -218,7 +222,8 @@ function serializeAppData(c) {
     closedBy: c.closedBy || '',
     closureMode: c.closureMode || '',
     closureVersion: Number(c.closureVersion || 0) || null,
-    deletedAt: c.deletedAt || null
+    deletedAt: c.deletedAt || null,
+    restoredAt: c.restoredAt || null
   };
 }
 
@@ -257,21 +262,119 @@ async function fetchRemoteById(id) {
   return data || null;
 }
 
+// A tombstone is authoritative until an explicit restore names that exact
+// deletion. Ordinary metadata conflict resolution cannot undo shared trash.
+function trashDecision(c,remote) {
+  let action=c.cloudSync?.trashAction||null;
+  const removed=Number(remote?.deletedAt||0), restored=Number(remote?.restoredAt||0);
+  if (!action && c.deletedAt && !removed && !restored) {
+    // Migrate the local-only trash left by older builds, including entries
+    // those builds incorrectly labelled as already synchronized.
+    action={kind:'delete',requestedAt:Number(c.deletedAt),expectedDeletedAt:0,expectedRestoredAt:0};
+  }
+  if (action && !['delete','restore'].includes(action.kind)) action=null;
+  if (action && remote) {
+    if (action.kind==='restore' && removed &&
+        Number(action.expectedDeletedAt||0)===removed && Number(action.expectedRestoredAt||0)===restored) return {action};
+    if (action.kind==='delete' && !removed && Number(action.expectedRestoredAt||0)===restored) return {action};
+    if (action.kind==='restore' && !removed && !restored) return {action};
+    return {adopt:true};
+  }
+  if (remote && (removed || Number(c.deletedAt||0)!==removed || Number(c.restoredAt||0)!==restored)) return {adopt:true};
+  return {action};
+}
+
+function adoptLifecycle(c,remote) {
+  if (!remote) return;
+  if (classMetadataSignature(c)!==classMetadataSignature(remote)) {
+    saveClassConflictRecovery(c,{serverSnapshot:remote},'server-lifecycle');
+  }
+  getStore()?.upsertFromCloud?.(remote,{preserveStudents:true});
+  patchState(c.id,{
+    enabled:true,status:'synced',error:'',trashAction:null,
+    lastSyncedAt:Date.now(),remoteModifiedAt:Number(remote.modifiedAt||0),
+    baseMetadataSignature:classMetadataSignature(remote),
+    conflictBaseMetadataSignature:'',localMetadataSignature:'',remoteMetadataSignature:''
+  });
+}
+
+function trashActionUnchanged(c,action) {
+  const latest=getStore()?.getClass?.(c.id)?.cloudSync?.trashAction;
+  return !latest || (latest.kind===action.kind && Number(latest.requestedAt)===Number(action.requestedAt));
+}
+
+function acknowledgeTrashAction(c,saved,action) {
+  if (!trashActionUnchanged(c,action)) {
+    patchState(c.id,{enabled:true,status:'pending',error:'',remoteModifiedAt:Number(saved.modifiedAt||0),baseMetadataSignature:classMetadataSignature(saved)});
+  } else {
+    adoptLifecycle(c,saved);
+  }
+}
+
+async function hasUnfinishedAssessment(c) {
+  if ((c.students||[]).some(s=>Object.values(s.attempts||{}).some(a=>a.startedAt&&!a.finalizedAt&&!a.voidedAt))) return true;
+  const client=getClient();
+  const events=await client.from('evaluation_events').select('id').eq('class_id',c.id);
+  if (events.error) throw events.error;
+  const ids=[...new Set([c.id,...(events.data||[]).map(row=>row.id)])];
+  const evaluations=await client.from('evaluations').select('id,status,started_at,completed_at').in('event_id',ids);
+  if (evaluations.error) throw evaluations.error;
+  return (evaluations.data||[]).some(a=>a.status!=='voided' && !a.completed_at && (a.started_at||a.status==='in_progress'));
+}
+
+async function pushTrashAction(c,existing,remote,action,options) {
+  if (Number(options.casRetry||0)>=3) {
+    patchState(c.id,{status:'error',error:'Class changed during trash synchronization. Sync Classes to retry.'});
+    return false;
+  }
+  const unfinished=action.kind==='delete' && await hasUnfinishedAssessment(c);
+  // Home can queue Restore while the delete request is awaiting the server.
+  // Never replace that newer intent with the older request's acknowledgement.
+  if (!trashActionUnchanged(c,action)) return pushClassUnlocked(c,{...options,casRetry:Number(options.casRetry||0)+1});
+  if (unfinished) {
+    adoptLifecycle(c,remote);
+    patchState(c.id,{status:'error',error:'Class was not deleted. Finalize or void every assessment in progress, then delete the class again.'});
+    return false;
+  }
+  const at=Number(action.requestedAt)||Date.now();
+  const revision=Math.max(Date.now(),Number(remote.modifiedAt||0)+1,Number(c.modifiedAt||0)+1);
+  const appData={...(existing.app_data||{})};
+  if (action.kind==='delete') {
+    appData.trashPreviousStatus=existing.status==='active'?'active':'draft';
+    appData.deletedAt=at;
+    appData.deletedBy=getCloud().user.id;
+  } else {
+    appData.deletedAt=null;
+    appData.restoredAt=at;
+    appData.restoredBy=getCloud().user.id;
+  }
+  const payload={
+    status:action.kind==='delete'?'archived':appData.trashPreviousStatus==='active'?'active':'draft',
+    app_data:appData,client_modified_at:isoFromMs(revision),source_device_id:getStore()?.deviceId?.()||null
+  };
+  patchState(c.id,{enabled:true,status:'syncing',error:'',trashAction:action});
+  let write=getClient().from('classes').update(payload).eq('id',c.id).eq('status',existing.status);
+  if (existing.client_modified_at) write=write.eq('client_modified_at',existing.client_modified_at);
+  if (existing.updated_at) write=write.eq('updated_at',existing.updated_at);
+  const {data,error}=await write.select('*').maybeSingle();
+  if (error) {
+    patchState(c.id,{status:navigator.onLine?'error':'offline',error:shortError(error)});
+    throw error;
+  }
+  if (!data) return pushClassUnlocked(c,{...options,casRetry:Number(options.casRetry||0)+1});
+  const saved=remoteToLocal(data,await loadRefs());
+  acknowledgeTrashAction(c,saved,action);
+  return true;
+}
+
 async function pushClassUnlocked(c, options={}) {
+  c=getStore()?.getClass?.(c.id)||c;
   const forceConflict=options?.forceConflict===true;
   const expectedRemoteModifiedAt=Number(options?.expectedRemoteModifiedAt||0);
   const casRetry=Number(options?.casRetry||0);
   const client = getClient();
   const cloud = getCloud();
 
-  if (String(c?.cloudSync?.status||'')==='conflict' && !forceConflict) {
-    patchState(c.id,{
-      enabled:true,
-      status:'conflict',
-      error:c.cloudSync?.error||'Resolve the class metadata conflict before syncing this class.'
-    });
-    return false;
-  }
   if (!client || !cloud?.user?.id) return false;
 
   // Closed classes are server-authoritative retention records. Never push
@@ -296,16 +399,25 @@ async function pushClassUnlocked(c, options={}) {
   const metadata=classMetadataState(c,remote,remoteModified);
 
   if (existing?.status==='completed') {
-    patchState(c.id,{
-      enabled:true,
-      status:'synced',
-      error:'',
-      createdBy:existing.created_by||c.cloudSync?.createdBy||'',
-      lastSyncedAt:Date.now(),
-      remoteModifiedAt:remoteModified,
-      baseMetadataSignature:metadata.remoteSignature
-    });
+    adoptLifecycle(c,remote);
     return true;
+  }
+
+  const visibility=trashDecision(c,remote);
+  if (visibility.action && cloud.role!=='enterprise_admin') {
+    patchState(c.id,{enabled:true,status:'error',error:'Enterprise Administrator access is required to synchronize class deletion or restoration.'});
+    return false;
+  }
+  if (visibility.adopt) { adoptLifecycle(c,remote); return true; }
+  if (visibility.action && existing) {
+    return pushTrashAction(c,existing,remote,visibility.action,options);
+  }
+  if (visibility.action?.kind==='delete' && !existing && await hasUnfinishedAssessment(c)) {
+    patchState(c.id,{enabled:true,status:'error',error:'Finalize or void every assessment in progress before deleting this class.'});
+    return false;
+  }
+  if (String(c?.cloudSync?.status||'')==='conflict' && !forceConflict) {
+    return false;
   }
 
   // web.12 migration repair: web.11 could mark a timestamp-only conflict
@@ -459,10 +571,11 @@ async function pushClassUnlocked(c, options={}) {
   let data=null;
 
   if (existing) {
-    let write=client.from('classes').update(payload).eq('id',c.id);
+    let write=client.from('classes').update(payload).eq('id',c.id).eq('status',existing.status);
     if (existing.client_modified_at) {
       write=write.eq('client_modified_at',existing.client_modified_at);
-    } else if (existing.updated_at) {
+    }
+    if (existing.updated_at) {
       write=write.eq('updated_at',existing.updated_at);
     }
 
@@ -484,6 +597,11 @@ async function pushClassUnlocked(c, options={}) {
       const latestRemote=latest?remoteToLocal(latest,loadedRefs):null;
       const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
       const latestMetadata=classMetadataState(c,latestRemote,latestModified);
+
+      if (latest && (latest.status==='completed'||latest.status==='archived'||
+          Number(latestRemote.restoredAt||0)!==Number(c.restoredAt||0))) {
+        return pushClassUnlocked(c,{...options,casRetry:casRetry+1});
+      }
 
       if (latestMetadata.sameMetadata) {
         patchState(c.id,{
@@ -542,6 +660,7 @@ async function pushClassUnlocked(c, options={}) {
 
     if (result.error) {
       if (String(result.error?.code||'')==='23505') {
+        if (casRetry<2) return pushClassUnlocked(c,{...options,casRetry:casRetry+1});
         const latest=await fetchRemoteById(c.id);
         const latestRemote=latest?remoteToLocal(latest,loadedRefs):null;
         const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
@@ -583,6 +702,7 @@ async function pushClassUnlocked(c, options={}) {
     c.syncStatus='CLOUD';
   }
   const savedRemote=remoteToLocal(data,loadedRefs);
+  if (visibility.action) { acknowledgeTrashAction(c,savedRemote,visibility.action); return true; }
   const savedSignature=classMetadataSignature(savedRemote);
   patchState(c.id,{
     enabled:true,
@@ -658,6 +778,7 @@ function remoteToLocal(row, loadedRefs) {
     closureMode: appData.closureMode || '',
     closureVersion: Number(appData.closureVersion || 0) || null,
     deletedAt: row.status === 'archived' ? (appData.deletedAt || remoteModifiedAt) : null,
+    restoredAt: appData.restoredAt || null,
     scenarioNT: Array.isArray(appData.scenarioNT) ? appData.scenarioNT : [],
     students: [],
     contentVersion: appData.contentVersion || (tier ? `${tier.source} | app ${window.TCCC_BUILD?.versionName || ''}` : ''),
@@ -704,6 +825,9 @@ async function pullVisibleClasses() {
 
   let imported = 0;
   for (const row of data || []) {
+    // A response read before an in-flight mutation commits must not erase
+    // a newer local delete/restore queued behind that mutation.
+    if (classPushTails.has(row.id)) continue;
     const remote=remoteToLocal(row,loadedRefs);
     remote.cloudSync={...(remote.cloudSync||{}),baseMetadataSignature:classMetadataSignature(remote)};
     const local=store.getClass(row.id);
@@ -718,6 +842,18 @@ async function pullVisibleClasses() {
     const state=local.cloudSync||{};
     const priorStatus=String(state.status||'');
     const metadata=classMetadataState(local,remote,remoteMs);
+
+    if (row.status==='completed') {
+      adoptLifecycle(local,remote); imported++; continue;
+    }
+    const visibility=trashDecision(local,remote);
+    if (visibility.adopt) {
+      adoptLifecycle(local,remote); imported++; continue;
+    }
+    if (visibility.action) {
+      patchState(local.id,{enabled:true,status:navigator.onLine?'pending':'offline',trashAction:visibility.action});
+      continue;
+    }
 
     // Identical metadata always converges, including migration from a false
     // web.11 timestamp-only conflict.
@@ -892,6 +1028,7 @@ async function pushPendingClasses() {
     try {
       if (await pushClass(c)) synced++;
     } catch (error) {
+      patchState(c.id,{status:navigator.onLine?'error':'offline',error:shortError(error)});
       console.warn('RaPS class sync failed', c.id, error);
     }
   }
@@ -918,7 +1055,8 @@ async function syncAll({ silent=false }={}) {
     const pulled = await pullVisibleClasses();
     const pushed = await pushPendingClasses();
     const total = getStore()?.getClasses()?.filter(c => c?.cloudSync?.enabled)?.length || 0;
-    setGlobalStatus(`Cloud classes synced · ${total} managed`, 'synced');
+    const remaining=getStore()?.getClasses()?.filter(c=>c?.cloudSync?.enabled && ['pending','offline','error','conflict'].includes(c.cloudSync.status))||[];
+    setGlobalStatus(remaining.length?`${remaining.length} class change(s) need synchronization · review sync status`:`Cloud classes synced · ${total} managed`,remaining.length?'error':'synced');
     if (!silent && (pulled || pushed.synced)) {
       console.info(`RaPS class sync complete: ${pulled} pulled, ${pushed.synced} pushed.`);
     }
@@ -936,7 +1074,7 @@ function queueClass(classId) {
   const store = getStore();
   const c = store?.getClass(classId);
   if (!c) return;
-  if (String(c?.cloudSync?.status||'')==='conflict') {
+  if (String(c?.cloudSync?.status||'')==='conflict' && !c.cloudSync?.trashAction) {
     patchState(classId,{
       enabled:true,
       status:'conflict',
@@ -959,7 +1097,12 @@ function queueClass(classId) {
     error:''
   });
   if (navigator.onLine && getCloud()?.user?.id) {
-    window.setTimeout(() => pushClass(c).catch(error => console.warn('Queued class sync failed', error)), 50);
+    window.setTimeout(() => pushClass(c).then(ok=>{
+      if (!ok) setGlobalStatus('Class change is not synchronized · review sync status','error');
+    }).catch(error => {
+      patchState(c.id,{status:'error',error:shortError(error)});
+      setGlobalStatus(`Class sync error · ${shortError(error)}`,'error');
+    }), 50);
   }
 }
 
@@ -988,6 +1131,10 @@ window.addEventListener('raps-cloud-identity', event => {
 });
 
 window.addEventListener('online', () => syncAll({ silent:true }));
+window.addEventListener('focus', () => { if (cloudReady()) syncAll({silent:true}); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState==='visible' && cloudReady()) syncAll({silent:true});
+});
 window.addEventListener('offline', () => {
   setGlobalStatus('Offline · class changes queued locally', 'offline');
   const store = getStore();
@@ -1008,7 +1155,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.11-web.12';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.12-web.3';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,
