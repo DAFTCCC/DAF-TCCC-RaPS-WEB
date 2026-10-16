@@ -226,3 +226,99 @@ test('roster shell hydration carries marker-only observations without rating the
   assert.equal(shell.cloudShellOnly, true);
   assert.equal(fixture.client.writes.length, 0);
 });
+
+for (const location of ['local', 'server']) {
+  test(`${location} shared trash blocks direct and background grading and roster writes`, async () => {
+    const fixture = setup();
+    fixture.attempt.ratings = { M1: 'fail' };
+    fixture.attempt.failureDetails = { M1: { mode: 'incorrect', contributor: 'knowledge', comment: 'Preserved evidence' } };
+    if (location === 'local') fixture.course.deletedAt = instant + 3000;
+    else fixture.tables.classes[0].status = 'archived';
+    fixture.load('cloud-roster-sync.js');
+    assert.equal(await fixture.push(), false);
+    assert.equal(await fixture.window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(fixture.course), false);
+    assert.equal(await fixture.window.RAPS_GRADING_SYNC.pushAll(), 0);
+    await fixture.window.RAPS_ROSTER_SYNC.syncAll({ silent: true });
+    assert.equal(fixture.client.writes.length, 0);
+    assert.equal(fixture.attempt.failureDetails.M1.comment, 'Preserved evidence');
+    assert.notEqual(fixture.attempt.cloudGrading.status, 'conflict', 'Archiving must not create a grading conflict that survives restoration');
+  });
+}
+
+test('a rejected class push blocks the dependent roster and grading writes', async () => {
+  const fixture = setup();
+  fixture.window.RAPS_CLASS_SYNC = { pushClass: async () => false };
+  fixture.load('cloud-roster-sync.js');
+  assert.equal(await fixture.window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(fixture.course), false);
+  assert.equal(await fixture.window.RAPS_GRADING_SYNC.pushEvaluation(fixture.course, fixture.student, fixture.attempt), false);
+  assert.equal(fixture.client.writes.length, 0);
+});
+
+test('roster push rechecks the canonical class after synchronization replaces it with a tombstone', async () => {
+  const fixture = setup();
+  let canonical = fixture.course;
+  fixture.window.RAPS_CLASS_STORE.getClass = id => id === canonical.id ? canonical : null;
+  fixture.window.RAPS_CLASS_SYNC = { pushClass: async () => {
+    canonical = { ...fixture.course, deletedAt: instant + 3000 };
+    return true;
+  } };
+  fixture.load('cloud-roster-sync.js');
+  assert.equal(await fixture.window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(fixture.course), false);
+  assert.equal(fixture.course.deletedAt, undefined, 'The stale caller object must not mask its replacement');
+  assert.equal(fixture.client.writes.length, 0);
+});
+
+test('stale direct callers cannot bypass a class tombstone already present in the store', async () => {
+  const fixture = setup();
+  fixture.window.RAPS_CLASS_STORE.getClass = id => id === fixture.course.id
+    ? { ...fixture.course, deletedAt: instant + 3000 } : null;
+  fixture.window.RAPS_CLASS_SYNC = { pushClass: async () => { throw new Error('The stale class must never be pushed'); } };
+  fixture.load('cloud-roster-sync.js');
+  assert.equal(await fixture.window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(fixture.course), false);
+  assert.equal(await fixture.push(), false);
+  assert.equal(fixture.client.writes.length, 0);
+});
+
+test('locally closed classes retain the pull-only roster guard without requiring another server read', async () => {
+  const fixture = setup();
+  fixture.course.closedAt = instant + 3000;
+  fixture.window.RAPS_SUPABASE.from = () => { throw new Error('A retained local class needs no write preflight'); };
+  fixture.load('cloud-roster-sync.js');
+  assert.equal(await fixture.window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(fixture.course), true);
+  assert.equal(fixture.client.writes.length, 0);
+});
+
+test('grading push rechecks the canonical class after roster synchronization', async () => {
+  const fixture = setup();
+  let canonical = fixture.course;
+  fixture.window.RAPS_CLASS_STORE.getClass = id => id === canonical.id ? canonical : null;
+  fixture.window.RAPS_ROSTER_SYNC = { pushClassRosterAndShells: async () => {
+    canonical = { ...fixture.course, deletedAt: instant + 3000 };
+    return true;
+  } };
+  assert.equal(await fixture.window.RAPS_GRADING_SYNC.pushEvaluation(fixture.course, fixture.student, fixture.attempt), false);
+  assert.equal(fixture.client.writes.length, 0);
+});
+
+for (const terminalStatus of ['archived', 'completed']) {
+  test(`roster push rechecks a parent that becomes ${terminalStatus} during class synchronization`, async () => {
+    const fixture = setup();
+    fixture.window.RAPS_CLASS_SYNC = { pushClass: async () => {
+      fixture.tables.classes[0].status = terminalStatus;
+      return true;
+    } };
+    fixture.load('cloud-roster-sync.js');
+    assert.equal(await fixture.window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(fixture.course), false);
+    assert.equal(fixture.client.writes.length, 0);
+  });
+
+  test(`grading push rechecks a parent that becomes ${terminalStatus} during roster synchronization`, async () => {
+    const fixture = setup();
+    fixture.window.RAPS_ROSTER_SYNC = { pushClassRosterAndShells: async () => {
+      fixture.tables.classes[0].status = terminalStatus;
+      return true;
+    } };
+    assert.equal(await fixture.window.RAPS_GRADING_SYNC.pushEvaluation(fixture.course, fixture.student, fixture.attempt), false);
+    assert.equal(fixture.client.writes.length, 0);
+  });
+}

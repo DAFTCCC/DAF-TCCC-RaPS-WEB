@@ -27,16 +27,16 @@ function isVoidedEvaluation(row) {
 function isClosedClass(c) {
   return !!c && (!!c.closedAt || c.status === 'closed');
 }
-async function remoteClassIsClosed(classId) {
+async function remoteClassStatus(classId) {
   const client = getClient();
-  if (!client || !classId) return false;
+  if (!client || !classId) return '';
   const { data, error } = await client
     .from('classes')
     .select('status')
     .eq('id', classId)
     .maybeSingle();
   if (error) throw error;
-  return data?.status === 'completed';
+  return String(data?.status || '');
 }
 function reconcileClassLifecycleFromEvaluations(classes, events, evaluations) {
   const classIdByEventId = new Map(
@@ -329,6 +329,7 @@ async function pushClassRosterAndShells(c) {
   const cloud = getCloud();
   if (!client || !cloud?.user?.id || !c?.id) return false;
   if (!navigator.onLine) return false;
+  if (c.deletedAt || getStore()?.getClass?.(c.id)?.deletedAt) return false;
   if (String(c?.cloudSync?.status||'')==='conflict') {
     getStore()?.patchRosterCloudState?.(c.id,{
       status:'conflict',
@@ -339,7 +340,9 @@ async function pushClassRosterAndShells(c) {
 
   // Closed classes are retention records. All normal browser synchronization
   // becomes pull-only after authoritative closure.
-  if (isClosedClass(c) || await remoteClassIsClosed(c.id)) {
+  const serverStatus = isClosedClass(c) ? 'completed' : await remoteClassStatus(c.id);
+  if (serverStatus === 'archived') return false;
+  if (isClosedClass(c) || serverStatus === 'completed') {
     getStore()?.patchRosterCloudState?.(c.id, {
       status:'synced',
       error:'',
@@ -354,8 +357,17 @@ async function pushClassRosterAndShells(c) {
 
   const task = (async () => {
     if (window.RAPS_CLASS_SYNC?.pushClass) {
-      await window.RAPS_CLASS_SYNC.pushClass(c);
+      if (await window.RAPS_CLASS_SYNC.pushClass(c) === false) return false;
     }
+
+    // Class synchronization can replace the local object with a server
+    // tombstone. Never continue through a stale reference after that await.
+    const store = getStore(),current = store?.getClass?.(c.id);
+    if (store?.getClass && !current) return false;
+    c = current || c;
+    if (c.deletedAt || isClosedClass(c)) return false;
+    const latestStatus = await remoteClassStatus(c.id);
+    if (latestStatus === 'archived' || latestStatus === 'completed') return false;
 
     const refs = await lookupBaseAndCurriculum(c);
     await ensureEvent(c, refs);
@@ -612,7 +624,7 @@ async function syncAll({silent=false}={}) {
   busy = true;
   try {
     await pullRosterAndShells();
-    for (const c of store.getClasses().filter(x => x?.cloudSync?.enabled && !isClosedClass(x))) {
+    for (const c of store.getClasses().filter(x => x?.cloudSync?.enabled && !x.deletedAt && !isClosedClass(x))) {
       try {
         await pushClassRosterAndShells(c);
       } catch (error) {
@@ -633,6 +645,7 @@ window.addEventListener('raps-local-class-change', event => {
   const id = event.detail?.classId;
   const c = getStore()?.getClass(id);
   if (!c || !c.cloudSync?.enabled) return;
+  if (c.deletedAt) return;
   if (isClosedClass(c)) {
     getStore()?.patchRosterCloudState?.(id,{
       status:'synced',

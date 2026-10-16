@@ -70,6 +70,25 @@ window.__rapsTest = {
     };
   },
   restoreStorage(){Storage.prototype.setItem=window.__originalStorageSetItem;},
+  prepareClassTrash() {
+    window.RAPS_CLOUD.role='enterprise_admin';
+    this.setup();
+    evalState().finalizedAt=now();evalState().finalResult='FAIL';
+    const c=cls();c.cloudSync={enabled:true,status:'synced'};
+    saveDb(c.id);c.cloudSync.status='synced';
+    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    openClass(c.id);
+    window.__classChangeEvents=[];
+    if(!window.__classChangeListener){
+      window.__classChangeListener=event=>window.__classChangeEvents.push(deep(event.detail));
+      window.addEventListener('raps-local-class-change',window.__classChangeListener);
+    }
+  },
+  classRecord:()=>deep(db.classes.find(c=>c.id==='test-class')),
+  receiveClassTombstone() {
+    const remote={...deep(cls()),deletedAt:now(),students:[]};
+    return deep(window.RAPS_CLASS_STORE.upsertFromCloud(remote,{preserveStudents:true}));
+  },
   coachingPdfStress(){
     const st=evalState(),t=tier(),items=allItems(t).slice(0,9);
     for(const i of items){
@@ -118,8 +137,9 @@ def main():
         )
         context = browser.new_context(service_workers='block', viewport={'width': 1366, 'height': 900})
         context.add_init_script("""
+          window.__cloudOperations=[];
           window.RAPS_CLOUD={user:{id:'test-evaluator'},role:'evaluator',
-            client:{rpc:async()=>{throw new Error('No cloud operations allowed in isolated UI test');}}};
+            client:{rpc:async(...args)=>{window.__cloudOperations.push(args);throw new Error('No cloud operations allowed in isolated UI test');}}};
         """)
 
         def fulfill(route):
@@ -428,6 +448,63 @@ def main():
             page.wait_for_function("() => !document.getElementById('evalHeader').classList.contains('collapsed')")
         page.evaluate('window.__headerObserver.disconnect()')
         checks.append('review header remains stable across scroll anchoring at phone and desktop widths')
+
+        page.evaluate('window.__rapsTest.prepareClassTrash()')
+        retained_students=page.evaluate('window.__rapsTest.classRecord().students')
+        expect(page.locator('#classView')).to_be_visible()
+        expect(page.locator('#deleteClassBtn')).to_be_visible()
+        delete_prompts=[]
+
+        def confirm_delete(dialog):
+            delete_prompts.append({'type':dialog.type,'message':dialog.message})
+            dialog.accept('DELETE')
+
+        page.remove_listener('dialog',dismiss_dialog)
+        page.once('dialog',confirm_delete)
+        page.locator('#deleteClassBtn').click()
+        page.on('dialog',dismiss_dialog)
+        expect(page.locator('#homeView')).to_be_visible()
+        expect(page.locator('#classList [data-open-class="test-class"]')).to_have_count(0)
+        deleted=page.evaluate('window.__rapsTest.stored().classes[0]')
+        assert len(delete_prompts)==1 and delete_prompts[0]['type']=='prompt', delete_prompts
+        assert 'Type DELETE' in delete_prompts[0]['message'], delete_prompts
+        assert deleted['deletedAt']>0
+        assert deleted['cloudSync']['trashAction']['kind']=='delete'
+        assert deleted['cloudSync']['trashAction']['requestedAt']==deleted['deletedAt']
+        assert deleted['cloudSync']['status']=='pending'
+        assert deleted['students']==retained_students
+        assert [event['classId'] for event in page.evaluate('window.__classChangeEvents')]==['test-class']
+        checks.append('Enterprise Delete hides the class and persists its class-specific pending deletion while retaining finalized attempts')
+
+        page.locator('[data-home-area="manage"]').click()
+        expect(page.locator('#trashCard')).to_be_visible()
+        page.evaluate('window.__classChangeEvents=[]')
+        page.locator('[data-restore-class="test-class"]').click()
+        restored=page.evaluate('window.__rapsTest.stored().classes[0]')
+        assert restored['deletedAt'] is None
+        assert restored['restoredAt']>0
+        assert restored['cloudSync']['trashAction']['kind']=='restore'
+        assert restored['cloudSync']['trashAction']['expectedDeletedAt']==deleted['deletedAt']
+        assert restored['cloudSync']['status']=='pending'
+        assert restored['students']==retained_students
+        assert [event['classId'] for event in page.evaluate('window.__classChangeEvents')]==['test-class']
+        expect(page.locator('#manageClassList [data-open-class="test-class"]')).to_be_visible()
+        expect(page.locator('#trashCard')).not_to_be_visible()
+        checks.append('restoring from Home persists a pending restore for the correct class, dispatches its sync event, and retains the roster')
+
+        page.evaluate('window.__rapsTest.prepareClassTrash()')
+        retained_students=page.evaluate('window.__rapsTest.classRecord().students')
+        expect(page.locator('#classView')).to_be_visible()
+        page.evaluate('window.__rapsTest.receiveClassTombstone()')
+        expect(page.locator('#homeView')).to_be_visible()
+        expect(page.locator('#classView')).not_to_be_visible()
+        expect(page.locator('#classList [data-open-class="test-class"]')).to_have_count(0)
+        received=page.evaluate('window.__rapsTest.stored().classes[0]')
+        assert received['deletedAt']>0
+        assert received['students']==retained_students
+        assert page.evaluate('window.__classChangeEvents')==[]
+        assert page.evaluate('window.__cloudOperations')==[]
+        checks.append('a received cloud tombstone exits the open class, hides it on Home, and preserves local attempts without cloud operations')
 
         assert not errors, errors
         assert not external_requests, external_requests

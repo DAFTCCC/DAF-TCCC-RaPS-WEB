@@ -97,6 +97,7 @@ function normalizeDb(x){
   x.classes.forEach(c=>{
     ensureSyncMeta(c,c.createdAt||now(),x.deviceId);c.deviceId=c.deviceId||x.deviceId;c.lastModifiedDeviceId=c.lastModifiedDeviceId||c.deviceId;c.appVersion=c.appVersion||APP_VERSION;
     c.deletedAt=c.deletedAt||null;
+    c.restoredAt=c.restoredAt||null;
     c.cloudSync=c.cloudSync||{enabled:false,status:'local',error:'',createdBy:'',lastSyncedAt:0,localModifiedAt:0,remoteModifiedAt:0};
     c.closedAt=c.closedAt||null;
     c.closedBy=c.closedBy||'';
@@ -166,11 +167,11 @@ function loadDb(){
 }
 db = loadDb();
 
-function saveDb(){
+function saveDb(targetClassId=currentClassId){
   const ts=now();db.schemaVersion=5;db.appVersion=APP_VERSION;db.modifiedAt=ts;db.syncStatus=SYNC_LOCAL;
   if(!db.deviceId)db.deviceId=`device-${uuid()}`;
-  const c=cls();if(c){ensureSyncMeta(c,c.createdAt||ts,db.deviceId);c.modifiedAt=ts;c.lastModifiedDeviceId=db.deviceId;c.syncStatus=SYNC_LOCAL;
-    const st=student();if(st){ensureSyncMeta(st,st.createdAt||ts,db.deviceId);st.modifiedAt=ts;st.lastModifiedDeviceId=db.deviceId;st.syncStatus=SYNC_LOCAL;
+  const c=db.classes.find(x=>x.id===targetClassId);if(c){ensureSyncMeta(c,c.createdAt||ts,db.deviceId);c.modifiedAt=ts;c.lastModifiedDeviceId=db.deviceId;c.syncStatus=SYNC_LOCAL;
+    const st=c.id===currentClassId?student():null;if(st){ensureSyncMeta(st,st.createdAt||ts,db.deviceId);st.modifiedAt=ts;st.lastModifiedDeviceId=db.deviceId;st.syncStatus=SYNC_LOCAL;
       const a=evalState();if(a){ensureSyncMeta(a,a.startedAt||ts,db.deviceId);a.modifiedAt=ts;a.lastModifiedDeviceId=db.deviceId;a.syncStatus=SYNC_LOCAL;}
     }
   }
@@ -182,7 +183,7 @@ function saveDb(){
       state.localModifiedAt=ts;
       c.cloudSync=state;
     }
-    const a=evalState();
+    const a=c.id===currentClassId?evalState():null;
     if(a&&!a.finalizedAt&&!a.voidedAt){
       const grading=a.cloudGrading||{status:'local',error:'',lastSyncedAt:0,remoteModifiedAt:0};
       if(grading.status!=='conflict'&&grading.status!=='syncing'){
@@ -429,7 +430,7 @@ function renderHome(){
   if($('manageClassList'))$('manageClassList').innerHTML=$('classList').innerHTML;
   $('trashCard').classList.toggle('hidden',!enterprise||trash.length===0);
   $('trashCount').textContent=enterprise?`${trash.length}`:'0';
-  $('trashList').innerHTML=enterprise?trash.map(c=>`<div class="classRow"><div><div class="rowTitle">${esc(c.name)} <span class="statusPill trash">LOCAL TRASH</span></div><div class="rowSub">${lifecycleStatus(c)} · Removed locally ${new Date(c.deletedAt).toLocaleString()}</div></div><div class="rowActions"><button class="action compact" data-restore-class="${c.id}">Restore</button><button class="ghost small danger" data-purge-class="${c.id}">Remove Local Copy</button></div></div>`).join(''):'';
+  $('trashList').innerHTML=enterprise?trash.map(c=>`<div class="classRow"><div><div class="rowTitle">${esc(c.name)} <span class="statusPill trash">TRASH</span> ${cloudSyncBadge(c)}</div><div class="rowSub">Removed ${new Date(c.deletedAt).toLocaleString()}${c.cloudSync?.error?`<br>${esc(c.cloudSync.error)}`:''}</div></div><div class="rowActions"><button class="action compact" data-restore-class="${c.id}">Restore across devices</button><button class="ghost small danger" data-purge-class="${c.id}">Remove Local Copy</button></div></div>`).join(''):'';
   document.querySelectorAll('[data-open-class]').forEach(b=>b.onclick=()=>openClass(b.dataset.openClass));
   if(enterprise){
     document.querySelectorAll('[data-restore-class]').forEach(b=>b.onclick=()=>restoreDeletedClass(b.dataset.restoreClass));
@@ -439,15 +440,20 @@ function renderHome(){
   setHomeArea(homeArea);
 }
 function restoreDeletedClass(id){
-  if(!hasEnterpriseAccess()){alert('Enterprise Administrator access is required to restore deleted local classes.');return;}
+  if(!hasEnterpriseAccess()){alert('Enterprise Administrator access is required to restore deleted classes.');return;}
   const c=db.classes.find(x=>x.id===id);if(!c)return;
   if(isClassClosed(c)){alert('Closed classes are retention records and are not restored through Local Trash. Open the closed class and use the audited archive controls instead.');return;}
-  c.deletedAt=null;saveDb();renderHome();
+  const at=now();
+  c.cloudSync={...(c.cloudSync||{}),enabled:true,status:'pending',error:'',trashAction:{kind:'restore',requestedAt:at,expectedDeletedAt:Number(c.deletedAt||0),expectedRestoredAt:Number(c.restoredAt||0)}};
+  c.deletedAt=null;c.restoredAt=at;saveDb(c.id);renderHome();
 }
 function purgeDeletedClass(id){
   if(!hasEnterpriseAccess()){alert('Enterprise Administrator access is required to remove local class copies.');return;}
   const c=db.classes.find(x=>x.id===id);if(!c)return;
   if(isClassClosed(c)){alert('Closed classes cannot be locally purged. Use the audited closed-class archive deletion workflow.');return;}
+  if(!c.deletedAt)return;
+  let confirmedDeletion=0;try{confirmedDeletion=Number(JSON.parse(c.cloudSync?.baseMetadataSignature||'{}').deletedAt||0);}catch{}
+  if(c.cloudSync?.enabled&&(c.cloudSync.status!=='synced'||c.cloudSync.trashAction||confirmedDeletion!==Number(c.deletedAt))){alert('Sync this deletion before removing its local copy. This device still needs to send or confirm the shared deletion.');return;}
   const token=prompt(`Remove the local copy of "${c.name}" from this browser/device?\n\nThis does not replace authoritative cloud retention controls.\n\nType REMOVE LOCAL to continue.`);
   if(token!=='REMOVE LOCAL')return;
   db.classes=db.classes.filter(x=>x.id!==id);localStorage.setItem(DB_KEY,JSON.stringify(db));renderHome();
@@ -667,7 +673,8 @@ async function requestClosedClassArchiveDeletion(c){
 }
 
 function renderClass(){
-  const c=cls(),t=tier(),stats=classStats(c);if(!c)return showHome();
+  const c=cls();if(!c||c.deletedAt)return showHome();
+  const t=tier(),stats=classStats(c);
   const closed=isClassClosed(c),life=lifecycleStatus(c);
   $('classTitle').textContent=c.name||'TCCC Class';
   $('classSub').textContent=`Tier ${c.tierId} — ${t.name} · ${t.source}`;
@@ -923,9 +930,12 @@ async function deleteClass(){
   const c=cls();if(!c)return;
   if(!hasEnterpriseAccess()){alert('Only an Enterprise Administrator may delete or archive classes.');return;}
   if(isClassClosed(c)){await requestClosedClassArchiveDeletion(c);return;}
-  const token=prompt(`Move this class to Enterprise Local Trash?\n\nThis is for non-closed class cleanup only. Closed classes use the audited NUC archive workflow.\n\nType DELETE to continue.`);
+  if((c.students||[]).some(s=>Object.values(s.attempts||{}).some(a=>a.startedAt&&!a.finalizedAt&&!a.voidedAt))){alert('Finalize or void every assessment in progress before deleting this class.');return;}
+  const token=prompt(`Move this class to shared Enterprise Trash?\n\nOnce synced, it will be hidden on your other devices. Enterprise Administrators can restore it. Assessment records are retained. Closed classes use the audited NUC archive workflow.\n\nType DELETE to continue.`);
   if(token!=='DELETE')return;
-  c.deletedAt=now();saveDb();showHome();
+  const at=now();
+  c.cloudSync={...(c.cloudSync||{}),enabled:true,status:'pending',error:'',trashAction:{kind:'delete',requestedAt:at,expectedDeletedAt:Number(c.deletedAt||0),expectedRestoredAt:Number(c.restoredAt||0)}};
+  c.deletedAt=at;saveDb(c.id);showHome();
 }
 
 // ---------- Forms ----------// ---------- Forms ----------
@@ -1084,6 +1094,7 @@ function openEvaluation(studentId,attemptNo){
 }
 function isObserveMode(st=evalState()){return st?.observeMode!==false;}
 function renderEval(){
+  if(cls()?.deletedAt)return showHome();
   const c=cls(),t=tier(),s=student(),st=evalState(); if(!c||!s||!st)return openClass(currentClassId);
   $('tierTitle').textContent=`Tier ${t.id} — ${t.shortName}`; $('tierSource').textContent=t.source;
   $('studentLabel').textContent=`${s.rank?`${s.rank} `:''}${s.name} · ${c.name}`;
@@ -1142,7 +1153,7 @@ function restoreObservation(st,itemId,snapshot){
   for(const [key,value] of Object.entries(snapshot)){st[key]=st[key]||{};if(value===null)delete st[key][itemId];else st[key][itemId]=deep(value);}
 }
 function commitObservation(itemId,mutate,label,detail='',undoable=true){
-  const st=evalState();if(!st||st.finalizedAt||st.voidedAt||isClassClosed(cls()))return false;
+  const st=evalState();if(!st||st.finalizedAt||st.voidedAt||cls()?.deletedAt||isClassClosed(cls()))return false;
   const before=observationSnapshot(st,itemId),eventCount=st.events.length;
   mutate(st);
   st.events.push({at:now(),elapsed:sessionElapsed(st),label,detail});
@@ -2080,6 +2091,7 @@ window.RAPS_CLASS_STORE = Object.freeze({
       ensureLocationFields(db.classes[idx]);
     }
     localStorage.setItem(DB_KEY,JSON.stringify(db));
+    if(remote.deletedAt&&currentClassId===remote.id){releaseEvalWakeLock();showHome();}
     renderHome();
     return db.classes.find(c=>c.id===remote.id)||null;
   }
@@ -2103,7 +2115,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.2';
+  const UPDATE_BUILD = '3.4.12-web.3';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
