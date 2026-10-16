@@ -11,9 +11,18 @@ There is no package installation or build step. Node.js is used for the regressi
 ```sh
 node --test tests/*.test.cjs
 python3 tests/browser-workflow.py
+python3 tests/browser-responsive.py
+python3 tests/browser-accessibility.py
+python3 tests/browser-auth-layout.py
 ```
 
-The browser check serves the real frontend through in-memory request fulfillment with synthetic learners. It omits authentication/cloud scripts from the test page, blocks external requests, and injects its fixture adapter into the served script only. It does not change the application, authenticate to Supabase, or write production records.
+The evaluator workflow check serves the real frontend through in-memory request fulfillment with synthetic learners. It omits authentication/cloud scripts from the test page, blocks external requests, and injects its fixture adapter into the served script only. It does not change the application, authenticate to Supabase, or write production records.
+
+The responsive suite measures phone, tablet, desktop, and short landscape layouts, including long class/student names and 200% text enlargement. It checks page/card overflow, text clipping, shared-row field alignment, touch targets, readable text, timer visibility, and roster/checklist navigation beneath sticky controls. Tables and phase tabs retain their own horizontal scrolling.
+
+The accessibility suite exercises real application dialogs and their interaction with the actual authentication gate: persistent labels, descriptive control names, keyboard focus after rerendering, Tab containment, Escape behavior, and background isolation. The authentication suite renders the actual Sign In, Request Access, and password activation screens with a synthetic SDK/catalog. It checks layout and keyboard behavior without submitting authentication or access requests. These tests save screenshots and reports under `/tmp/raps-responsive`, `/tmp/raps-auth-layout`, and `/tmp/raps-accessibility*`.
+
+Automated browser checks use Chromium and synthetic data. They verify responsive layout, not physical iOS/Android font rendering, virtual-keyboard behavior, or field usability with gloves. Include those checks in the device pilot described below.
 
 The policy tests compare against the pre-change commit `be124a1d36af411ea4676eba283eb1b3b762cd14`. They protect the exact tier definitions and existing grading, timing, and authoritative lifecycle functions. Keep this reference fixed when testing this change. Any future standards update requires a separately reviewed baseline.
 

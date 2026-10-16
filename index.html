@@ -7,7 +7,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://bplevsfvpwrkgafizvao.supabase.co wss://bplevsfvpwrkgafizvao.supabase.co https://raps-supabase.asuscomm.com wss://raps-supabase.asuscomm.com;">
 <link rel="icon" type="image/png" href="assets/icon-192.png">
 <link rel="apple-touch-icon" href="assets/icon-192.png">
-<link rel="stylesheet" href="styles.css?v=3.4.12-web.4">
+<link rel="stylesheet" href="styles.css?v=3.4.12-web.5">
 <title>TCCC Evaluation Suite</title>
 </head>
 <body>
@@ -130,6 +130,9 @@
     <div class="brandRow"><button id="backHome" class="ghost">← Classes</button><div><h1 id="classTitle"></h1><div id="classSub" class="sub"></div></div></div>
   </header>
   <main class="evalMain">
+    <nav class="classQuickNav" aria-label="Class shortcuts">
+      <button id="jumpRosterBtn" class="action" type="button">Jump to student roster</button>
+    </nav>
     <section class="card">
       <div class="cardHead"><span>Class / Scenario <span id="classState" class="statusPill"></span></span><div><button id="resolveClassConflictBtn" class="ghost small hidden" type="button">Resolve Class Conflict</button> <button id="editClassBtn" class="ghost small">Edit</button></div></div>
       <div id="closedBanner" class="closedBanner hidden"><b>CLASS CLOSED</b><span id="closedBannerText"></span></div>
@@ -168,7 +171,7 @@
         <input id="rosterFile" type="file" accept=".csv,text/csv" hidden>
       </div>
       <div class="rosterFilterBar" aria-label="Roster filters">
-        <input id="rosterSearch" class="rosterSearch" type="search" placeholder="Search student, rank, or training ID">
+        <input id="rosterSearch" class="rosterSearch" type="search" aria-label="Search student, rank, or training ID" placeholder="Search student, rank, or training ID">
         <div id="rosterFilters" class="rosterFilters">
           <button class="filterChip active" data-roster-filter="all">All</button>
           <button class="filterChip" data-roster-filter="not-started">Not Started</button>
@@ -267,10 +270,11 @@
   <section id="reviewSignoffCard" class="card signoff">
     <div class="cardHead"><span>Sign-Off / Notes</span><span>Typed acknowledgment</span></div>
     <div class="signGrid">
-      <input id="trainerSign" placeholder="Evaluator name (stored with this attempt)">
-      <input id="attemptEvaluatorId" placeholder="Evaluator ID / cadre identifier">
-      <input id="studentSign" placeholder="Student acknowledgment name">
+      <label class="signoffField" for="trainerSign"><span>Evaluator name</span><input id="trainerSign" placeholder="Name stored with this attempt"></label>
+      <label class="signoffField" for="attemptEvaluatorId"><span>Evaluator ID</span><input id="attemptEvaluatorId" placeholder="Cadre identifier"></label>
+      <label class="signoffField" for="studentSign"><span>Student acknowledgment name</span><input id="studentSign" placeholder="Student name"></label>
     </div>
+    <label class="overallNotesLabel" for="overallNotes">Overall evaluator comments / notes</label>
     <textarea id="overallNotes" placeholder="Overall evaluator comments / notes"></textarea>
   </section>
   <div class="actions evalActions">
@@ -285,25 +289,25 @@
 
 <div class="programOwnership" data-brand-footer aria-label="Program ownership and support contact"></div>
 
-<div id="brandingModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>About / Ownership / Contact</h2><button data-close="brandingModal" class="ghost">Close</button></div><div id="brandingModalBody"></div></div></div>
+<div id="brandingModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="brandingModalTitle" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2 id="brandingModalTitle">About / Ownership / Contact</h2><button data-close="brandingModal" class="ghost">Close</button></div><div id="brandingModalBody"></div></div></div>
 
-<div id="formModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet formSheet"><div class="sheetHead"><h2 id="formModalTitle"></h2><button data-close="formModal" class="ghost">Close</button></div><div id="formModalBody"></div></div></div>
-<div id="reportModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2>Evaluation Review</h2><button data-close="reportModal" class="ghost">Close</button></div><pre id="aarText"></pre><div class="actions"><button id="confirmFinalizeBtn" class="action primary">Finalize Evaluation</button><button id="copyAar" class="action">Copy Review</button></div></div></div>
+<div id="formModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="formModalTitle" aria-hidden="true"><div class="sheet formSheet"><div class="sheetHead"><h2 id="formModalTitle"></h2><button data-close="formModal" class="ghost">Close</button></div><div id="formModalBody"></div></div></div>
+<div id="reportModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="reportModalTitle" aria-hidden="true"><div class="sheet"><div class="sheetHead"><h2 id="reportModalTitle">Evaluation Review</h2><button data-close="reportModal" class="ghost">Close</button></div><pre id="aarText"></pre><div class="actions"><button id="confirmFinalizeBtn" class="action primary">Finalize Evaluation</button><button id="copyAar" class="action">Copy Review</button></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="supabase-config.js?v=3.4.12-web.4"></script>
-<script src="cloud-auth.js?v=3.4.12-web.4"></script>
-<script src="version.js?v=3.4.12-web.4"></script>
-<script src="tiers.js?v=3.4.12-web.4"></script>
-<script src="branding.js?v=3.4.12-web.4"></script>
-<script src="installations.js?v=3.4.12-web.4"></script>
-<script src="app.js?v=3.4.12-web.4"></script>
-<script src="cloud-sync.js?v=3.4.12-web.4"></script>
-<script src="cloud-roster-sync.js?v=3.4.12-web.4"></script>
-<script src="cloud-grading-sync.js?v=3.4.12-web.4"></script>
-<script src="admin-ui.js?v=3.4.12-web.4-r2"></script>
-<script src="program-manager-dashboard.js?v=3.4.12-web.4"></script>
-<script src="majcom-manager-dashboard.js?v=3.4.12-web.4"></script>
-<script src="enterprise-dashboard.js?v=3.4.12-web.4"></script>
+<script src="supabase-config.js?v=3.4.12-web.5"></script>
+<script src="cloud-auth.js?v=3.4.12-web.5"></script>
+<script src="version.js?v=3.4.12-web.5"></script>
+<script src="tiers.js?v=3.4.12-web.5"></script>
+<script src="branding.js?v=3.4.12-web.5"></script>
+<script src="installations.js?v=3.4.12-web.5"></script>
+<script src="app.js?v=3.4.12-web.5"></script>
+<script src="cloud-sync.js?v=3.4.12-web.5"></script>
+<script src="cloud-roster-sync.js?v=3.4.12-web.5"></script>
+<script src="cloud-grading-sync.js?v=3.4.12-web.5"></script>
+<script src="admin-ui.js?v=3.4.12-web.5-r2"></script>
+<script src="program-manager-dashboard.js?v=3.4.12-web.5"></script>
+<script src="majcom-manager-dashboard.js?v=3.4.12-web.5"></script>
+<script src="enterprise-dashboard.js?v=3.4.12-web.5"></script>
 </body>
 </html>

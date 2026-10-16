@@ -19,6 +19,9 @@ let client = null;
 let identity = null;
 let authSubscription = null;
 let accessCatalog = { bases: [], majcoms: [] };
+const authBackgroundState = new Map();
+let focusedAuthGate = null;
+let authReturnFocus = null;
 
 const byId = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -285,6 +288,63 @@ function injectUi() {
   byId('cloudLogoutBtn')?.addEventListener('click', handleSignOut);
 }
 
+function activeAuthGate() {
+  return ['cloudActivationGate','cloudRequestAccessGate','cloudAuthGate']
+    .map(byId).find(gate=>gate?.classList.contains('open'))||null;
+}
+function authFocusTargets(gate) {
+  return [...gate.querySelectorAll('button,input,select,textarea,a[href],[tabindex]')]
+    .filter(el=>!el.disabled&&el.tabIndex>=0&&!el.closest('[inert]')&&el.getClientRects().length);
+}
+function syncAuthGateFocus() {
+  const gate=activeAuthGate();
+  if(gate){
+    if(!focusedAuthGate)authReturnFocus=document.activeElement;
+    for(const child of document.body.children){
+      if(child===gate||['SCRIPT','STYLE','LINK'].includes(child.tagName))continue;
+      if(!authBackgroundState.has(child))authBackgroundState.set(child,child.inert);
+      child.inert=true;
+    }
+    gate.inert=false;
+    if(focusedAuthGate!==gate){
+      window.requestAnimationFrame(()=>{
+        if(activeAuthGate()!==gate||gate.contains(document.activeElement))return;
+        const heading=gate.querySelector('h1,h2');
+        if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}
+        else authFocusTargets(gate)[0]?.focus();
+      });
+    }
+    focusedAuthGate=gate;
+  }else{
+    for(const [child,inert] of authBackgroundState)if(child.isConnected)child.inert=inert;
+    authBackgroundState.clear();
+    focusedAuthGate=null;
+  }
+  window.dispatchEvent(new CustomEvent('raps-auth-gate-change'));
+  if(!gate&&authReturnFocus){
+    const previous=authReturnFocus;authReturnFocus=null;
+    if(previous.isConnected&&!previous.closest('[inert]')&&previous.getClientRects().length)previous.focus({preventScroll:true});
+  }
+}
+document.addEventListener('keydown',event=>{
+  const gate=activeAuthGate();
+  if(!gate)return;
+  if(event.key==='Escape'&&gate.id==='cloudRequestAccessGate'){
+    event.preventDefault();event.stopPropagation();closeRequestAccess();return;
+  }
+  if(event.key!=='Tab')return;
+  const targets=authFocusTargets(gate),index=targets.indexOf(document.activeElement);
+  if(!targets.length){event.preventDefault();return;}
+  if(index<0||(event.shiftKey&&index===0)||(!event.shiftKey&&index===targets.length-1)){
+    event.preventDefault();event.stopPropagation();
+    targets[event.shiftKey?targets.length-1:0].focus();
+  }
+},true);
+document.addEventListener('focusin',event=>{
+  const gate=activeAuthGate();
+  if(gate&&!gate.contains(event.target))authFocusTargets(gate)[0]?.focus();
+});
+
 function setGate(open, message = '', kind = '') {
   const gate = byId('cloudAuthGate');
   if (!gate) return;
@@ -297,6 +357,7 @@ function setGate(open, message = '', kind = '') {
     messageEl.textContent = message;
     messageEl.className = `cloudAuthMessage ${kind || ''}`.trim();
   }
+  syncAuthGateFocus();
 }
 
 function setActivationGate(open, message = '', kind = '') {
@@ -311,6 +372,7 @@ function setActivationGate(open, message = '', kind = '') {
     messageEl.textContent = message;
     messageEl.className = `cloudAuthMessage ${kind || ''}`.trim();
   }
+  syncAuthGateFocus();
 }
 
 function setStatus(mode, text) {
@@ -506,6 +568,7 @@ function setRequestAccessGate(open, message = '', kind = '') {
     messageEl.textContent = message;
     messageEl.className = `cloudAuthMessage ${kind || ''}`.trim();
   }
+  syncAuthGateFocus();
 }
 
 function renderRequestAccessScope() {
