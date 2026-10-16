@@ -7,6 +7,7 @@ const APP_VERSION = window.TCCC_BUILD?.versionName;
 if(!APP_VERSION) throw new Error('Missing TCCC build version. Ensure version.js loads before app.js.');
 const DB_KEY = 'TCCC_SUITE_DB';
 const LEGACY_DB_KEYS = ['TCCC_SUITE_V215_DB'];
+const TRASH_OUTBOX_PREFIX = 'RAPS_CLASS_TRASH_OUTBOX:';
 const $ = id => document.getElementById(id);
 const deep = x => JSON.parse(JSON.stringify(x));
 const now = () => Date.now();
@@ -166,6 +167,93 @@ function loadDb(){
   const ts=now();return {schemaVersion:5,appVersion:APP_VERSION,deviceId:`device-${uuid()}`,createdAt:ts,modifiedAt:ts,syncStatus:SYNC_LOCAL,classes:[]};
 }
 db = loadDb();
+
+function sameTrashAction(a,b){return !!a&&!!b&&a.kind===b.kind&&Number(a.requestedAt)===Number(b.requestedAt);}
+function readTrashOutbox(classId){
+  try{
+    const entry=JSON.parse(localStorage.getItem(TRASH_OUTBOX_PREFIX+classId));
+    const a=entry?.action;
+    if(entry?.classId!==classId||!['delete','restore'].includes(a?.kind)||!Number.isFinite(Number(a.requestedAt))||Number(a.requestedAt)<=0)return null;
+    return entry;
+  }catch{return null;}
+}
+function ownsTrashAction(classId){
+  const entry=readTrashOutbox(classId),userId=currentCloudUserId();
+  return !entry||!!userId&&entry.userId===userId;
+}
+function rememberTrashAction(classId,action,options={}){
+  const userId=currentCloudUserId();
+  if(!userId||!hasEnterpriseAccess())throw new Error('Sign in as an Enterprise Administrator before queuing a class deletion or restoration.');
+  const token={kind:action?.kind,requestedAt:Number(action?.requestedAt),expectedDeletedAt:Number(action?.expectedDeletedAt||0),expectedRestoredAt:Number(action?.expectedRestoredAt||0)};
+  if(!classId||!['delete','restore'].includes(token.kind)||!Number.isFinite(token.requestedAt)||token.requestedAt<=0||![token.expectedDeletedAt,token.expectedRestoredAt].every(n=>Number.isFinite(n)&&n>=0))throw new Error('The class change does not have a valid lifecycle token.');
+  const previous=readTrashOutbox(classId);
+  if(previous&&previous.userId!==userId&&options.explicit!==true)throw new Error('This queued class change belongs to another account. Sign in with that account to synchronize it.');
+  if(previous?.userId===userId&&Number(previous.action.requestedAt)>token.requestedAt)throw new Error('A newer class change is already queued on this device.');
+  // A separate key survives whole-database writes from another open tab.
+  // Store identifiers and the lifecycle token only; no roster or grades.
+  localStorage.setItem(TRASH_OUTBOX_PREFIX+classId,JSON.stringify({classId,userId,action:token}));
+  return token;
+}
+function applyTrashAction(c,action){
+  c.deletedAt=action.kind==='delete'?Number(action.requestedAt):null;
+  c.restoredAt=action.kind==='restore'?Number(action.requestedAt):(Number(action.expectedRestoredAt)||null);
+  c.modifiedAt=Math.max(Number(c.modifiedAt||0),Number(action.requestedAt));
+  c.cloudSync={...(c.cloudSync||{}),enabled:true,status:navigator.onLine?'pending':'offline',error:'',trashAction:{...action}};
+}
+function queueTrashAction(c,kind){
+  const userId=currentCloudUserId();
+  if(!userId){alert('Sign in as an Enterprise Administrator before deleting or restoring a class.');return false;}
+  const previous=readTrashOutbox(c.id);
+  const action={kind,requestedAt:Math.max(now(),Number(previous?.action?.requestedAt||0)+1),expectedDeletedAt:Number(c.deletedAt||0),expectedRestoredAt:Number(c.restoredAt||0)};
+  try{
+    rememberTrashAction(c.id,action,{explicit:true});
+  }catch{
+    window.rapsLocalSaveState={at:0,error:'Device storage could not save this class change.'};
+    alert('Class change was not saved. Device storage could not queue it. Free storage and try again.');
+    return false;
+  }
+  applyTrashAction(c,action);
+  try{saveDb(c.id);}
+  catch{
+    c.cloudSync.status='error';
+    c.cloudSync.error='The class change is queued on this device, but its class database could not be saved. Free storage and use Sync Classes before switching devices.';
+    alert(c.cloudSync.error);
+  }
+  return true;
+}
+function recoverTrashActions(){
+  const userId=currentCloudUserId();
+  if(!userId||!hasEnterpriseAccess())return 0;
+  let queued=0,changed=false;
+  for(const c of db.classes){
+    const entry=readTrashOutbox(c.id);
+    if(!entry||entry.userId!==userId||isClassClosed(c))continue;
+    const a=entry.action;queued++;
+    const expectedDeleted=a.kind==='delete'?Number(a.requestedAt):0;
+    const expectedRestored=a.kind==='restore'?Number(a.requestedAt):Number(a.expectedRestoredAt||0);
+    if(sameTrashAction(c.cloudSync?.trashAction,a)&&Number(c.deletedAt||0)===expectedDeleted&&Number(c.restoredAt||0)===expectedRestored&&['pending','offline','error','syncing'].includes(c.cloudSync?.status))continue;
+    applyTrashAction(c,a);changed=true;
+  }
+  if(changed){
+    try{localStorage.setItem(DB_KEY,JSON.stringify(db));}
+    catch{window.rapsLocalSaveState={at:0,error:'Queued class changes were recovered, but device storage could not save the class database.'};}
+    if(cls()?.deletedAt)showHome();
+    else renderHome();
+  }
+  return queued;
+}
+function acknowledgeTrashAction(classId,action){
+  const entry=readTrashOutbox(classId);
+  if(entry&&(!entry.userId||entry.userId!==currentCloudUserId()))return false;
+  if(entry&&!sameTrashAction(entry.action,action))return false;
+  if(entry){
+    try{localStorage.removeItem(TRASH_OUTBOX_PREFIX+classId);}
+    catch{return false;}
+  }
+  const c=db.classes.find(x=>x.id===classId);
+  if(sameTrashAction(c?.cloudSync?.trashAction,action))c.cloudSync.trashAction=null;
+  return true;
+}
 
 function saveDb(targetClassId=currentClassId){
   const ts=now();db.schemaVersion=5;db.appVersion=APP_VERSION;db.modifiedAt=ts;db.syncStatus=SYNC_LOCAL;
@@ -443,9 +531,7 @@ function restoreDeletedClass(id){
   if(!hasEnterpriseAccess()){alert('Enterprise Administrator access is required to restore deleted classes.');return;}
   const c=db.classes.find(x=>x.id===id);if(!c)return;
   if(isClassClosed(c)){alert('Closed classes are retention records and are not restored through Local Trash. Open the closed class and use the audited archive controls instead.');return;}
-  const at=now();
-  c.cloudSync={...(c.cloudSync||{}),enabled:true,status:'pending',error:'',trashAction:{kind:'restore',requestedAt:at,expectedDeletedAt:Number(c.deletedAt||0),expectedRestoredAt:Number(c.restoredAt||0)}};
-  c.deletedAt=null;c.restoredAt=at;saveDb(c.id);renderHome();
+  if(queueTrashAction(c,'restore'))renderHome();
 }
 function purgeDeletedClass(id){
   if(!hasEnterpriseAccess()){alert('Enterprise Administrator access is required to remove local class copies.');return;}
@@ -933,9 +1019,7 @@ async function deleteClass(){
   if((c.students||[]).some(s=>Object.values(s.attempts||{}).some(a=>a.startedAt&&!a.finalizedAt&&!a.voidedAt))){alert('Finalize or void every assessment in progress before deleting this class.');return;}
   const token=prompt(`Move this class to shared Enterprise Trash?\n\nOnce synced, it will be hidden on your other devices. Enterprise Administrators can restore it. Assessment records are retained. Closed classes use the audited NUC archive workflow.\n\nType DELETE to continue.`);
   if(token!=='DELETE')return;
-  const at=now();
-  c.cloudSync={...(c.cloudSync||{}),enabled:true,status:'pending',error:'',trashAction:{kind:'delete',requestedAt:at,expectedDeletedAt:Number(c.deletedAt||0),expectedRestoredAt:Number(c.restoredAt||0)}};
-  c.deletedAt=at;saveDb(c.id);showHome();
+  if(queueTrashAction(c,'delete'))showHome();
 }
 
 // ---------- Forms ----------// ---------- Forms ----------
@@ -2051,6 +2135,7 @@ setupNativeBackButton();
 if($('appVersion'))$('appVersion').textContent=APP_VERSION;
 
 window.addEventListener('raps-cloud-identity',()=>{
+  recoverTrashActions();
   renderHome();
   if(currentClassId&&!$('classView')?.classList.contains('hidden'))renderClass();
 });
@@ -2059,6 +2144,10 @@ window.RAPS_CLASS_STORE = Object.freeze({
   getClasses:()=>db.classes,
   getClass:id=>db.classes.find(c=>c.id===id)||null,
   deviceId:()=>db.deviceId,
+  recoverTrashActions,
+  ownsTrashAction,
+  rememberTrashAction,
+  acknowledgeTrashAction,
   patchCloudState:(id,patch)=>{
     const c=db.classes.find(x=>x.id===id);if(!c)return null;
     c.cloudSync={...(c.cloudSync||{}),...(patch||{})};
@@ -2110,12 +2199,13 @@ window.addEventListener('raps-evaluation-tombstoned',event=>{
   alert('ATTEMPT VOIDED ON SERVER\n\nThis assessment was voided from another RaPS session. The obsolete local working copy was removed. You may start the attempt again if needed.');
 });
 
+recoverTrashActions();
 renderHome();
 })();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.3';
+  const UPDATE_BUILD = '3.4.12-web.4';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 

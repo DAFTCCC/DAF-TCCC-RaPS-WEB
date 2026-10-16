@@ -286,10 +286,24 @@ function trashDecision(c,remote) {
 
 function adoptLifecycle(c,remote) {
   if (!remote) return;
+  const action=getStore()?.ownsTrashAction?.(c.id)===false?null:c.cloudSync?.trashAction;
   if (classMetadataSignature(c)!==classMetadataSignature(remote)) {
     saveClassConflictRecovery(c,{serverSnapshot:remote},'server-lifecycle');
   }
   getStore()?.upsertFromCloud?.(remote,{preserveStudents:true});
+  if (action && getStore()?.acknowledgeTrashAction?.(c.id,action)===false) {
+    // Another tab may have queued a newer intent while this request was in
+    // flight. Its independent outbox entry survives the remote upsert.
+    getStore()?.recoverTrashActions?.();
+    const next=getStore()?.getClass?.(c.id)?.cloudSync?.trashAction;
+    const newer=next && (next.kind!==action.kind || Number(next.requestedAt)!==Number(action.requestedAt));
+    patchState(c.id,{
+      enabled:true,status:newer?'pending':'error',
+      error:newer?'':'Cloud class updated, but this device could not clear its queued change. Use Sync Classes to retry.',
+      remoteModifiedAt:Number(remote.modifiedAt||0),baseMetadataSignature:classMetadataSignature(remote)
+    });
+    return;
+  }
   patchState(c.id,{
     enabled:true,status:'synced',error:'',trashAction:null,
     lastSyncedAt:Date.now(),remoteModifiedAt:Number(remote.modifiedAt||0),
@@ -299,6 +313,8 @@ function adoptLifecycle(c,remote) {
 }
 
 function trashActionUnchanged(c,action) {
+  getStore()?.recoverTrashActions?.();
+  if (getStore()?.ownsTrashAction?.(c.id)===false) return false;
   const latest=getStore()?.getClass?.(c.id)?.cloudSync?.trashAction;
   return !latest || (latest.kind===action.kind && Number(latest.requestedAt)===Number(action.requestedAt));
 }
@@ -401,6 +417,12 @@ async function pushClassUnlocked(c, options={}) {
   if (existing?.status==='completed') {
     adoptLifecycle(c,remote);
     return true;
+  }
+
+  if (getStore()?.ownsTrashAction?.(c.id)===false && (c.deletedAt || c.cloudSync?.trashAction)) {
+    if (remote) { adoptLifecycle(c,remote); return true; }
+    patchState(c.id,{status:'error',error:'This device has a queued class change belonging to another signed-in user. Sign in as that user to synchronize it.'});
+    return false;
   }
 
   const visibility=trashDecision(c,remote);
@@ -726,6 +748,7 @@ async function pushClassUnlocked(c, options={}) {
 // This prevents out-of-order writes from regressing lifecycle state.
 function pushClass(c, options={}) {
   if (!c?.id) return Promise.resolve(false);
+  getStore()?.recoverTrashActions?.();
 
   const previous = classPushTails.get(c.id) || Promise.resolve();
   const task = previous
@@ -816,18 +839,34 @@ async function pullVisibleClasses() {
   if (!client || !store) return 0;
   const loadedRefs = await loadRefs();
 
-  const { data, error } = await client
-    .from('classes')
-    .select('id, base_id, name, course_type, curriculum_version_id, start_date, end_date, status, created_by, created_at, updated_at, app_data, client_modified_at, source_device_id')
-    .order('updated_at', { ascending:false });
-
-  if (error) throw error;
+  const data=[];
+  const pageSize=250;
+  // PostgREST can cap a response below the requested page size. Keep reading
+  // until an empty page and advance by the number actually returned. ID order
+  // stays stable while another device changes class metadata or lifecycle.
+  for (let offset=0;;) {
+    const page=await client.from('classes')
+      .select('id, base_id, name, course_type, curriculum_version_id, start_date, end_date, status, created_by, created_at, updated_at, app_data, client_modified_at, source_device_id')
+      .order('id',{ascending:true}).range(offset,offset+pageSize-1);
+    if (offset>0 && page.error?.code==='PGRST103') break;
+    if (page.error) throw page.error;
+    if (!page.data?.length) break;
+    data.push(...page.data);
+    offset+=page.data.length;
+  }
 
   let imported = 0;
-  for (const row of data || []) {
-    // A response read before an in-flight mutation commits must not erase
-    // a newer local delete/restore queued behind that mutation.
-    if (classPushTails.has(row.id)) continue;
+  for (let row of data) {
+    // A push may have read an older active revision before another device
+    // deleted this class. Settle it and fetch the lifecycle again; skipping
+    // the tombstone here used to leave a visible class labelled SYNCED.
+    if (classPushTails.has(row.id)) {
+      while (classPushTails.has(row.id)) {
+        await classPushTails.get(row.id).catch(()=>{});
+      }
+      row=await fetchRemoteById(row.id);
+      if (!row) continue; // Absence is not evidence of an authorized deletion.
+    }
     const remote=remoteToLocal(row,loadedRefs);
     remote.cloudSync={...(remote.cloudSync||{}),baseMetadataSignature:classMetadataSignature(remote)};
     const local=store.getClass(row.id);
@@ -844,6 +883,9 @@ async function pullVisibleClasses() {
     const metadata=classMetadataState(local,remote,remoteMs);
 
     if (row.status==='completed') {
+      adoptLifecycle(local,remote); imported++; continue;
+    }
+    if (store.ownsTrashAction?.(local.id)===false && (local.deletedAt || local.cloudSync?.trashAction)) {
       adoptLifecycle(local,remote); imported++; continue;
     }
     const visibility=trashDecision(local,remote);
@@ -1035,6 +1077,31 @@ async function pushPendingClasses() {
   return { attempted:classes.length, synced };
 }
 
+function queueUnconfirmedTrash() {
+  const store=getStore();
+  if (!store || getCloud()?.role!=='enterprise_admin') return;
+  for (const c of store.getClasses()) {
+    if (!c || isClosedClass(c)) continue;
+    if (store.ownsTrashAction?.(c.id)===false) continue;
+    const state=c.cloudSync||{};
+    if (state.trashAction) {
+      store.rememberTrashAction?.(c.id,state.trashAction);
+      if (!classPushTails.has(c.id)) patchState(c.id,{enabled:true,status:navigator.onLine?'pending':'offline'});
+      continue;
+    }
+    if (!c.deletedAt) continue;
+    let confirmed=0;
+    try { confirmed=Number(JSON.parse(state.baseMetadataSignature||'{}').deletedAt||0); } catch {}
+    if (confirmed===Number(c.deletedAt) && state.status==='synced') continue;
+    const action={kind:'delete',requestedAt:Number(c.deletedAt),expectedDeletedAt:0,expectedRestoredAt:Number(c.restoredAt||0)};
+    store.rememberTrashAction?.(c.id,action);
+    patchState(c.id,{
+      enabled:true,status:navigator.onLine?'pending':'offline',error:'',
+      trashAction:action
+    });
+  }
+}
+
 async function syncAll({ silent=false }={}) {
   if (syncing) return;
   const cloud = getCloud();
@@ -1050,12 +1117,17 @@ async function syncAll({ silent=false }={}) {
   setGlobalStatus('Syncing classes…', 'syncing');
 
   try {
+    getStore()?.recoverTrashActions?.();
+    queueUnconfirmedTrash();
     refs = null;
     await loadRefs(true);
     const pulled = await pullVisibleClasses();
+    getStore()?.recoverTrashActions?.();
+    queueUnconfirmedTrash();
     const pushed = await pushPendingClasses();
     const total = getStore()?.getClasses()?.filter(c => c?.cloudSync?.enabled)?.length || 0;
-    const remaining=getStore()?.getClasses()?.filter(c=>c?.cloudSync?.enabled && ['pending','offline','error','conflict'].includes(c.cloudSync.status))||[];
+    const remaining=getStore()?.getClasses()?.filter(c=>c?.cloudSync?.enabled &&
+      (c.cloudSync.trashAction || classPushTails.has(c.id) || ['pending','offline','error','conflict','syncing'].includes(c.cloudSync.status)))||[];
     setGlobalStatus(remaining.length?`${remaining.length} class change(s) need synchronization · review sync status`:`Cloud classes synced · ${total} managed`,remaining.length?'error':'synced');
     if (!silent && (pulled || pushed.synced)) {
       console.info(`RaPS class sync complete: ${pulled} pulled, ${pushed.synced} pushed.`);
@@ -1155,7 +1227,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.12-web.3';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.12-web.4';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,
