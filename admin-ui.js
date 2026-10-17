@@ -16,6 +16,7 @@ let catalog = {
   accessRequests: []
 };
 let mounted = false;
+const pendingAdminActions = new Set();
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -56,8 +57,8 @@ function inject() {
       <details class="analyticsDetails">
         <summary>Invite New User Manually</summary>
         <div class="adminFormGrid">
-          <label><span>Email</span><input id="adminInviteEmail" type="email" autocomplete="off" placeholder="user@example.mil"></label>
-          <label><span>Display name</span><input id="adminInviteName" type="text" autocomplete="off" placeholder="Name"></label>
+          <label><span>Email</span><input id="adminInviteEmail" type="email" autocomplete="off" maxlength="254" placeholder="user@example.mil"></label>
+          <label><span>Display name</span><input id="adminInviteName" type="text" autocomplete="off" maxlength="120" placeholder="Name"></label>
           <label><span>Role</span>
             <select id="adminInviteRole">
               <option value="evaluator">Evaluator</option>
@@ -71,7 +72,7 @@ function inject() {
         <div class="adminActions">
           <button id="adminInviteBtn" class="action primary" type="button">Send Invite + Assign Access</button>
         </div>
-        <p class="helper">The invite action uses a Supabase Edge Function. The service-role key remains server-side inside Supabase and is never shipped in the RaPS web app.</p>
+        <p class="helper">New users receive a secure email link to create their own password. For an existing account, assign access below, then select Send Setup / Reset Email in Current Users &amp; Access. Check the recipient's spam folder if needed. Account emails require the authentication mail service to be configured.</p>
       </details>
 
       <details class="analyticsDetails">
@@ -156,6 +157,7 @@ function activeNow(m) {
   const now = Date.now();
   const starts = m.starts_at ? Date.parse(m.starts_at) : null;
   const ends = m.ends_at ? Date.parse(m.ends_at) : null;
+  if ((m.starts_at && !Number.isFinite(starts)) || (m.ends_at && !Number.isFinite(ends))) return false;
   return !(Number.isFinite(starts) && starts > now) && !(Number.isFinite(ends) && ends <= now);
 }
 
@@ -251,14 +253,14 @@ function renderAccessRequests() {
   wrap.querySelectorAll('[data-admin-approve-request]').forEach(btn => {
     btn.addEventListener(
       'click',
-      () => approveAccessRequest(btn.dataset.adminApproveRequest)
+      () => approveAccessRequest(btn.dataset.adminApproveRequest, btn)
     );
   });
 
   wrap.querySelectorAll('[data-admin-deny-request]').forEach(btn => {
     btn.addEventListener(
       'click',
-      () => denyAccessRequest(btn.dataset.adminDenyRequest)
+      () => denyAccessRequest(btn.dataset.adminDenyRequest, btn)
     );
   });
 }
@@ -282,6 +284,7 @@ function renderTable() {
 
   const currentUser = window.RAPS_CLOUD?.user?.id;
   const deleteRendered = new Set();
+  const setupRendered = new Set();
   wrap.innerHTML = `
     <div class="analyticsTableWrap">
       <table class="analyticsTable adminTable">
@@ -293,13 +296,16 @@ function renderTable() {
             const userHasAnyActive = catalog.memberships.some(x => x.user_id === m.user_id && activeNow(x));
             const showDelete = !userHasAnyActive && m.user_id !== currentUser && !deleteRendered.has(m.user_id);
             if (showDelete) deleteRendered.add(m.user_id);
+            const showSetup = activeNow(m) && !setupRendered.has(m.user_id);
+            if (showSetup) setupRendered.add(m.user_id);
             return `<tr>
               <td><b>${esc(p.display_name || p.email || m.user_id)}</b><div><small>${esc(p.email || '')}</small></div></td>
               <td>${esc(ROLE_LABELS[m.role] || m.role)}</td>
               <td>${esc(membershipScope(m))}</td>
               <td><span class="statusPill ${activeNow(m) ? 'pass' : 'trash'}">${activeNow(m) ? 'ACTIVE' : 'INACTIVE'}</span></td>
               <td>${activeNow(m)
-                ? `<button class="ghost small danger" data-admin-deactivate="${esc(m.id)}" ${selfEnterprise ? 'disabled title="You cannot deactivate your own active Enterprise Admin membership here."' : ''}>Deactivate</button>`
+                ? `<div class="adminRowActions"><button class="ghost small danger" data-admin-deactivate="${esc(m.id)}" ${selfEnterprise ? 'disabled title="You cannot deactivate your own active Enterprise Admin membership here."' : ''}>Deactivate</button>
+                    ${showSetup ? `<button class="ghost small" type="button" data-admin-setup-user="${esc(m.user_id)}">Send Setup / Reset Email</button>` : ''}</div>`
                 : `<div class="adminRowActions">
                     <button class="ghost small" data-admin-reactivate="${esc(m.id)}">Reactivate</button>
                     ${showDelete ? `<button class="ghost small danger" data-admin-delete-user="${esc(m.user_id)}" data-admin-delete-label="${esc(p.display_name || p.email || m.user_id)}">Delete Account</button>` : ''}
@@ -319,6 +325,27 @@ function renderTable() {
   wrap.querySelectorAll('[data-admin-delete-user]').forEach(btn => {
     btn.addEventListener('click', () => deleteAccount(btn.dataset.adminDeleteUser, btn.dataset.adminDeleteLabel || 'this account'));
   });
+  wrap.querySelectorAll('[data-admin-setup-user]').forEach(btn => {
+    btn.addEventListener('click', () => sendSetupEmail(btn.dataset.adminSetupUser, btn));
+  });
+}
+
+async function readAllAdminRows(queryFactory) {
+  const rows = [];
+  const seen = new Set();
+  for (let offset = 0;;) {
+    const { data, error } = await queryFactory().range(offset, offset + 499);
+    if (error) return { data:null, error };
+    if (!Array.isArray(data)) return { data:null, error:{ message:'The account service returned an invalid list response.' } };
+    if (!data.length) return { data:rows, error:null };
+    for (const row of data) {
+      if (!row?.id || seen.has(row.id)) return { data:null, error:{ message:'The account service returned an inconsistent page. Refresh and check service pagination.' } };
+      seen.add(row.id);
+      rows.push(row);
+    }
+    // Deployments can impose a smaller response cap than the requested range.
+    offset += data.length;
+  }
 }
 
 async function loadAdminData() {
@@ -333,15 +360,15 @@ async function loadAdminData() {
   setMessage('Loading enterprise users…', 'working');
 
   const [profiles, memberships, bases, majcoms, accessRequests] = await Promise.all([
-    client.from('profiles').select('id, display_name, email').order('display_name'),
-    client.from('memberships').select('id,user_id,role,base_id,majcom_id,active,starts_at,ends_at,created_at,bases(id,code,name),majcoms(id,code,name)').order('created_at',{ascending:false}),
-    client.from('bases').select('id,code,name,majcom_id,active').eq('active',true).order('name'),
-    client.from('majcoms').select('id,code,name,active').eq('active',true).order('code'),
-    client
+    readAllAdminRows(() => client.from('profiles').select('id, display_name, email').order('display_name').order('id')),
+    readAllAdminRows(() => client.from('memberships').select('id,user_id,role,base_id,majcom_id,active,starts_at,ends_at,created_at,bases(id,code,name),majcoms(id,code,name)').order('created_at',{ascending:false}).order('id')),
+    readAllAdminRows(() => client.from('bases').select('id,code,name,majcom_id,active').eq('active',true).order('name').order('id')),
+    readAllAdminRows(() => client.from('majcoms').select('id,code,name,active').eq('active',true).order('code').order('id')),
+    readAllAdminRows(() => client
       .from('access_requests')
       .select('id,email,display_name,requested_role,base_id,majcom_id,justification,status,created_at,reviewed_at,reviewed_by,review_note,bases(id,code,name),majcoms(id,code,name)')
       .eq('status','pending')
-      .order('created_at',{ascending:true})
+      .order('created_at',{ascending:true}).order('id'))
   ]);
 
   const firstError =
@@ -408,8 +435,45 @@ async function edgeFunctionError(error) {
   return detail;
 }
 
-async function approveAccessRequest(id) {
+function requireAccountEmailResult(data, requireMembership = false) {
+  if (data?.error) throw new Error(data.error + (data.detail ? ` · ${data.detail}` : ''));
+  if (data?.ok !== true || data?.email_sent !== true || !data?.user?.id || (requireMembership && !data?.membership?.id)) {
+    throw new Error('The account service did not confirm the email and access result. Refresh users and check the deployed account service before retrying.');
+  }
+}
+
+async function sendSetupEmail(userId, button) {
+  if (!isEnterprise() || !userId || pendingAdminActions.has(`setup:${userId}`)) return;
+  const profile = catalog.profiles.find(p => p.id === userId);
+  const label = profile?.email || profile?.display_name || 'this account';
+  if (!confirm(`Send a secure setup/reset email to ${label}?\n\nThe recipient will choose their own password. Their RaPS access will stay the same.`)) return;
+  pendingAdminActions.add(`setup:${userId}`);
+  if (button) button.disabled = true;
+  setMessage(`Requesting a secure setup/reset email for ${label}…`, 'working');
+  try {
+    const { data, error } = await window.RAPS_SUPABASE.functions.invoke('admin-invite-user', {
+      body:{ action:'send_setup_link', user_id:userId }
+    });
+    if (error) throw error;
+    requireAccountEmailResult(data);
+    setMessage(`Supabase accepted the setup/reset email for ${data.user.email || label}. Ask the recipient to check their inbox and spam folder and open the newest link.`, 'success');
+  } catch (error) {
+    setMessage(`Setup/reset email failed: ${await edgeFunctionError(error)}`, 'error');
+  } finally {
+    pendingAdminActions.delete(`setup:${userId}`);
+    if (button) button.disabled = false;
+  }
+}
+
+function setRequestReviewButtons(id, disabled) {
+  document.querySelectorAll('[data-admin-approve-request], [data-admin-deny-request]').forEach(button => {
+    if (button.dataset.adminApproveRequest === id || button.dataset.adminDenyRequest === id) button.disabled = disabled;
+  });
+}
+
+async function approveAccessRequest(id, button) {
   if (!isEnterprise() || !id) return;
+  if (pendingAdminActions.has(`request:${id}`)) return;
 
   const request =
     (catalog.accessRequests || []).find(r => r.id === id);
@@ -432,6 +496,10 @@ async function approveAccessRequest(id) {
   )) return;
 
   const client = window.RAPS_SUPABASE;
+  pendingAdminActions.add(`request:${id}`);
+  setRequestReviewButtons(id, true);
+  if (button) button.disabled = true;
+  let accessAssigned = false;
 
   setMessage(
     `Approving access request for ${request.email}…`,
@@ -453,22 +521,41 @@ async function approveAccessRequest(id) {
           : null
     };
 
-    const { data, error } =
-      await client.functions.invoke(
-        'admin-invite-user',
-        { body: invitePayload }
-      );
+    // A request from an existing account needs access plus a setup/reset link,
+    // rather than a second account or another initial invitation.
+    const normalizedEmail = String(request.email || '').trim().toLowerCase();
+    const { data:existingProfile, error:profileLookupError } = await client.from('profiles')
+      .select('id,email').ilike('email', normalizedEmail.replace(/[\\%_]/g, '\\$&')).maybeSingle();
+    if (profileLookupError) throw new Error('Unable to verify whether this account already exists. Refresh users and try again.');
+    if (existingProfile) {
+      let scopeQuery = client.from('memberships').select('id,active,starts_at,ends_at')
+        .eq('user_id', existingProfile.id).eq('role', invitePayload.role).eq('active', true);
+      scopeQuery = invitePayload.base_id ? scopeQuery.eq('base_id', invitePayload.base_id) : scopeQuery.is('base_id', null);
+      scopeQuery = invitePayload.majcom_id ? scopeQuery.eq('majcom_id', invitePayload.majcom_id) : scopeQuery.is('majcom_id', null);
+      const { data:existingMemberships, error:scopeError } = await scopeQuery;
+      if (scopeError) throw new Error('Unable to verify existing account access. No new access was assigned.');
+      const hasScope = (existingMemberships || []).some(activeNow);
+      if (!hasScope) {
+        const { data:membership, error:assignmentError } = await client.from('memberships').insert({
+          user_id:existingProfile.id, role:invitePayload.role, base_id:invitePayload.base_id,
+          majcom_id:invitePayload.majcom_id, active:true, starts_at:new Date().toISOString(),
+          ends_at:null, created_by:window.RAPS_CLOUD.user.id
+        }).select('id').single();
+        if (assignmentError) throw assignmentError;
+        if (!membership?.id) throw new Error('The account service did not confirm the access assignment.');
+      }
+      accessAssigned = true;
+    }
+    const { data, error } = await client.functions.invoke('admin-invite-user', {
+      body:existingProfile ? { action:'send_setup_link', user_id:existingProfile.id } : invitePayload
+    });
 
     if (error) throw error;
 
-    if (data?.error) {
-      throw new Error(
-        data.error +
-        (data.detail ? ` · ${data.detail}` : '')
-      );
-    }
+    requireAccountEmailResult(data, !existingProfile);
+    accessAssigned = true;
 
-    const { error: updateError } =
+    const { data:reviewedRequests, error: updateError } =
       await client
         .from('access_requests')
         .update({
@@ -478,36 +565,45 @@ async function approveAccessRequest(id) {
           review_note: 'Approved through Enterprise Access Requests'
         })
         .eq('id', id)
-        .eq('status', 'pending');
+        .eq('status', 'pending')
+        .select('id');
 
     if (updateError) {
       throw new Error(
         `Account access was assigned, but the request could not be marked approved: ${updateError.message}`
       );
     }
-
-    setMessage(
-      `Approved ${request.email}. Invitation sent and ${roleLabel} access assigned for ${scope}.`,
-      'success'
-    );
+    if (!(reviewedRequests || []).some(r => r.id === id)) {
+      throw new Error('The email and access succeeded, but this request was already reviewed elsewhere. Refresh and check its current status.');
+    }
 
     await loadAdminData();
+    setMessage(
+      `Approved ${request.email}. Supabase accepted the ${existingProfile ? 'setup/reset' : 'invitation'} email and ${roleLabel} access is assigned for ${scope}. Ask the recipient to open the newest email link.`,
+      'success'
+    );
 
   } catch (error) {
     console.error('RaPS access-request approval failed', error);
 
     const detail =
       await edgeFunctionError(error);
+    try { await loadAdminData(); } catch {}
 
     setMessage(
-      `Approval failed: ${detail}`,
+      `Approval incomplete: ${accessAssigned ? 'Account access is assigned. ' : ''}${detail}`,
       'error'
     );
+  } finally {
+    pendingAdminActions.delete(`request:${id}`);
+    setRequestReviewButtons(id, false);
+    if (button) button.disabled = false;
   }
 }
 
-async function denyAccessRequest(id) {
+async function denyAccessRequest(id, button) {
   if (!isEnterprise() || !id) return;
+  if (pendingAdminActions.has(`request:${id}`)) return;
 
   const request =
     (catalog.accessRequests || []).find(r => r.id === id);
@@ -524,38 +620,35 @@ async function denyAccessRequest(id) {
   )) return;
 
   const client = window.RAPS_SUPABASE;
+  pendingAdminActions.add(`request:${id}`);
+  setRequestReviewButtons(id, true);
+  if (button) button.disabled = true;
 
   setMessage(
     `Denying access request for ${request.email}…`,
     'working'
   );
 
-  const { error } =
-    await client
-      .from('access_requests')
-      .update({
-        status: 'denied',
-        reviewed_at: new Date().toISOString(),
-        reviewed_by: window.RAPS_CLOUD.user.id,
-        review_note: 'Denied by Enterprise Administrator'
-      })
-      .eq('id', id)
-      .eq('status', 'pending');
-
-  if (error) {
-    setMessage(
-      `Deny failed: ${error.message}`,
-      'error'
-    );
-    return;
+  try {
+    const { data:reviewedRequests, error } = await client.from('access_requests').update({
+      status:'denied', reviewed_at:new Date().toISOString(), reviewed_by:window.RAPS_CLOUD.user.id,
+      review_note:'Denied by Enterprise Administrator'
+    }).eq('id', id).eq('status', 'pending').select('id');
+    if (error) throw error;
+    if (!(reviewedRequests || []).some(r => r.id === id)) {
+      throw new Error('This request was already reviewed elsewhere. Refresh and check its current status.');
+    }
+    await loadAdminData();
+    setMessage(`Access request from ${request.email} was denied.`, 'success');
+  } catch (error) {
+    const detail = await edgeFunctionError(error);
+    try { await loadAdminData(); } catch {}
+    setMessage(`Deny failed: ${detail}`, 'error');
+  } finally {
+    pendingAdminActions.delete(`request:${id}`);
+    setRequestReviewButtons(id, false);
+    if (button) button.disabled = false;
   }
-
-  setMessage(
-    `Access request from ${request.email} was denied.`,
-    'success'
-  );
-
-  await loadAdminData();
 }
 
 async function inviteUser() {
@@ -563,9 +656,13 @@ async function inviteUser() {
   const client = window.RAPS_SUPABASE;
   const email = $('adminInviteEmail')?.value.trim() || '';
   const display_name = $('adminInviteName')?.value.trim() || '';
-  if (!email) { setMessage('Enter an email address.', 'error'); return; }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+    setMessage('Enter a valid email address.', 'error'); return;
+  }
+  if (pendingAdminActions.has('invite')) return;
 
   const button = $('adminInviteBtn');
+  pendingAdminActions.add('invite');
   button.disabled = true;
   setMessage('Sending Supabase invitation…', 'working');
 
@@ -573,27 +670,18 @@ async function inviteUser() {
     const payload = { email, display_name, ...scopePayload('Invite') };
     const { data, error } = await client.functions.invoke('admin-invite-user', { body: payload });
     if (error) throw error;
-    if (data?.error) throw new Error(data.error + (data.detail ? ` · ${data.detail}` : ''));
-    setMessage(`Invitation sent to ${email} and RaPS access assigned.`, 'success');
+    requireAccountEmailResult(data, true);
     $('adminInviteEmail').value = '';
     $('adminInviteName').value = '';
     await loadAdminData();
+    setMessage(`Supabase accepted the invitation for ${email} and RaPS access is assigned. The recipient can open the newest email link to choose a password. Check the inbox and spam folder.${data.warning ? ` ${data.warning}` : ''}`, 'success');
   } catch (error) {
-    let detail = error?.message || String(error);
-    try {
-      if (error?.context && typeof error.context.clone === 'function') {
-        const response = error.context.clone();
-        const body = await response.json().catch(() => null);
-        if (body?.error) detail = body.error;
-        if (body?.detail) detail += ` · ${body.detail}`;
-        if (body?.code) detail = `[${body.code}] ${detail}`;
-      }
-    } catch (parseError) {
-      console.warn('Unable to parse Edge Function error body', parseError);
-    }
+    const detail = await edgeFunctionError(error);
     console.error('RaPS admin invite failed', error);
+    try { await loadAdminData(); } catch {}
     setMessage(`Invite failed: ${detail}`, 'error');
   } finally {
+    pendingAdminActions.delete('invite');
     button.disabled = false;
   }
 }
