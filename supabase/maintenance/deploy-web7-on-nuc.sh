@@ -3,19 +3,38 @@
 set -euo pipefail
 umask 077
 [[ "$HOME" == /home/nuc ]] || { echo 'Run this as the nuc account.' >&2; exit 1; }
+RAPS_PREVIOUS_STAGE=''
+RAPS_DEFER_AUTH=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --resume-stage)
+      [[ $# -ge 2 ]] || { echo '--resume-stage requires a directory.' >&2; exit 1; }
+      RAPS_PREVIOUS_STAGE=$2
+      [[ -d "$RAPS_PREVIOUS_STAGE" && ! -L "$RAPS_PREVIOUS_STAGE" ]] || { echo 'The previous stage must be an existing directory.' >&2; exit 1; }
+      shift 2 ;;
+    --defer-auth) RAPS_DEFER_AUTH=true; shift ;;
+    *) echo 'Usage: deploy-web7-on-nuc.sh [--resume-stage DIRECTORY] [--defer-auth]' >&2; exit 1 ;;
+  esac
+done
 RAPS_PROJECT=/home/nuc/supabase-project
+# Each attempt retains its own backups; a resumed download never overwrites the
+# original dump or the incomplete configuration archive from an earlier attempt.
 RAPS_STAGE=$(mktemp -d "$HOME/raps-web7-XXXXXXXX")
 RAPS_OVERRIDE="$RAPS_PROJECT/docker-compose.raps-web7-auth.yml"
 trap 'printf "Stopped at line %s. Private files: %s\nKeep this stage; do not rerun migrations or restore the database blindly.\n" "$LINENO" "$RAPS_STAGE" >&2' ERR
 RAPS_SOURCE=https://raw.githubusercontent.com/DAFTCCC/DAF-TCCC-RaPS-WEB/c7226cf34d452efbfa3ff27d64a18490fe9b1642
 while read -r RAPS_HASH RAPS_FILE; do
-  curl --fail --silent --show-error --location --connect-timeout 10 --max-time 90 \
-    "$RAPS_SOURCE/$RAPS_FILE" -o "$RAPS_STAGE/${RAPS_FILE##*/}"
-  printf '%s  %s\n' "$RAPS_HASH" "$RAPS_STAGE/${RAPS_FILE##*/}" | sha256sum --check --status
-  # The two handlers share a basename: retain each in a separate stage file.
+  RAPS_LOCAL=${RAPS_FILE##*/}
   if [[ "$RAPS_FILE" == */admin-*/index.ts ]]; then
-    mv "$RAPS_STAGE/index.ts" "$RAPS_STAGE/$(basename "$(dirname "$RAPS_FILE")").ts"
+    RAPS_LOCAL="$(basename "$(dirname "$RAPS_FILE")").ts"
   fi
+  if [[ -n "$RAPS_PREVIOUS_STAGE" ]]; then
+    cp -- "$RAPS_PREVIOUS_STAGE/$RAPS_LOCAL" "$RAPS_STAGE/$RAPS_LOCAL"
+  else
+    curl --fail --silent --show-error --location --connect-timeout 10 --max-time 90 \
+      "$RAPS_SOURCE/$RAPS_FILE" -o "$RAPS_STAGE/$RAPS_LOCAL"
+  fi
+  printf '%s  %s\n' "$RAPS_HASH" "$RAPS_STAGE/$RAPS_LOCAL" | sha256sum --check --status
 done <<'FILES'
 be1052486b6776aac556d0e3cb89e871139dbd15f9efa3ec2399937b8e30854f supabase/migrations/20261017_account_permission_guards.sql
 f61ccb47b944b62408b67abd937db8867c47e2c9c5ab5435877d74bd28390af7 supabase/migrations/20261017_operational_permission_guards.sql
@@ -24,7 +43,22 @@ f61ccb47b944b62408b67abd937db8867c47e2c9c5ab5435877d74bd28390af7 supabase/migrat
 98034a5bae27d0c08ce668b52452485ee506f24888bdf65cf7c6073ced9d2986 supabase/maintenance/20261017_role_permission_audit.sql
 FILES
 sudo -v
-[[ ! -e "$RAPS_OVERRIDE" && ! -L "$RAPS_OVERRIDE" ]]
+if [[ "$RAPS_DEFER_AUTH" == false ]]; then
+  [[ ! -e "$RAPS_OVERRIDE" && ! -L "$RAPS_OVERRIDE" ]]
+fi
+RAPS_CONFIG_FILES=(docker-compose.yml docker-compose.isolation.yml .env)
+if [[ "$RAPS_DEFER_AUTH" == false ]]; then RAPS_CONFIG_FILES+=(docker-compose.caddy.yml); fi
+# Container labels record original paths even after a file has been removed.
+# Require every recorded input before starting backups or database installation.
+raps_require_configs() {
+  for RAPS_FILE in "${RAPS_CONFIG_FILES[@]}"; do
+    if ! sudo test -f "$RAPS_PROJECT/$RAPS_FILE"; then
+      printf 'Required configuration is missing: %s\nRecover the original file before recreating its service.\n' "$RAPS_PROJECT/$RAPS_FILE" >&2
+      return 1
+    fi
+  done
+}
+raps_require_configs
 for RAPS_FUNCTION in admin-invite-user admin-manage-user; do
   RAPS_TARGET="$RAPS_PROJECT/volumes/functions/$RAPS_FUNCTION"
   [[ ! -L "$RAPS_TARGET" && ! -L "$RAPS_TARGET/index.ts" ]]
@@ -42,14 +76,19 @@ for c in json.load(sys.stdin):
     if service=="functions":
         assert any(m["Source"]==p+"volumes/functions" and m["Destination"]=="/home/deno/functions" for m in c["Mounts"]), "Unexpected function mount"
 '
-RAPS_MIN=$(sudo docker inspect supabase-auth | python3 -c 'import json,sys; e=dict(x.split("=",1) for x in json.load(sys.stdin)[0]["Config"]["Env"]); print(max(12,int(e.get("GOTRUE_PASSWORD_MIN_LENGTH") or 0)))')
+if [[ "$RAPS_DEFER_AUTH" == false ]]; then
+  RAPS_MIN=$(sudo docker inspect supabase-auth | python3 -c 'import json,sys; e=dict(x.split("=",1) for x in json.load(sys.stdin)[0]["Config"]["Env"]); print(max(12,int(e.get("GOTRUE_PASSWORD_MIN_LENGTH") or 0)))')
+fi
 printf '%s\n' "$RAPS_STAGE" > "$HOME/.raps-web7-stage"
 raps_psql() { sudo docker exec -i -u postgres supabase-db psql -X -qAt -U postgres -d postgres -v ON_ERROR_STOP=1 "$@"; }
+RAPS_EXISTING_GUARDS=$(raps_psql -c "SELECT count(*) FROM pg_policies WHERE schemaname='public' AND (policyname LIKE 'raps_account_guard_%' OR policyname LIKE 'raps_ops_guard_%');")
+[[ "$RAPS_EXISTING_GUARDS" == 0 ]] || { printf 'Permission guards already exist; inspect the completed migration state before resuming.\n' >&2; false; }
 sudo docker exec -u postgres supabase-db pg_dump -U postgres -d postgres -Fc > "$RAPS_STAGE/database-before.dump"
 sudo docker exec -i -u postgres supabase-db pg_restore -l < "$RAPS_STAGE/database-before.dump" > "$RAPS_STAGE/database-before.toc"
 [[ -s "$RAPS_STAGE/database-before.toc" ]]
 sudo tar -czf - -C "$RAPS_PROJECT/volumes" functions > "$RAPS_STAGE/functions-before.tar.gz"
-sudo tar -czf - -C "$RAPS_PROJECT" docker-compose.yml docker-compose.isolation.yml docker-compose.caddy.yml .env > "$RAPS_STAGE/config-before.tar.gz"
+sudo tar --dereference -czf - -C "$RAPS_PROJECT" "${RAPS_CONFIG_FILES[@]}" > "$RAPS_STAGE/config-before.tar.gz"
+printf '%s\n' "${RAPS_CONFIG_FILES[@]}" > "$RAPS_STAGE/config-backup-files.txt"
 raps_psql < "$RAPS_STAGE/20261017_role_permission_audit.sql" > "$RAPS_STAGE/catalog-before.jsonl"
 cat > "$RAPS_STAGE/protected-hashes.sql" <<'SQL'
 SELECT n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||') '||md5(pg_get_functiondef(p.oid))
@@ -82,12 +121,14 @@ done
 sudo docker compose --project-directory "$RAPS_PROJECT" --env-file "$RAPS_PROJECT/.env" -p supabase \
   -f "$RAPS_PROJECT/docker-compose.yml" -f "$RAPS_PROJECT/docker-compose.isolation.yml" \
   up -d --force-recreate --no-deps --pull never --no-build functions
-printf 'services:\n  auth:\n    environment:\n      GOTRUE_DISABLE_SIGNUP: "true"\n      GOTRUE_PASSWORD_MIN_LENGTH: "%s"\n' "$RAPS_MIN" > "$RAPS_STAGE/auth-hardening.yml"
-sudo install -m 0600 "$RAPS_STAGE/auth-hardening.yml" "$RAPS_OVERRIDE"
-sudo docker compose --project-directory "$RAPS_PROJECT" --env-file "$RAPS_PROJECT/.env" -p supabase \
-  -f "$RAPS_PROJECT/docker-compose.yml" -f "$RAPS_PROJECT/docker-compose.caddy.yml" -f "$RAPS_OVERRIDE" \
-  up -d --force-recreate --no-deps --pull never --no-build auth
-sudo docker inspect supabase-auth | python3 -c 'import json,sys; e=dict(x.split("=",1) for x in json.load(sys.stdin)[0]["Config"]["Env"]); assert e.get("GOTRUE_DISABLE_SIGNUP")=="true" and int(e.get("GOTRUE_PASSWORD_MIN_LENGTH") or 0)>=12, "Auth hardening is not active"'
+if [[ "$RAPS_DEFER_AUTH" == false ]]; then
+  printf 'services:\n  auth:\n    environment:\n      GOTRUE_DISABLE_SIGNUP: "true"\n      GOTRUE_PASSWORD_MIN_LENGTH: "%s"\n' "$RAPS_MIN" > "$RAPS_STAGE/auth-hardening.yml"
+  sudo install -m 0600 "$RAPS_STAGE/auth-hardening.yml" "$RAPS_OVERRIDE"
+  sudo docker compose --project-directory "$RAPS_PROJECT" --env-file "$RAPS_PROJECT/.env" -p supabase \
+    -f "$RAPS_PROJECT/docker-compose.yml" -f "$RAPS_PROJECT/docker-compose.caddy.yml" -f "$RAPS_OVERRIDE" \
+    up -d --force-recreate --no-deps --pull never --no-build auth
+  sudo docker inspect supabase-auth | python3 -c 'import json,sys; e=dict(x.split("=",1) for x in json.load(sys.stdin)[0]["Config"]["Env"]); assert e.get("GOTRUE_DISABLE_SIGNUP")=="true" and int(e.get("GOTRUE_PASSWORD_MIN_LENGTH") or 0)>=12, "Auth hardening is not active"'
+fi
 raps_psql < "$RAPS_STAGE/protected-hashes.sql" > "$RAPS_STAGE/protected-after.txt"
 cmp -s "$RAPS_STAGE/protected-before.txt" "$RAPS_STAGE/protected-after.txt"
 raps_psql > "$RAPS_STAGE/database-check.log" <<'SQL'
@@ -108,7 +149,7 @@ raps_wait() {
   return 1
 }
 raps_wait supabase-edge-functions
-raps_wait supabase-auth
+if [[ "$RAPS_DEFER_AUTH" == false ]]; then raps_wait supabase-auth; fi
 RAPS_CURL=(curl --silent --show-error --connect-timeout 10 --max-time 30 --resolve raps-supabase.asuscomm.com:443:127.0.0.1)
 RAPS_URL=https://raps-supabase.asuscomm.com/functions/v1
 "${RAPS_CURL[@]}" --fail --retry 10 --retry-delay 2 --retry-connrefused "$RAPS_URL/request-access" > "$RAPS_STAGE/catalog-smoke.json"
@@ -125,5 +166,9 @@ expected='INVITE_AUTH' if sys.argv[2]=='admin-invite-user' else 'ADMIN_AUTH'
 assert json.load(open(sys.argv[1])).get('code')==expected, 'Unexpected administrative handler response'
 PY
 done
-printf 'RaPS web.7 backend installed; database, Auth settings, and unauthenticated endpoint checks passed.\nPrivate backups and logs: %s\n' "$RAPS_STAGE"
-printf 'Future Auth recreations must retain the third Compose file: %s\n' "$RAPS_OVERRIDE"
+if [[ "$RAPS_DEFER_AUTH" == true ]]; then
+  printf 'RaPS web.7 database and functions installed; permission and endpoint checks passed.\nAuth was not changed; signup and password-policy hardening remain pending.\nPrivate backups and logs: %s\n' "$RAPS_STAGE"
+else
+  printf 'RaPS web.7 backend installed; database, Auth settings, and unauthenticated endpoint checks passed.\nPrivate backups and logs: %s\n' "$RAPS_STAGE"
+  printf 'Future Auth recreations must retain the third Compose file: %s\n' "$RAPS_OVERRIDE"
+fi

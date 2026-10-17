@@ -4,6 +4,29 @@ Run `deploy-web7-on-nuc.sh` as the existing `nuc` account on NUC #1. It targets
 the reviewed deployment layout and stops if its Compose labels differ. The
 script pins the merged application source at `c7226cf34d452efbfa3ff27d64a18490fe9b1642`.
 
+Recorded container labels do not prove that the original Compose files still
+exist. Preflight checks require all recorded files on disk before backups or
+migrations. If a file is missing, recover its original contents from a private
+backup and validate them against the running service before attempting a
+recreation. Do not substitute an empty override or use only the base file.
+An archive produced by a failed `tar` command is incomplete and is not a
+complete configuration backup.
+
+After the missing configuration is recovered and validated, a failure that
+occurred before migration installation can reuse the prior release files with
+`bash deploy-web7-on-nuc.sh --resume-stage /home/nuc/raps-web7-XXXXXXXX`.
+Every file is checked again against its pinned hash. A fresh attempt directory
+keeps new backups separate from the original stage. Existing guard policies
+stop execution; this option does not repeat or skip installed migrations.
+
+When the original Auth override is unavailable, `--defer-auth` installs only
+the database guards and functions using their existing base/isolation files.
+It does not change or recreate Auth, require its missing override, or claim
+that signup/password-policy hardening passed. The backed-up configuration file
+list is saved beside the archive. Complete Auth recovery separately after
+validating a replacement against its running configuration; do not rerun the
+database migrations to finish that remaining step.
+
 The script verifies downloads, creates private backups, preflights both database
 migrations with a rollback, installs them in one transaction, and recreates only
 the functions and Auth services. It does not send email or create test accounts.
