@@ -27,7 +27,9 @@ OTHER_SESSION = {'user': {'id': 'different-user', 'email': 'other@example.test'}
                  'access_token': 'synthetic-other-access-token',
                  'refresh_token': 'synthetic-other-refresh-token'}
 MEMBERSHIP = {'id': 'synthetic-membership', 'active': True, 'role': 'evaluator',
-              'base_id': 'test-base', 'bases': {'id': 'test-base', 'code': 'TEST'}}
+              'base_id': 'test-base', 'bases': {'id': 'test-base', 'code': 'TEST',
+                  'active': True, 'majcom_id': 'test-command',
+                  'majcoms': {'id': 'test-command', 'active': True}}}
 CACHED_IDENTITY = {'user': USER, 'profile': {'display_name': 'Synthetic Evaluator'},
                    'memberships': [MEMBERSHIP], 'primaryMembership': MEMBERSHIP}
 
@@ -139,7 +141,8 @@ const rows=table=>{
     email:'current-user@example.test'}];
   if(table==='memberships')return state.membershipsOverride!==null?copy(state.membershipsOverride):config.noRole?[]:[{id:'synthetic-membership',
     user_id:'synthetic-user',active:true,role:'evaluator',base_id:'test-base',
-    bases:{id:'test-base',code:'TEST',name:'Synthetic Installation'}}];
+    bases:{id:'test-base',code:'TEST',name:'Synthetic Installation',active:true,
+      majcom_id:'test-command',majcoms:{id:'test-command',active:true}}}];
   throw new Error('Unexpected table read in auth fixture: '+table);
 };
 const query=table=>({
@@ -171,7 +174,7 @@ if(config.pendingActivation)sessionStorage.setItem('RAPS_PENDING_PASSWORD_SETUP_
 def test_html():
     html = (ROOT / 'index.html').read_text()
     return re.sub(r'<script\s+src="([^"]+)"[^>]*></script>',
-                  lambda match: match.group(0) if urlsplit(match.group(1)).path == 'cloud-auth.js' else '',
+                  lambda match: match.group(0) if urlsplit(match.group(1)).path in {'permissions.js', 'cloud-auth.js'} else '',
                   html)
 
 
@@ -601,7 +604,7 @@ def main():
 
         page = h.open(session=SESSION)
         expect(page.locator('#cloudAuthGate')).not_to_be_visible()
-        admin_membership = dict(MEMBERSHIP, role='enterprise_admin')
+        admin_membership = dict(MEMBERSHIP, role='enterprise_admin', base_id=None, bases=None)
         page.evaluate('membership=>{window.__authTest.membershipsOverride=[membership];'
                       'window.__authTest.paused["query.memberships"]=true;'
                       'window.__authTest.emit("TOKEN_REFRESHED")}', admin_membership)
@@ -626,6 +629,44 @@ def main():
         expect(page.locator('#cloudAuthGate')).to_be_visible()
         assert not page.evaluate('window.RAPS_CLOUD?.offlineCached')
         h.done(page, 'An expired cached primary membership cannot provide offline evaluator access')
+
+        legacy_membership = dict(MEMBERSHIP, bases={'id': 'test-base', 'code': 'TEST'})
+        legacy_cache = dict(CACHED_IDENTITY, memberships=[legacy_membership],
+                            primaryMembership=legacy_membership)
+        page = h.open(withoutSdk=True, cachedIdentity=legacy_cache)
+        expect(page.locator('#cloudAuthGate')).not_to_be_visible()
+        assert page.evaluate('window.RAPS_CLOUD?.offlineCached')
+        h.done(page, 'Legacy cached memberships retain authorized offline evaluator access')
+
+        for invalid_membership, label in [
+            (dict(MEMBERSHIP, role='enterprise_admin'), 'Enterprise access with an installation scope'),
+            (dict(MEMBERSHIP, user_id='different-user'), 'A membership belonging to another account'),
+            (dict(MEMBERSHIP, active='true'), 'A non-boolean active flag'),
+            (dict(MEMBERSHIP, bases=None), 'A hidden installation in a connected scope lookup'),
+            (dict(MEMBERSHIP, bases={'id': 'test-base', 'active': True,
+                                    'majcoms': None}), 'A hidden parent MAJCOM in a connected scope lookup'),
+            (dict(MEMBERSHIP, role='majcom_manager', base_id=None, bases=None,
+                  majcom_id='test-command', majcoms=None), 'A hidden assigned MAJCOM in a connected scope lookup'),
+            (dict(MEMBERSHIP, bases={'id': 'test-base', 'active': True,
+                                    'majcoms': {'active': False}}), 'An inactive parent MAJCOM')
+        ]:
+            page = h.open(session=SESSION)
+            expect(page.locator('#cloudAuthGate')).not_to_be_visible()
+            page.evaluate('membership=>{window.__authTest.membershipsOverride=[membership];'
+                          'window.__authTest.emit("TOKEN_REFRESHED")}', invalid_membership)
+            expect(page.locator('#cloudAuthGate')).to_be_visible()
+            assert not page.evaluate('window.RAPS_CLOUD?.user')
+            h.done(page, label + ' cannot authorize the application')
+
+        page = h.open(session=SESSION)
+        expect(page.locator('#cloudAuthGate')).not_to_be_visible()
+        page.evaluate('membership=>{membership.ends_at=new Date(Date.now()+1000).toISOString();'
+                      'window.__authTest.membershipsOverride=[membership];'
+                      'window.__authTest.emit("TOKEN_REFRESHED")}', MEMBERSHIP)
+        page.wait_for_function('()=>!!window.RAPS_CLOUD?.primaryMembership?.ends_at')
+        expect(page.locator('#cloudAuthGate')).to_be_visible(timeout=5000)
+        assert not page.evaluate('window.RAPS_CLOUD?.user')
+        h.done(page, 'Membership expiration closes access while the application remains open')
 
         page = h.open(session=SESSION)
         expect(page.locator('#cloudAuthGate')).not_to_be_visible()

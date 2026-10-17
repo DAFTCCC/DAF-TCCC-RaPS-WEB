@@ -22,12 +22,27 @@ from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 ORIGIN = 'http://127.0.0.1:8765'
-SCRIPTS = {'version.js', 'tiers.js', 'branding.js', 'installations.js', 'app.js'}
+SCRIPTS = {'permissions.js', 'version.js', 'tiers.js', 'branding.js', 'installations.js', 'app.js'}
+IDENTITY_FIXTURE = r"""
+window.__cloudOperations=[];
+window.__setRapsFixtureRole = role => {
+  const id=window.RAPS_CLOUD?.user?.id || 'test-evaluator';
+  window.RAPS_CLOUD={user:{id},role,mode:'connected',connected:true,offlineCached:false,
+    memberships:[{id:'fixture-membership',user_id:id,role,active:true,starts_at:null,ends_at:null,
+      base_id:['evaluator','program_manager'].includes(role)?'fixture-base':null,
+      majcom_id:role==='majcom_manager'?'fixture-majcom':null,
+      bases:['evaluator','program_manager'].includes(role)?{id:'fixture-base',code:'TEST',majcom_id:'fixture-majcom',active:true}:null}],
+    client:{rpc:async(...args)=>{window.__cloudOperations.push(args);throw new Error('No cloud operations allowed in isolated UI test');}}};
+};
+window.__setRapsFixtureRole('evaluator');
+"""
+
 ADAPTER = r"""
 window.__rapsTest = {
   setup(tierId='1') {
     const c={id:'test-class',name:'Simulator Class',tierId,tierSnapshot:deep(TIERS[tierId]),
       status:'active',scenario:'Isolated training test',scenarioVersion:'1',scenarioNT:[],
+      homeInstallationId:'TEST',localCreatedByUserId:currentCloudUserId(),
       students:[],leadEvaluator:'Test Evaluator',cloudSync:{enabled:false},
       date:'2026-10-15',roster:'TEST'};
     const s={id:'test-student',name:'Synthetic Learner',rank:'Sgt',trainingId:'TEST-ONLY',attempts:{}};
@@ -80,7 +95,7 @@ window.__rapsTest = {
   restoreTrashStorage(){Storage.prototype.setItem=window.__originalTrashStorageSetItem;},
   prepareClassTrash() {
     localStorage.removeItem(TRASH_OUTBOX_PREFIX+'test-class');
-    window.RAPS_CLOUD.role='enterprise_admin';
+    window.__setRapsFixtureRole('enterprise_admin');
     this.setup();
     evalState().finalizedAt=now();evalState().finalResult='FAIL';
     const c=cls();c.cloudSync={enabled:true,status:'synced'};
@@ -145,11 +160,7 @@ def main():
             headless=True,
         )
         context = browser.new_context(service_workers='block', viewport={'width': 1366, 'height': 900})
-        context.add_init_script("""
-          window.__cloudOperations=[];
-          window.RAPS_CLOUD={user:{id:'test-evaluator'},role:'evaluator',
-            client:{rpc:async(...args)=>{window.__cloudOperations.push(args);throw new Error('No cloud operations allowed in isolated UI test');}}};
-        """)
+        context.add_init_script(IDENTITY_FIXTURE)
 
         def fulfill(route):
             url = urlsplit(route.request.url)
@@ -520,7 +531,7 @@ def main():
         # durable lifecycle queue, even before cloud delivery is available.
         context.add_init_script("""
           window.addEventListener('DOMContentLoaded',()=>{
-            window.RAPS_CLOUD.role='enterprise_admin';
+            window.__setRapsFixtureRole('enterprise_admin');
             window.dispatchEvent(new CustomEvent('raps-cloud-identity'));
           },{once:true});
         """)
@@ -591,10 +602,10 @@ def main():
           const userId=RAPS_CLOUD.user.id;RAPS_CLOUD.user.id='';
           const signedOut=RAPS_CLASS_STORE.recoverTrashActions();
           RAPS_CLOUD.user.id=userId;
-          RAPS_CLOUD.role='evaluator';
+          window.__setRapsFixtureRole('evaluator');
           const evaluator=RAPS_CLASS_STORE.recoverTrashActions();
           const unchangedForEvaluator=!RAPS_CLASS_STORE.getClass('test-class').deletedAt;
-          RAPS_CLOUD.role='enterprise_admin';
+          window.__setRapsFixtureRole('enterprise_admin');
           const enterprise=RAPS_CLASS_STORE.recoverTrashActions();
           const queued=RAPS_CLASS_STORE.getClass('test-class').deletedAt===action.requestedAt;
           RAPS_CLASS_STORE.acknowledgeTrashAction('test-class',action);

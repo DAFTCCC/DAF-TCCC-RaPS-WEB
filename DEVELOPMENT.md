@@ -10,6 +10,8 @@ There is no package installation or build step. Node.js is used for the regressi
 
 ```sh
 node --test tests/*.test.cjs
+bash tests/account-permissions.sh
+bash tests/operational-permissions.sh
 python3 tests/browser-workflow.py
 python3 tests/browser-responsive.py
 python3 tests/browser-accessibility.py
@@ -26,6 +28,13 @@ The accessibility suite exercises real application dialogs and their interaction
 Automated browser checks use Chromium and synthetic data. They verify responsive layout, not physical iOS/Android font rendering, virtual-keyboard behavior, or field usability with gloves. Include those checks in the device pilot described below.
 
 The policy tests compare against the pre-change commit `be124a1d36af411ea4676eba283eb1b3b762cd14`. They protect the exact tier definitions and existing grading, timing, and authoritative lifecycle functions. Keep this reference fixed when testing this change. Any future standards update requires a separately reviewed baseline.
+
+The role suites use real permission helpers, synthetic authenticated identities,
+and separate PostgreSQL containers. SQL tests require Docker and a locally
+available official `postgres:17.6` image; they expose no ports and contact no NUC
+or production database. They verify both permitted and forbidden requests,
+including direct database requests and previously permissive definer functions.
+See [PERMISSIONS.md](PERMISSIONS.md) for the role matrix and deployment sequence.
 
 ## Account lifecycle checks
 

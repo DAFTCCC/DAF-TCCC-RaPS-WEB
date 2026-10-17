@@ -4,14 +4,70 @@
 const TIER_TO_COURSE = Object.freeze({ '1':'ASM', '2':'CLS', '3':'CMC', '4':'CPP' });
 const COURSE_TO_TIER = Object.freeze({ ASM:'1', CLS:'2', CMC:'3', CPP:'4' });
 
-let refs = null;
 let syncing = false;
-let lastIdentityUserId = null;
 const classPushTails = new Map();
 
 const getStore = () => window.RAPS_CLASS_STORE;
-const getCloud = () => window.RAPS_CLOUD;
 const getClient = () => window.RAPS_SUPABASE;
+let requestClientId = 0;
+
+function checkedQuery(query, check) {
+  return new Proxy(query, {
+    get(target, key) {
+      if (key === 'then') return (resolve, reject) => Promise.resolve()
+        .then(() => { check(); return target; })
+        .then(result => { check(); return result; }).then(resolve, reject);
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? (...args) => { check(); return checkedQuery(value.apply(target, args),check); } : value;
+    }
+  });
+}
+
+function classRequestContext(parent, classId) {
+  if (parent.classId === classId) return parent;
+  const current = () => parent.current() && !parent.store.isLocalCopyHidden?.(classId);
+  const check = () => { if (!current()) throw new Error('Your account or local class access changed. Sync again.'); };
+  return {...parent,classId,current,check,
+    ready:async () => {await parent.ready();check();},
+    client:{from(table) {check();return checkedQuery(parent.client.from(table),check);}}};
+}
+
+function requestContext({ classId='', allowHidden=false }={}) {
+  const permissions = window.RAPS_PERMISSIONS;
+  const token = permissions?.snapshot?.();
+  const source = getClient();
+  const store = getStore();
+  if (!source || !store || !permissions?.isCurrent?.(token)) return null;
+  let bound = null, preparation = null;
+  const current = () => permissions.isCurrent(token) && getStore() === store &&
+    (!classId || allowHidden || !store.isLocalCopyHidden?.(classId));
+  const check = () => {
+    if (!current()) throw new Error('Your account or class access changed. Sign in and sync again.');
+  };
+  const ready = () => preparation ||= (async () => {
+    check();
+    const { data, error } = await source.auth.getSession();
+    check();
+    const session = data?.session, config = window.RAPS_CLOUD_CONFIG;
+    if (error || !session?.access_token || session.user?.id !== token.userId ||
+      !config?.projectUrl || !config?.publishableKey || !window.supabase?.createClient) {
+      throw new Error('Your sign-in session is unavailable. Sign in again before syncing classes.');
+    }
+    bound = window.supabase.createClient(config.projectUrl, config.publishableKey, {
+      auth:{ persistSession:false, autoRefreshToken:false, detectSessionInUrl:false, storageKey:`raps-class-request-${++requestClientId}` },
+      global:{ headers:{ Authorization:`Bearer ${session.access_token}` } }
+    });
+    check();
+  })();
+  return { token, userId:token.userId, identity:token.identity, store, classId, current, check, ready,
+    client:{ from(table) { check(); if (!bound) throw new Error('Verify your session before syncing classes.'); return checkedQuery(bound.from(table),check); } } };
+}
+
+async function withContext(context, fallback, operation) {
+  if (!context) return fallback;
+  try { await context.ready(); context.check(); return await operation(context); }
+  catch (error) { if (!context.current()) return fallback; throw error; }
+}
 
 function isoFromMs(ms) {
   return Number.isFinite(Number(ms)) ? new Date(Number(ms)).toISOString() : null;
@@ -155,27 +211,85 @@ function setButtonBusy(on) {
   btn.textContent = on ? 'Syncing…' : 'Sync Classes';
 }
 function cloudReady() {
-  const cloud = getCloud();
-  return !!(getClient() && cloud?.user?.id && (cloud.connected || cloud.offlineCached));
+  return !!(getClient() && window.RAPS_PERMISSIONS?.isCurrent?.(window.RAPS_PERMISSIONS.snapshot()));
 }
 
-async function loadRefs(force=false) {
-  if (refs && !force) return refs;
-  const client = getClient();
-  if (!client) throw new Error('Supabase client is unavailable.');
+async function readAssignments(queryFactory, key) {
+  const rows = [], seen = new Set();
+  for (let offset=0;;) {
+    const result = await queryFactory().order(key,{ascending:true}).order('evaluator_id',{ascending:true}).range(offset,offset+249);
+    if (offset && result.error?.code === 'PGRST103') break;
+    if (result.error) return result;
+    if (!result.data?.length) break;
+    for (const row of result.data) {
+      const id = `${row[key]}|${row.evaluator_id}`;
+      if (seen.has(id)) throw new Error('Evaluator assignments changed during synchronization. Sync classes again.');
+      seen.add(id);
+    }
+    rows.push(...result.data);
+    offset += result.data.length;
+  }
+  return {data:rows,error:null};
+}
 
-  const [basesResult, curriculumResult, majcomResult] = await Promise.all([
+function refreshLocalClassAccess(context, loadedRefs) {
+  context.check();
+  let changed=false;
+  for(const local of context.store.getClasses()) {
+    const assigned=loadedRefs.assignedClassIds.has(local.id);
+    // Refresh grants independently of content fingerprints. A removed
+    // assignment may hide the row from RLS, so visible rows alone cannot
+    // invalidate the permission cached with an earlier local copy.
+    if(local.cloudAccess || assigned) {
+      const next={userId:context.userId,assignedEvaluator:assigned};
+      if(JSON.stringify(local.cloudAccess)!==JSON.stringify(next)) {
+        local.cloudAccess=next;
+        changed=true;
+      }
+    }
+    if(local.cloudScope?.baseId) {
+      const base=loadedRefs.bases.find(row=>row.id===local.cloudScope.baseId);
+      const parent=base && loadedRefs.majcomById.get(base.majcom_id);
+      const next={baseId:local.cloudScope.baseId,majcomId:parent?.id || '',baseCode:base?.code || '',available:!!(base && parent)};
+      if(JSON.stringify(local.cloudScope)!==JSON.stringify(next)) {
+        local.cloudScope=next;
+        changed=true;
+      }
+    }
+  }
+  if(changed) {
+    context.check();
+    context.store.persistCloudMerge?.();
+    window.dispatchEvent(new CustomEvent('raps-class-access-refresh'));
+  }
+}
+
+async function loadRefs(force=false, context) {
+  context.check();
+  if (context.refs && !force) return context.refs;
+  const client = context.client;
+
+  const [basesResult, curriculumResult, majcomResult, classAssignments, eventAssignments] = await Promise.all([
     client.from('bases').select('id, majcom_id, code, name, active').eq('active', true),
     client.from('curriculum_versions').select('id, course_type, version, title, published').eq('published', true),
-    client.from('majcoms').select('id, code, name, active').eq('active', true)
+    client.from('majcoms').select('id, code, name, active').eq('active', true),
+    readAssignments(() => client.from('class_evaluators').select('class_id,evaluator_id').eq('evaluator_id', context.userId),'class_id'),
+    readAssignments(() => client.from('event_evaluators').select('event_id,evaluator_id,evaluation_events(class_id)').eq('evaluator_id', context.userId),'event_id')
   ]);
 
   if (basesResult.error) throw basesResult.error;
   if (curriculumResult.error) throw curriculumResult.error;
   if (majcomResult.error) throw majcomResult.error;
+  if (classAssignments.error) throw classAssignments.error;
+  if (eventAssignments.error) throw eventAssignments.error;
+  context.check();
 
   const majcomById = new Map((majcomResult.data || []).map(row => [row.id, row]));
-  refs = {
+  context.refs = {
+    userId:context.userId,
+    assignedClassIds:new Set([...(classAssignments.data || []).map(row => row.class_id),
+      ...(eventAssignments.data || []).flatMap(row => Array.isArray(row.evaluation_events)
+        ? row.evaluation_events.map(event => event.class_id) : [row.evaluation_events?.class_id])].filter(Boolean)),
     bases: basesResult.data || [],
     curricula: curriculumResult.data || [],
     majcoms: majcomResult.data || [],
@@ -183,7 +297,9 @@ async function loadRefs(force=false) {
     curriculumByKey: new Map((curriculumResult.data || []).map(row => [`${row.course_type}|${row.version}`, row])),
     majcomById
   };
-  return refs;
+  window.RAPS_PERMISSIONS.registerBases(context.refs.bases, { identity:context.identity });
+  refreshLocalClassAccess(context,context.refs);
+  return context.refs;
 }
 
 function serializeAppData(c) {
@@ -251,8 +367,9 @@ function patchState(classId, patch) {
   getStore()?.patchCloudState(classId, patch);
 }
 
-async function fetchRemoteById(id) {
-  const client = getClient();
+async function fetchRemoteById(id, context) {
+  context.check();
+  const client = context.client;
   const { data, error } = await client
     .from('classes')
     .select('id, base_id, name, course_type, curriculum_version_id, start_date, end_date, status, created_by, created_at, updated_at, app_data, client_modified_at, source_device_id')
@@ -327,9 +444,10 @@ function acknowledgeTrashAction(c,saved,action) {
   }
 }
 
-async function hasUnfinishedAssessment(c) {
+async function hasUnfinishedAssessment(c, context) {
+  context.check();
   if ((c.students||[]).some(s=>Object.values(s.attempts||{}).some(a=>a.startedAt&&!a.finalizedAt&&!a.voidedAt))) return true;
-  const client=getClient();
+  const client=context.client;
   const events=await client.from('evaluation_events').select('id').eq('class_id',c.id);
   if (events.error) throw events.error;
   const ids=[...new Set([c.id,...(events.data||[]).map(row=>row.id)])];
@@ -339,11 +457,14 @@ async function hasUnfinishedAssessment(c) {
 }
 
 async function pushTrashAction(c,existing,remote,action,options) {
+  const context = options.context;
+  context.check();
   if (Number(options.casRetry||0)>=3) {
     patchState(c.id,{status:'error',error:'Class changed during trash synchronization. Sync Classes to retry.'});
     return false;
   }
-  const unfinished=action.kind==='delete' && await hasUnfinishedAssessment(c);
+  const unfinished=action.kind==='delete' && await hasUnfinishedAssessment(c,context);
+  context.check();
   // Home can queue Restore while the delete request is awaiting the server.
   // Never replace that newer intent with the older request's acknowledgement.
   if (!trashActionUnchanged(c,action)) return pushClassUnlocked(c,{...options,casRetry:Number(options.casRetry||0)+1});
@@ -358,61 +479,65 @@ async function pushTrashAction(c,existing,remote,action,options) {
   if (action.kind==='delete') {
     appData.trashPreviousStatus=existing.status==='active'?'active':'draft';
     appData.deletedAt=at;
-    appData.deletedBy=getCloud().user.id;
+    appData.deletedBy=context.userId;
   } else {
     appData.deletedAt=null;
     appData.restoredAt=at;
-    appData.restoredBy=getCloud().user.id;
+    appData.restoredBy=context.userId;
   }
   const payload={
     status:action.kind==='delete'?'archived':appData.trashPreviousStatus==='active'?'active':'draft',
     app_data:appData,client_modified_at:isoFromMs(revision),source_device_id:getStore()?.deviceId?.()||null
   };
   patchState(c.id,{enabled:true,status:'syncing',error:'',trashAction:action});
-  let write=getClient().from('classes').update(payload).eq('id',c.id).eq('status',existing.status);
+  let write=context.client.from('classes').update(payload).eq('id',c.id).eq('status',existing.status);
   if (existing.client_modified_at) write=write.eq('client_modified_at',existing.client_modified_at);
   if (existing.updated_at) write=write.eq('updated_at',existing.updated_at);
   const {data,error}=await write.select('*').maybeSingle();
+  context.check();
   if (error) {
     patchState(c.id,{status:navigator.onLine?'error':'offline',error:shortError(error)});
     throw error;
   }
   if (!data) return pushClassUnlocked(c,{...options,casRetry:Number(options.casRetry||0)+1});
-  const saved=remoteToLocal(data,await loadRefs());
+  const saved=remoteToLocal(data,await loadRefs(false,context));
+  context.check();
   acknowledgeTrashAction(c,saved,action);
   return true;
 }
 
 async function pushClassUnlocked(c, options={}) {
+  const context = options.context;
+  context.check();
   c=getStore()?.getClass?.(c.id)||c;
   const forceConflict=options?.forceConflict===true;
   const expectedRemoteModifiedAt=Number(options?.expectedRemoteModifiedAt||0);
   const casRetry=Number(options?.casRetry||0);
-  const client = getClient();
-  const cloud = getCloud();
+  const client = context.client;
+  const cloud = context.identity;
 
   if (!client || !cloud?.user?.id) return false;
 
-  // Closed classes are server-authoritative retention records. Never push
-  // local metadata back into a closed class, even if a background sync path
-  // calls this function directly.
-  if (isClosedClass(c)) {
-    patchState(c.id, {
-      enabled:true,
-      status:'synced',
-      error:'',
-      lastSyncedAt:Date.now()
-    });
-    return true;
-  }
-
   // A stale browser may still think the class is open. Check the server
   // before writing so an authoritative completed class is pull-only.
-  const existing=await fetchRemoteById(c.id);
-  const loadedRefs=await loadRefs();
+  const existing=await fetchRemoteById(c.id,context);
+  const loadedRefs=await loadRefs(false,context);
   const remote=existing?remoteToLocal(existing,loadedRefs):null;
   const remoteModified=msFromIso(existing?.client_modified_at||existing?.updated_at);
   const metadata=classMetadataState(c,remote,remoteModified);
+  context.check();
+  if (remote && !window.RAPS_PERMISSIONS.canClass('readClass',remote)) return false;
+  if (remote) {
+    c.cloudScope = remote.cloudScope;
+    c.cloudAccess = remote.cloudAccess;
+  }
+  // Closed records remain pull-only, but still require an authorized server
+  // row; a local closed flag cannot certify synchronization or access.
+  if (isClosedClass(c)) {
+    if (!remote) return false;
+    adoptLifecycle(c,remote);
+    return true;
+  }
 
   if (existing?.status==='completed') {
     adoptLifecycle(c,remote);
@@ -426,15 +551,21 @@ async function pushClassUnlocked(c, options={}) {
   }
 
   const visibility=trashDecision(c,remote);
-  if (visibility.action && cloud.role!=='enterprise_admin') {
+  if (visibility.action && !window.RAPS_PERMISSIONS.hasRole('enterprise_admin')) {
     patchState(c.id,{enabled:true,status:'error',error:'Enterprise Administrator access is required to synchronize class deletion or restoration.'});
     return false;
   }
   if (visibility.adopt) { adoptLifecycle(c,remote); return true; }
+  if (remote && !window.RAPS_PERMISSIONS.canClass('manageClass',remote)) {
+    patchState(c.id,{enabled:true,status:'error',error:'Your account does not have permission to manage this class.'});
+    return false;
+  }
   if (visibility.action && existing) {
     return pushTrashAction(c,existing,remote,visibility.action,options);
   }
-  if (visibility.action?.kind==='delete' && !existing && await hasUnfinishedAssessment(c)) {
+  const unfinishedNewTrash=visibility.action?.kind==='delete' && !existing && await hasUnfinishedAssessment(c,context);
+  context.check();
+  if (unfinishedNewTrash) {
     patchState(c.id,{enabled:true,status:'error',error:'Finalize or void every assessment in progress before deleting this class.'});
     return false;
   }
@@ -530,7 +661,8 @@ async function pushClassUnlocked(c, options={}) {
     : localModified;
 
   if (forceConflict && expectedRemoteModifiedAt && Math.abs(remoteModified-expectedRemoteModifiedAt)>10) {
-    const latest=await fetchRemoteById(c.id);
+    const latest=await fetchRemoteById(c.id,context);
+    context.check();
     const latestRemote=latest?remoteToLocal(latest,loadedRefs):null;
     const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
     const latestMetadata=classMetadataState(c,latestRemote,latestModified);
@@ -550,13 +682,21 @@ async function pushClassUnlocked(c, options={}) {
   const base=resolveBaseForClass(c,loadedRefs);
   const curriculum=resolveCurriculumForClass(c,loadedRefs);
 
-  if (!base) {
+  if (!base || !loadedRefs.majcomById.has(base.majcom_id)) {
     patchState(c.id, {
       enabled: true,
       status: 'error',
       error: 'Cloud sync requires a catalog home installation.',
       lastAttemptAt: Date.now()
     });
+    return false;
+  }
+  const proposed = {...c, id:existing ? c.id : '', cloudScope:{baseId:base.id,majcomId:base.majcom_id,baseCode:base.code},
+    cloudSync:{...(c.cloudSync || {}),createdBy:existing?.created_by || context.userId}};
+  const knownOwners = [c.localCreatedByUserId,c.cloudSync?.createdBy].filter(Boolean);
+  if ((!existing && (!knownOwners.length || knownOwners.some(id => id !== context.userId))) ||
+    !window.RAPS_PERMISSIONS.canClass('manageClass',proposed)) {
+    patchState(c.id,{enabled:true,status:'error',error:'Your account cannot create or move a class into the selected installation.'});
     return false;
   }
   if (!curriculum) {
@@ -580,7 +720,7 @@ async function pushClassUnlocked(c, options={}) {
     start_date: c.date || null,
     end_date: c.closedAt ? new Date(c.closedAt).toISOString().slice(0,10) : null,
     status: mapLocalStatusToCloud(c),
-    created_by: existing?.created_by || c.cloudSync?.createdBy || cloud.user.id,
+    created_by: existing?.created_by || context.userId,
     app_data: serializeAppData(c),
     client_modified_at: isoFromMs(publishModified),
     source_device_id: getStore()?.deviceId?.() || null
@@ -604,6 +744,7 @@ async function pushClassUnlocked(c, options={}) {
     const result=await write
       .select('id, base_id, name, course_type, curriculum_version_id, start_date, end_date, status, created_by, created_at, updated_at, app_data, client_modified_at, source_device_id')
       .maybeSingle();
+    context.check();
 
     if (result.error) {
       patchState(c.id,{
@@ -615,7 +756,8 @@ async function pushClassUnlocked(c, options={}) {
     }
 
     if (!result.data) {
-      const latest=await fetchRemoteById(c.id);
+      const latest=await fetchRemoteById(c.id,context);
+      context.check();
       const latestRemote=latest?remoteToLocal(latest,loadedRefs):null;
       const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
       const latestMetadata=classMetadataState(c,latestRemote,latestModified);
@@ -679,11 +821,13 @@ async function pushClassUnlocked(c, options={}) {
       .insert(payload)
       .select('id, base_id, name, course_type, curriculum_version_id, start_date, end_date, status, created_by, created_at, updated_at, app_data, client_modified_at, source_device_id')
       .single();
+    context.check();
 
     if (result.error) {
       if (String(result.error?.code||'')==='23505') {
         if (casRetry<2) return pushClassUnlocked(c,{...options,casRetry:casRetry+1});
-        const latest=await fetchRemoteById(c.id);
+        const latest=await fetchRemoteById(c.id,context);
+        context.check();
         const latestRemote=latest?remoteToLocal(latest,loadedRefs):null;
         const latestModified=msFromIso(latest?.client_modified_at||latest?.updated_at);
         const latestMetadata=classMetadataState(c,latestRemote,latestModified);
@@ -748,12 +892,14 @@ async function pushClassUnlocked(c, options={}) {
 // This prevents out-of-order writes from regressing lifecycle state.
 function pushClass(c, options={}) {
   if (!c?.id) return Promise.resolve(false);
+  const context = options.context ? classRequestContext(options.context,c.id) : requestContext({classId:c.id});
+  if (!context) return Promise.resolve(false);
   getStore()?.recoverTrashActions?.();
 
   const previous = classPushTails.get(c.id) || Promise.resolve();
   const task = previous
     .catch(() => {})
-    .then(() => pushClassUnlocked(c, options));
+    .then(() => withContext(context,false, token => pushClassUnlocked(c, {...options,context:token})));
 
   classPushTails.set(c.id, task);
 
@@ -776,6 +922,8 @@ function remoteToLocal(row, loadedRefs) {
 
   return {
     id: row.id,
+    cloudScope:{ baseId:row.base_id || '', majcomId:base?.majcom_id || '', baseCode:base?.code || '', available:!!(base && majcom) },
+    cloudAccess:{ userId:loadedRefs.userId, assignedEvaluator:loadedRefs.assignedClassIds.has(row.id) },
     name: row.name || 'Untitled Class',
     tierId,
     roster: appData.roster || '',
@@ -833,11 +981,12 @@ function remoteToLocal(row, loadedRefs) {
   };
 }
 
-async function pullVisibleClasses() {
-  const client = getClient();
-  const store = getStore();
+async function pullVisibleClassesUnlocked(context) {
+  context.check();
+  const client = context.client;
+  const store = context.store;
   if (!client || !store) return 0;
-  const loadedRefs = await loadRefs();
+  const loadedRefs = await loadRefs(false,context);
 
   const data=[];
   const pageSize=250;
@@ -857,6 +1006,8 @@ async function pullVisibleClasses() {
 
   let imported = 0;
   for (let row of data) {
+    context.check();
+    if (store.isLocalCopyHidden?.(row.id)) continue;
     // A push may have read an older active revision before another device
     // deleted this class. Settle it and fetch the lifecycle again; skipping
     // the tombstone here used to leave a visible class labelled SYNCED.
@@ -864,10 +1015,13 @@ async function pullVisibleClasses() {
       while (classPushTails.has(row.id)) {
         await classPushTails.get(row.id).catch(()=>{});
       }
-      row=await fetchRemoteById(row.id);
+      row=await fetchRemoteById(row.id,context);
+      context.check();
       if (!row) continue; // Absence is not evidence of an authorized deletion.
     }
     const remote=remoteToLocal(row,loadedRefs);
+    if (!window.RAPS_PERMISSIONS.canClass('readClass',remote)) continue;
+    if (store.isLocalCopyHidden?.(row.id)) continue;
     remote.cloudSync={...(remote.cloudSync||{}),baseMetadataSignature:classMetadataSignature(remote)};
     const local=store.getClass(row.id);
     if (!local) {
@@ -985,13 +1139,36 @@ async function pullVisibleClasses() {
   return imported;
 }
 
-async function inspectClassConflict(c) {
+function pullVisibleClasses(context=null) {
+  return withContext(context || requestContext(),0,pullVisibleClassesUnlocked);
+}
+
+function loadClass(classId) {
+  if (typeof classId !== 'string' || !classId) return Promise.resolve(false);
+  const context = requestContext({classId,allowHidden:true});
+  return withContext(context,false,async token => {
+    const loadedRefs = await loadRefs(false,token);
+    const row = await fetchRemoteById(classId,token);
+    if (!row) throw new Error('This class is unavailable or your account no longer has access.');
+    const remote = remoteToLocal(row,loadedRefs);
+    if (!window.RAPS_PERMISSIONS.canClass('readClass',remote)) throw new Error('Your account does not have access to this class.');
+    token.check();
+    remote.cloudSync.baseMetadataSignature = classMetadataSignature(remote);
+    return !!token.store.upsertFromCloud(remote,{restoreLocalCopy:true,preserveStudents:true});
+  });
+}
+
+async function inspectClassConflict(c, context=null) {
+  if (!context) return withContext(requestContext({classId:c?.id}),null, token => inspectClassConflict(c,token));
+  context.check();
+  if (!window.RAPS_PERMISSIONS.canClass('resolveConflict',c)) throw new Error('You do not have permission to resolve this class conflict.');
   if (!c?.id) throw new Error('Class is unavailable.');
   if (!navigator.onLine) throw new Error('Class conflict resolution requires an online connection.');
-  const loadedRefs=await loadRefs();
-  const row=await fetchRemoteById(c.id);
+  const loadedRefs=await loadRefs(false,context);
+  const row=await fetchRemoteById(c.id,context);
   if (!row) throw new Error('The server class no longer exists.');
   const remote=remoteToLocal(row,loadedRefs);
+  if (!window.RAPS_PERMISSIONS.canClass('resolveConflict',remote)) throw new Error('Your account does not have permission to resolve this class conflict.');
   return {
     classId:c.id,
     localModifiedAt:Number(c.modifiedAt||0),
@@ -1004,12 +1181,15 @@ async function inspectClassConflict(c) {
   };
 }
 
-async function resolveClassConflict(c, strategy) {
+async function resolveClassConflict(c, strategy, context=null) {
+  if (!context) return withContext(requestContext({classId:c?.id}),false, token => resolveClassConflict(c,strategy,token));
+  context.check();
   strategy=String(strategy||'').toLowerCase();
   if (!['server','local'].includes(strategy)) throw new Error('Class conflict resolution must choose SERVER or LOCAL.');
   if (String(c?.cloudSync?.status||'')!=='conflict') throw new Error('This class is not currently in conflict.');
 
-  const inspection=await inspectClassConflict(c);
+  const inspection=await inspectClassConflict(c,context);
+  context.check();
   const expected=Number(c.cloudSync?.remoteModifiedAt||0);
   if (expected && Math.abs(inspection.remoteModifiedAt-expected)>10) {
     patchState(c.id,{
@@ -1023,7 +1203,8 @@ async function resolveClassConflict(c, strategy) {
   saveClassConflictRecovery(c,inspection,strategy);
 
   if (strategy==='server') {
-    const loadedRefs=await loadRefs();
+    const loadedRefs=await loadRefs(false,context);
+    context.check();
     const remote=remoteToLocal(inspection.serverSnapshot,loadedRefs);
     remote.cloudSync={...(remote.cloudSync||{}),baseMetadataSignature:classMetadataSignature(remote)};
     getStore()?.upsertFromCloud?.(remote,{preserveStudents:true});
@@ -1042,6 +1223,7 @@ async function resolveClassConflict(c, strategy) {
   }
 
   const ok=await pushClass(c,{
+    context,
     forceConflict:true,
     expectedRemoteModifiedAt:inspection.remoteModifiedAt
   });
@@ -1056,7 +1238,8 @@ async function resolveClassConflict(c, strategy) {
   return true;
 }
 
-async function pushPendingClasses() {
+async function pushPendingClasses(context) {
+  context.check();
   const store = getStore();
   if (!store) return { attempted:0, synced:0 };
   const classes = store.getClasses().filter(c =>
@@ -1068,8 +1251,10 @@ async function pushPendingClasses() {
   let synced = 0;
   for (const c of classes) {
     try {
-      if (await pushClass(c)) synced++;
+      if (await pushClass(c,{context})) synced++;
+      context.check();
     } catch (error) {
+      if (!context.current()) throw error;
       patchState(c.id,{status:navigator.onLine?'error':'offline',error:shortError(error)});
       console.warn('RaPS class sync failed', c.id, error);
     }
@@ -1079,9 +1264,10 @@ async function pushPendingClasses() {
 
 function queueUnconfirmedTrash() {
   const store=getStore();
-  if (!store || getCloud()?.role!=='enterprise_admin') return;
+  if (!store || !window.RAPS_PERMISSIONS?.hasRole('enterprise_admin')) return;
   for (const c of store.getClasses()) {
     if (!c || isClosedClass(c)) continue;
+    if (store.isLocalCopyHidden?.(c.id)) continue;
     if (store.ownsTrashAction?.(c.id)===false) continue;
     const state=c.cloudSync||{};
     if (state.trashAction) {
@@ -1103,28 +1289,26 @@ function queueUnconfirmedTrash() {
 }
 
 async function syncAll({ silent=false }={}) {
-  if (syncing) return;
-  const cloud = getCloud();
-  if (!cloud?.user?.id) return;
+  if (syncing && syncing.current()) return;
+  const context = requestContext();
+  if (!context) return;
 
-  if (!navigator.onLine) {
-    setGlobalStatus('Offline · class changes queued locally', 'offline');
-    return;
-  }
-
-  syncing = true;
+  syncing = context;
   setButtonBusy(true);
   setGlobalStatus('Syncing classes…', 'syncing');
 
   try {
+    await context.ready();
+    context.check();
     getStore()?.recoverTrashActions?.();
     queueUnconfirmedTrash();
-    refs = null;
-    await loadRefs(true);
-    const pulled = await pullVisibleClasses();
+    await loadRefs(true,context);
+    const pulled = await pullVisibleClasses(context);
+    context.check();
     getStore()?.recoverTrashActions?.();
     queueUnconfirmedTrash();
-    const pushed = await pushPendingClasses();
+    const pushed = await pushPendingClasses(context);
+    context.check();
     const total = getStore()?.getClasses()?.filter(c => c?.cloudSync?.enabled)?.length || 0;
     const remaining=getStore()?.getClasses()?.filter(c=>c?.cloudSync?.enabled &&
       (c.cloudSync.trashAction || classPushTails.has(c.id) || ['pending','offline','error','conflict','syncing'].includes(c.cloudSync.status)))||[];
@@ -1134,11 +1318,14 @@ async function syncAll({ silent=false }={}) {
     }
     window.dispatchEvent(new CustomEvent('raps-class-sync-complete',{detail:{pulled,pushed:pushed.synced,total}}));
   } catch (error) {
+    if (!context.current()) return;
     console.error('RaPS class sync error', error);
     setGlobalStatus(`Class sync error · ${shortError(error)}`, 'error');
   } finally {
-    syncing = false;
-    setButtonBusy(false);
+    if (syncing === context) {
+      syncing = false;
+      if (context.current()) setButtonBusy(false);
+    }
   }
 }
 
@@ -1146,6 +1333,7 @@ function queueClass(classId) {
   const store = getStore();
   const c = store?.getClass(classId);
   if (!c) return;
+  if (store.isLocalCopyHidden?.(classId) || !window.RAPS_PERMISSIONS?.canClass('manageClass',c,{online:false})) return;
   if (String(c?.cloudSync?.status||'')==='conflict' && !c.cloudSync?.trashAction) {
     patchState(classId,{
       enabled:true,
@@ -1155,12 +1343,6 @@ function queueClass(classId) {
     return;
   }
   if (isClosedClass(c)) {
-    patchState(classId, {
-      enabled:true,
-      status:'synced',
-      error:'',
-      lastSyncedAt:Date.now()
-    });
     return;
   }
   patchState(classId, {
@@ -1168,10 +1350,12 @@ function queueClass(classId) {
     status:navigator.onLine ? 'pending' : 'offline',
     error:''
   });
-  if (navigator.onLine && getCloud()?.user?.id) {
-    window.setTimeout(() => pushClass(c).then(ok=>{
-      if (!ok) setGlobalStatus('Class change is not synchronized · review sync status','error');
+  const context = requestContext({classId});
+  if (context) {
+    window.setTimeout(() => pushClass(c,{context}).then(ok=>{
+      if (context.current() && !ok) setGlobalStatus('Class change is not synchronized · review sync status','error');
     }).catch(error => {
+      if (!context.current()) return;
       patchState(c.id,{status:'error',error:shortError(error)});
       setGlobalStatus(`Class sync error · ${shortError(error)}`,'error');
     }), 50);
@@ -1194,10 +1378,10 @@ window.addEventListener('raps-local-class-change', event => {
 window.addEventListener('raps-cloud-identity', event => {
   bindUi();
   const detail = event.detail || {};
-  if (!detail?.user?.id) return;
-  if (lastIdentityUserId !== detail.user.id) {
-    refs = null;
-    lastIdentityUserId = detail.user.id;
+  if (!detail?.user?.id) {
+    setButtonBusy(false);
+    setGlobalStatus('Sign in to synchronize classes.','');
+    return;
   }
   syncAll({ silent:true });
 });
@@ -1227,12 +1411,14 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.12-web.4';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.12-web.7';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,
   pushClass,
   pullVisibleClasses,
+  loadClass,
+  classMetadataSignature,
   inspectClassConflict,
   resolveClassConflict
 });

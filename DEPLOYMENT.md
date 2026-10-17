@@ -4,6 +4,34 @@ The frontend is a static GitHub Pages site. In **Settings → Pages**, select **
 
 The app stores working records on the device and synchronizes authorized records with Supabase. Reopening a cached shell offline does not make account administration, password changes, or server assessment actions available offline.
 
+## Web.7 role hardening
+
+Follow the deployment sequence in [PERMISSIONS.md](PERMISSIONS.md). This release
+requires the account and operational permission migrations and updated
+`admin-invite-user` and `admin-manage-user` handlers. Website publication alone
+does not apply them. The existing access-request submission migration and
+`request-access` handler remain prerequisites from web.6.
+
+For the NUC deployment, keep the API at `https://raps-supabase.asuscomm.com` and the
+canonical app URL at `https://daftccc.github.io/DAF-TCCC-RaPS-WEB/`. No hosted
+Supabase Cloud project is required. Capture and back up the running database and
+functions before applying new migrations. Install each reviewed migration once;
+the guard migrations deliberately stop on duplicate or unsupported contracts.
+
+The NUC currently has different Compose override sets for individual services.
+Use the running service's recorded project/files and recreate only that service
+with `--no-deps --pull never --no-build`. Do not recreate the entire stack to
+install a frontend or function update. The separate FieldReady stack, Caddy
+routing, router rules, and clinical grading definitions are outside this update.
+
+The supplied NUC inspection reported `GOTRUE_DISABLE_SIGNUP=false` and no explicit
+password minimum. Before completing this rollout, set public sign-up disabled
+and a minimum password length of at least 12 in the Auth service's actual Compose
+mapping. Its recorded files were `docker-compose.yml` and
+`docker-compose.caddy.yml` under `/home/nuc/supabase-project`; the functions
+service used a different override. Verify the running Auth values after its
+targeted recreation. Keep the existing SMTP secrets in the host configuration.
+
 ## Account and email configuration
 
 Keep public sign-up disabled. A person requests access; an Enterprise Admin approves the request or invites them directly and assigns the approved role and scope. The person follows the invitation to set their own password. Requesting access, verifying an email link, or setting a password does not itself grant a RaPS role.

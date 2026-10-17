@@ -9,6 +9,78 @@ const getClient = () => window.RAPS_SUPABASE;
 const getCloud = () => window.RAPS_CLOUD;
 const getStore = () => window.RAPS_CLASS_STORE;
 
+function permissionContext(c, action) {
+  const permissions = window.RAPS_PERMISSIONS;
+  if (!permissions?.snapshot || !permissions?.isCurrent || !permissions?.canClass?.(action, c)) return null;
+  const identity = permissions.snapshot();
+  const check = () => {
+    const current = getStore()?.getClass?.(c.id);
+    if (!permissions.isCurrent(identity) || !permissions.canClass(action, current || c)
+      || getStore()?.isLocalCopyHidden?.(c.id) || (getStore()?.getClass && !current)) {
+      throw new Error('Session or class permissions changed. Sign in and sync again.');
+    }
+  };
+  try { check(); } catch { return null; }
+  return boundRequestContext(identity, check);
+}
+// Each operation owns its JWT. The shared SDK may adopt another tab's
+// session before the cloud identity event reaches this tab.
+let requestClientId = 0;
+function boundRequestContext(identity, scopeCheck) {
+  const source = getClient();
+  if (!source?.auth?.getSession) return null;
+  let bound = null, accessToken = '', preparation = null, abandoned = false;
+  const abort = () => {
+    abandoned = true;
+    const error = new Error('Your sign-in session changed. Sign in and sync again.');
+    error.code = 'RAPS_SESSION_CHANGED';
+    throw error;
+  };
+  const check = () => {
+    if (abandoned || source !== getClient()) abort();
+    scopeCheck();
+  };
+  const session = async () => {
+    check();
+    let result;
+    try {result = await source.auth.getSession();} catch {abort();}
+    check();
+    const value = result?.data?.session;
+    if (result?.error || typeof value?.access_token !== 'string' || !value.access_token.trim()
+      || value.user?.id !== identity.userId
+      || (value.expires_at != null && (!Number.isFinite(Number(value.expires_at)) || Number(value.expires_at) * 1000 <= Date.now()))) abort();
+    return value.access_token;
+  };
+  const verify = async () => {
+    if (!accessToken || await session() !== accessToken) abort();
+    check();
+  };
+  const ready = () => preparation ||= (async () => {
+    accessToken = await session();
+    const config = window.RAPS_CLOUD_CONFIG;
+    if (!config?.projectUrl || !config?.publishableKey || !window.supabase?.createClient) abort();
+    bound = window.supabase.createClient(config.projectUrl, config.publishableKey, {
+      auth:{persistSession:false, autoRefreshToken:false, detectSessionInUrl:false, storageKey:`raps-roster-request-${++requestClientId}`},
+      global:{headers:{Authorization:`Bearer ${accessToken}`}}
+    });
+    await verify();
+  })();
+  const wrap = query => new Proxy(query, {
+    get(target, key) {
+      if (key === 'then') return (resolve, reject) => Promise.resolve()
+        .then(verify).then(() => target)
+        .then(async result => {await verify(); return result;}).then(resolve, reject);
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? (...args) => {check(); return wrap(value.apply(target, args));} : value;
+    }
+  });
+  return {identity, check, ready, verify, client:{from(table) {
+    check();
+    if (!bound) abort();
+    return wrap(bound.from(table));
+  }}};
+}
+
 function shortError(error) {
   return String(error?.message || error || 'Unknown sync error').slice(0, 240);
 }
@@ -27,15 +99,20 @@ function isVoidedEvaluation(row) {
 function isClosedClass(c) {
   return !!c && (!!c.closedAt || c.status === 'closed');
 }
-async function remoteClassStatus(classId) {
-  const client = getClient();
+async function remoteClassStatus(classId, client = getClient()) {
   if (!client || !classId) return '';
   const { data, error } = await client
     .from('classes')
-    .select('status')
+    .select('status,created_by,base_id,bases(id,code,majcom_id)')
     .eq('id', classId)
     .maybeSingle();
   if (error) throw error;
+  if (data) {
+    const c = getStore()?.getClass?.(classId);
+    const scoped = {...c, created_by:data.created_by || '', localCreatedByUserId:'',
+      cloudSync:{...c?.cloudSync,createdBy:data.created_by || ''}, cloudScope:{baseId:data.base_id,baseCode:data.bases?.code || '',majcomId:data.bases?.majcom_id || ''}};
+    if (!window.RAPS_PERMISSIONS?.canClass?.('manageRoster', scoped)) throw new Error('You do not have permission to manage this class roster.');
+  }
   return String(data?.status || '');
 }
 function reconcileClassLifecycleFromEvaluations(classes, events, evaluations) {
@@ -97,8 +174,7 @@ function evaluationStatus(a) {
   if (a?.finalizedAt) return 'finalized';
   return a?.startedAt ? 'in_progress' : 'draft';
 }
-async function lookupBaseAndCurriculum(c) {
-  const client = getClient();
+async function lookupBaseAndCurriculum(c, client) {
   const tier = window.TCCC_TIERS?.[String(c?.tierId || '')];
   const courseMap = { '1':'ASM', '2':'CLS', '3':'CMC', '4':'CPP' };
   const course = courseMap[String(c?.tierId || '')];
@@ -119,9 +195,7 @@ async function lookupBaseAndCurriculum(c) {
   return { base: baseResult.data, curriculum: curriculumResult.data };
 }
 
-async function ensureEvent(c, refs) {
-  const client = getClient();
-  const cloud = getCloud();
+async function ensureEvent(c, refs, client, userId) {
   const payload = {
     id: c.id,
     class_id: c.id,
@@ -131,7 +205,7 @@ async function ensureEvent(c, refs) {
     curriculum_version_id: refs.curriculum.id,
     scenario_id: null,
     status: eventStatus(c),
-    created_by: c.cloudSync?.createdBy || cloud.user.id,
+    created_by: c.cloudSync?.createdBy || userId,
     app_data: {
       schemaVersion: 1,
       localClassId: c.id,
@@ -177,16 +251,14 @@ async function ensureEvent(c, refs) {
   return data;
 }
 
-async function pushParticipants(c, refs) {
-  const client = getClient();
-  const cloud = getCloud();
+async function pushParticipants(c, refs, client, userId) {
 
   const rows = (c.students || []).map(s => ({
     id: s.id,
     participant_identifier: `RAPS-${s.id}`,
     display_name: s.name || null,
     home_base_id: refs.base.id,
-    created_by: cloud.user.id,
+    created_by: userId,
     app_data: {
       schemaVersion: 1,
       localStudentId: s.id,
@@ -251,9 +323,7 @@ async function pushParticipants(c, refs) {
   return data || [];
 }
 
-async function pushEvaluationShells(c, refs) {
-  const client = getClient();
-  const cloud = getCloud();
+async function pushEvaluationShells(c, refs, client, userId) {
   const candidates = [];
 
   for (const s of c.students || []) {
@@ -262,6 +332,8 @@ async function pushEvaluationShells(c, refs) {
         !a?.id
         || a?.voidedAt
         || String(a?.cloudStatus || '').toLowerCase() === 'voided'
+        || (a?.cloudEvaluatorUserId && String(a.cloudEvaluatorUserId) !== String(userId))
+        || (a?.startedByUserId && String(a.startedByUserId) !== String(userId))
       ) continue;
       candidates.push({ s, attemptKey, a });
     }
@@ -282,7 +354,7 @@ async function pushEvaluationShells(c, refs) {
       id: a.id,
       event_id: c.id,
       participant_id: s.id,
-      evaluator_id: cloud.user.id,
+      evaluator_id: userId,
       curriculum_version_id: refs.curriculum.id,
       attempt_number: Number(a.attemptNo || attemptKey || 1),
       status: evaluationStatus(a),
@@ -325,9 +397,12 @@ async function pushEvaluationShells(c, refs) {
   return data || [];
 }
 async function pushClassRosterAndShells(c) {
-  const client = getClient();
   const cloud = getCloud();
-  if (!client || !cloud?.user?.id || !c?.id) return false;
+  const context = c?.id && permissionContext(c, 'manageRoster');
+  if (!getClient() || !cloud?.user?.id || !context) return false;
+  await context.ready();
+  const client = context.client;
+  const userId = String(cloud.user.id);
   if (!navigator.onLine) return false;
   if (c.deletedAt || getStore()?.getClass?.(c.id)?.deletedAt) return false;
   if (String(c?.cloudSync?.status||'')==='conflict') {
@@ -340,24 +415,21 @@ async function pushClassRosterAndShells(c) {
 
   // Closed classes are retention records. All normal browser synchronization
   // becomes pull-only after authoritative closure.
-  const serverStatus = isClosedClass(c) ? 'completed' : await remoteClassStatus(c.id);
+  const serverStatus = isClosedClass(c) ? 'completed' : await remoteClassStatus(c.id, client);
   if (serverStatus === 'archived') return false;
   if (isClosedClass(c) || serverStatus === 'completed') {
-    getStore()?.patchRosterCloudState?.(c.id, {
-      status:'synced',
-      error:'',
-      lastSyncedAt:Date.now()
-    });
-    return true;
+    // A terminal shortcut does not prove local roster edits were uploaded.
+    return false;
   }
 
-  if (rosterPushInFlight.has(c.id)) {
-    return rosterPushInFlight.get(c.id);
-  }
+  const inFlight = rosterPushInFlight.get(c.id);
+  if (inFlight && window.RAPS_PERMISSIONS.isCurrent(inFlight.identity)) return inFlight.task;
+  if (inFlight) rosterPushInFlight.delete(c.id);
 
   const task = (async () => {
     if (window.RAPS_CLASS_SYNC?.pushClass) {
       if (await window.RAPS_CLASS_SYNC.pushClass(c) === false) return false;
+      await context.verify();
     }
 
     // Class synchronization can replace the local object with a server
@@ -366,29 +438,39 @@ async function pushClassRosterAndShells(c) {
     if (store?.getClass && !current) return false;
     c = current || c;
     if (c.deletedAt || isClosedClass(c)) return false;
-    const latestStatus = await remoteClassStatus(c.id);
+    const latestStatus = await remoteClassStatus(c.id, client);
     if (latestStatus === 'archived' || latestStatus === 'completed') return false;
 
-    const refs = await lookupBaseAndCurriculum(c);
-    await ensureEvent(c, refs);
-    await pushParticipants(c, refs);
-    await pushEvaluationShells(c, refs);
+    const rosterSignature = getStore()?.localRosterSignature?.(c);
+    const upload = JSON.parse(JSON.stringify(c));
+    const refs = await lookupBaseAndCurriculum(upload, client);
+    await ensureEvent(upload, refs, client, userId);
+    await pushParticipants(upload, refs, client, userId);
+    await pushEvaluationShells(upload, refs, client, userId);
+    const {data:serverParticipants,error:verifyError} = await client.from('participants')
+      .select('id,display_name,app_data').eq('app_data->>classId',c.id);
+    if (verifyError) throw verifyError;
+    context.check();
+    const serverStudents = (serverParticipants || []).map(p => ({id:p.id, name:p.display_name || p.app_data?.trainingId || 'Cloud participant', rank:p.app_data?.rank || '', trainingId:p.app_data?.trainingId || ''}));
+    const unchanged = rosterSignature && rosterSignature === getStore()?.localRosterSignature?.(c)
+      && rosterSignature === getStore()?.localRosterSignature?.({...c, students:serverStudents});
 
     getStore()?.patchRosterCloudState?.(c.id, {
-      status:'synced',
+      status:unchanged?'synced':'pending',
       error:'',
-      lastSyncedAt:Date.now()
+      lastSyncedAt:Date.now(),
+      ...(unchanged ? {syncedRosterSignature:rosterSignature, syncedByUserId:userId} : {})
     });
 
     return true;
   })();
 
-  rosterPushInFlight.set(c.id, task);
+  rosterPushInFlight.set(c.id, {task,identity:context.identity});
 
   try {
     return await task;
   } finally {
-    if (rosterPushInFlight.get(c.id) === task) {
+    if (rosterPushInFlight.get(c.id)?.task === task) {
       rosterPushInFlight.delete(c.id);
     }
   }
@@ -445,11 +527,16 @@ function makeShellAttempt(row, c, s) {
 }
 
 async function pullRosterAndShells() {
-  const client = getClient();
-  const store = getStore();
-  if (!client || !store) return {participants:0,evaluations:0};
-
-  const classes = store.getClasses().filter(c => c?.cloudSync?.enabled);
+  const store = getStore(), permissions = window.RAPS_PERMISSIONS;
+  if (!getClient() || !store || !permissions?.snapshot || !permissions?.isCurrent) return {participants:0,evaluations:0};
+  const identity = permissions.snapshot();
+  const check = () => { if (!permissions.isCurrent(identity)) throw new Error('Session or permissions changed during roster sync.'); };
+  try { check(); } catch { return {participants:0,evaluations:0}; }
+  const context = boundRequestContext(identity, check);
+  if (!context) return {participants:0,evaluations:0};
+  await context.ready();
+  const client = context.client;
+  const classes = store.getClasses().filter(c => c?.cloudSync?.enabled && !store.isLocalCopyHidden?.(c.id) && permissions.canClass('readClass', c));
   if (!classes.length) return {participants:0,evaluations:0};
 
   const classIds = classes.map(c => c.id);
@@ -460,24 +547,11 @@ async function pullRosterAndShells() {
   if (eventError) throw eventError;
 
   const eventIds = (events || []).map(e => e.id);
-  if (!eventIds.length) return {participants:0,evaluations:0};
-
-  const { data: evals, error: evalError } = await client
+  const { data: evals, error: evalError } = eventIds.length ? await client
     .from('evaluations')
     .select('id, event_id, participant_id, evaluator_id, attempt_number, status, started_at, updated_at, client_modified_at, source_device_id, app_data')
-    .in('event_id', eventIds);
+    .in('event_id', eventIds) : {data:[],error:null};
   if (evalError) throw evalError;
-
-  // Evaluation lifecycle is authoritative for whether an open class has
-  // started. A second browser may pull the class row while it still says
-  // "draft", then discover an already-started evaluation moments later.
-  // Reconcile the local lifecycle from non-voided started evaluations before
-  // the push phase so both the local UI and server class/event status converge.
-  const lifecycleChanges = reconcileClassLifecycleFromEvaluations(
-    classes,
-    events || [],
-    evals || []
-  );
 
   // Pull the full class roster even when participants do not yet have
   // evaluation rows.  pushParticipants() persists app_data.classId for
@@ -493,6 +567,13 @@ async function pullRosterAndShells() {
     participants.push(...(data || []));
   }
 
+  // Merge only after all requests have passed their identity checks.
+  const lifecycleChanges = reconcileClassLifecycleFromEvaluations(
+    classes.filter(c => store.getClass(c.id) === c && !store.isLocalCopyHidden?.(c.id) && permissions.canClass('readClass',c)),
+    events || [],
+    evals || []
+  );
+
   const participantById = new Map(participants.map(p => [p.id, p]));
   const eventById = new Map((events || []).map(e => [e.id, e]));
   let participantImports = 0;
@@ -503,7 +584,7 @@ async function pullRosterAndShells() {
   for (const p of participants) {
     const app = p.app_data && typeof p.app_data === 'object' ? p.app_data : {};
     const c = store.getClass(app.classId);
-    if (!c) continue;
+    if (!c || store.isLocalCopyHidden?.(c.id) || !permissions.canClass('readClass', c)) continue;
 
     let s = (c.students || []).find(x => x.id === p.id);
     if (!s) {
@@ -535,7 +616,7 @@ async function pullRosterAndShells() {
 
     const event = eventById.get(row.event_id);
     const c = store.getClass(event?.class_id);
-    if (!c) continue;
+    if (!c || store.isLocalCopyHidden?.(c.id) || !permissions.canClass('readClass', c)) continue;
 
     const s = (c.students || []).find(x => x.id === row.participant_id);
     if (!s) continue;
@@ -551,7 +632,7 @@ async function pullRosterAndShells() {
 
     const event = eventById.get(row.event_id);
     const c = store.getClass(event?.class_id);
-    if (!c) continue;
+    if (!c || store.isLocalCopyHidden?.(c.id) || !permissions.canClass('readClass', c)) continue;
 
     const p = participantById.get(row.participant_id);
     if (!p) continue;
@@ -594,11 +675,22 @@ async function pullRosterAndShells() {
   }
 
   for (const c of classes) {
-    store.patchRosterCloudState?.(c.id, {
-      status:'synced',
-      error:'',
-      lastSyncedAt:Date.now()
-    });
+    check();
+    if (store.getClass(c.id) !== c || store.isLocalCopyHidden?.(c.id) || !permissions.canClass('readClass', c)) continue;
+    const serverStudents = participants.filter(p => String(p.app_data?.classId || '') === String(c.id)).map(p => ({
+      id:p.id, name:p.display_name || p.app_data?.trainingId || 'Cloud participant',
+      rank:p.app_data?.rank || '', trainingId:p.app_data?.trainingId || ''
+    }));
+    const localSignature = store.localRosterSignature?.(c);
+    const serverSignature = store.localRosterSignature?.({...c, students:serverStudents});
+    // A pull can add missing server participants without publishing local edits.
+    // Certify a cache for removal only when its complete roster matches server.
+    if (localSignature && localSignature === serverSignature) {
+      store.patchRosterCloudState?.(c.id, {
+        status:'synced', error:'', lastSyncedAt:Date.now(),
+        syncedRosterSignature:localSignature, syncedByUserId:String(getCloud()?.user?.id || '')
+      });
+    }
   }
 
   return {
@@ -622,12 +714,15 @@ async function syncAll({silent=false}={}) {
   }
 
   busy = true;
+  const identity = window.RAPS_PERMISSIONS?.snapshot?.();
   try {
     await pullRosterAndShells();
+    if (!identity || !window.RAPS_PERMISSIONS?.isCurrent?.(identity)) return;
     for (const c of store.getClasses().filter(x => x?.cloudSync?.enabled && !x.deletedAt && !isClosedClass(x))) {
       try {
         await pushClassRosterAndShells(c);
       } catch (error) {
+        if (error?.code === 'RAPS_SESSION_CHANGED' || !window.RAPS_PERMISSIONS?.isCurrent?.(identity)) return;
         console.warn('RaPS roster/event sync failed', c.id, error);
         store.patchRosterCloudState?.(c.id,{
           status:'error',
@@ -636,6 +731,8 @@ async function syncAll({silent=false}={}) {
         });
       }
     }
+  } catch (error) {
+    if (identity && window.RAPS_PERMISSIONS?.isCurrent?.(identity)) console.warn('Roster sync failed', error);
   } finally {
     busy = false;
   }
@@ -646,20 +743,16 @@ window.addEventListener('raps-local-class-change', event => {
   const c = getStore()?.getClass(id);
   if (!c || !c.cloudSync?.enabled) return;
   if (c.deletedAt) return;
-  if (isClosedClass(c)) {
-    getStore()?.patchRosterCloudState?.(id,{
-      status:'synced',
-      error:'',
-      lastSyncedAt:Date.now()
-    });
-    return;
-  }
+  if (isClosedClass(c)) return;
   getStore()?.patchRosterCloudState?.(id,{
     status:navigator.onLine?'pending':'offline',
     error:''
   });
-  if (navigator.onLine) {
+  const context = permissionContext(c, 'manageRoster');
+  if (navigator.onLine && context) {
     window.setTimeout(() => pushClassRosterAndShells(c).catch(error => {
+      if (error?.code === 'RAPS_SESSION_CHANGED') return;
+      try { context.check(); } catch { return; }
       getStore()?.patchRosterCloudState?.(id,{status:'error',error:shortError(error)});
     }), 150);
   }
@@ -667,8 +760,8 @@ window.addEventListener('raps-local-class-change', event => {
 
 window.addEventListener('raps-cloud-identity', event => {
   const userId = event.detail?.user?.id;
+  if (userId !== lastIdentityUserId) { rosterPushInFlight.clear(); lastIdentityUserId = userId || null; }
   if (!userId) return;
-  if (userId !== lastIdentityUserId) lastIdentityUserId = userId;
   syncAll({silent:true});
 });
 
@@ -687,6 +780,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.11-web.12';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.12-web.7';
 
 })();
