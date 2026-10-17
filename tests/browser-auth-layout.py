@@ -3,8 +3,9 @@
 Run: python tests/browser-auth-layout.py
 Requires Python Playwright and Chromium (or set CHROMIUM_EXECUTABLE).
 The real index, stylesheet, assets, and cloud-auth.js are loaded from this checkout.
-Only the Supabase SDK/config and read-only access catalog are synthetic. Any auth
-or data mutation, external request, or unexpected request fails the test.
+Only the Supabase SDK/config, in-memory secure-link exchange, identity reads, and
+read-only access catalog are synthetic. Account mutations, external requests, and
+unexpected requests fail the test. No credentials or links are sent to a server.
 Screenshots are written under /tmp/raps-auth-layout.
 """
 
@@ -33,11 +34,20 @@ GATES = {
     'sign-in': '#cloudAuthGate',
     'request-access': '#cloudRequestAccessGate',
     'activation': '#cloudActivationGate',
+    'change-password': '#cloudChangePasswordGate',
+    'verification-code': '#cloudChangePasswordGate',
 }
 FAKE_SDK = r"""
 window.__authMutations=[];
 window.__authReads=[];
+window.__layoutSessionExchanges=[];
 window.RAPS_CLOUD_CONFIG={projectUrl:location.origin,publishableKey:'synthetic-test-key'};
+const layoutUser={id:'synthetic-layout-user',
+  email:'syntheticaccount1234567890123456789012345678901234567890@example.test'};
+const layoutSession={user:layoutUser,access_token:'synthetic-layout-access',
+  refresh_token:'synthetic-layout-refresh'};
+let activeSession=new URL(location.href).searchParams.get('layout_account')==='1'?layoutSession:null;
+let authCallback=null;
 const rejectOperation=name=>(...args)=>{
   window.__authMutations.push(name);
   throw new Error('Cloud operation prohibited in isolated layout test: '+name);
@@ -45,16 +55,45 @@ const rejectOperation=name=>(...args)=>{
 const fakeAuth=new Proxy({
   async getSession(){
     window.__authReads.push('getSession');
-    const activation=new URL(location.href).searchParams.get('raps_activation')==='1';
-    return {data:{session:activation?{user:{id:'synthetic-activation-user'}}:null},error:null};
+    return {data:{session:activeSession},error:null};
   },
-  onAuthStateChange(){
+  async getUser(){
+    window.__authReads.push('getUser');
+    return {data:{user:activeSession?.user||null},error:null};
+  },
+  async setSession(tokens){
+    if(tokens.access_token!==layoutSession.access_token||tokens.refresh_token!==layoutSession.refresh_token)
+      return rejectOperation('auth.setSession with unexpected fixture tokens')();
+    window.__layoutSessionExchanges.push('verified synthetic implicit link');
+    activeSession=layoutSession;
+    setTimeout(()=>authCallback?.('PASSWORD_RECOVERY',activeSession),0);
+    return {data:{session:activeSession,user:activeSession.user},error:null};
+  },
+  onAuthStateChange(callback){
     window.__authReads.push('onAuthStateChange');
+    authCallback=callback;
+    setTimeout(()=>callback('INITIAL_SESSION',activeSession),0);
     return {data:{subscription:{unsubscribe(){}}}};
   }
 },{get:(target,key)=>key in target?target[key]:rejectOperation('auth.'+String(key))});
+const identityRows=table=>{
+  if(table==='profiles')return [{id:layoutUser.id,email:layoutUser.email,display_name:layoutUser.email}];
+  if(table==='memberships')return [{id:'synthetic-layout-membership',user_id:layoutUser.id,
+    active:true,role:'evaluator',base_id:'test-base',
+    bases:{id:'test-base',code:'TEST',name:'Synthetic Installation'}}];
+  return rejectOperation('unexpected table '+table)();
+};
+const identityQuery=table=>{
+  const query={
+    select(){window.__authReads.push('select '+table);return query;},
+    eq(){return query;},
+    async maybeSingle(){return {data:identityRows(table)[0]||null,error:null};},
+    then(resolve,reject){return Promise.resolve({data:identityRows(table),error:null}).then(resolve,reject);}
+  };
+  return new Proxy(query,{get:(target,key)=>key in target?target[key]:rejectOperation('query.'+String(key))});
+};
 window.supabase={createClient:()=>({auth:fakeAuth,
-  from:rejectOperation('from'),rpc:rejectOperation('rpc'),
+  from:identityQuery,rpc:rejectOperation('rpc'),
   functions:{invoke:rejectOperation('functions.invoke')}})};
 """
 
@@ -72,7 +111,7 @@ def scale_text(page, multiplier):
     # This deliberately enlarges rendered text, not the card or viewport. Read all
     # sizes first so inherited sizes are not multiplied once for each ancestor.
     page.evaluate('''multiplier => {
-      const elements=[...document.querySelectorAll('.cloudAuthGate,.cloudAuthGate *')];
+      const elements=[...document.querySelectorAll('.cloudAuthGate,.cloudAuthGate *,.cloudIdentityBar,.cloudIdentityBar *')];
       const sizes=elements.map(element=>parseFloat(getComputedStyle(element).fontSize));
       elements.forEach((element,index)=>element.style.fontSize=(sizes[index]*multiplier)+'px');
     }''', multiplier)
@@ -80,6 +119,7 @@ def scale_text(page, multiplier):
 
 def main():
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    (ARTIFACTS / 'fixture-error.json').unlink(missing_ok=True)
     checks = []
     failures = []
     unexpected_requests = []
@@ -87,6 +127,7 @@ def main():
     page_errors = []
     mutations = []
     screenshots = []
+    session_exchanges = []
 
     def check(condition, description):
         (checks if condition else failures).append(description)
@@ -125,17 +166,40 @@ def main():
         context.route('**/*', fulfill)
 
         for name, width, height, text_multiplier in VIEWPORTS:
-            page = context.new_page()
-            page.set_viewport_size({'width': width, 'height': height})
-            page.set_default_timeout(7000)
-            page.on('pageerror', lambda error: page_errors.append(str(error)))
             for gate_name, selector in GATES.items():
-                suffix = '/?raps_activation=1' if gate_name == 'activation' else '/'
+                # Separate tabs isolate pending activation sessionStorage: opening
+                # an unrelated signed-in fixture must not resume the prior case.
+                page = context.new_page()
+                page.set_viewport_size({'width': width, 'height': height})
+                page.set_default_timeout(7000)
+                page.on('pageerror', lambda error: page_errors.append(str(error)))
+                password_change = gate_name in ('change-password', 'verification-code')
+                if gate_name == 'activation':
+                    suffix = ('/?raps_activation=1#type=recovery&access_token=synthetic-layout-access'
+                              '&refresh_token=synthetic-layout-refresh')
+                else:
+                    suffix = '/?layout_account=1' if password_change else '/'
                 page.goto(ORIGIN + suffix, wait_until='networkidle')
                 if gate_name == 'request-access':
                     page.locator('#cloudRequestAccessBtn').click()
                     expect(page.locator('#cloudRequestAccessScope option')).to_have_count(1)
                     expect(page.locator('#cloudRequestAccessMessage')).to_have_text('')
+                if password_change:
+                    try:
+                        expect(page.locator('#cloudChangePasswordBtn')).to_be_enabled()
+                    except AssertionError:
+                        diagnostic = page.evaluate('''()=>({href:location.href,
+                          reads:window.__authReads,mutations:window.__authMutations,
+                          identity:window.RAPS_CLOUD,status:document.getElementById('cloudIdentityText')?.textContent,
+                          message:document.getElementById('cloudAuthMessage')?.textContent})''')
+                        (ARTIFACTS / 'fixture-error.json').write_text(json.dumps(diagnostic, indent=2))
+                        raise
+                    page.locator('#cloudChangePasswordBtn').click()
+                    if gate_name == 'verification-code':
+                        # Exercise the actual optional panel's layout without sending
+                        # a code or submitting the password form; flow tests cover
+                        # the server response that reveals this panel.
+                        page.locator('#cloudChangePasswordVerification').evaluate('element=>element.hidden=false')
                 gate = page.locator(selector)
                 expect(gate).to_be_visible()
                 page.wait_for_function('selector=>document.querySelector(selector).contains(document.activeElement)', arg=selector)
@@ -147,7 +211,7 @@ def main():
                 if gate_name != 'request-access':
                     check(gate.locator('h1').evaluate('element=>element===document.activeElement'),
                           prefix + ': opening focuses the heading without forcing a mobile keyboard')
-                focusable = gate.locator('input:enabled,select:enabled,textarea:enabled,button:enabled,a[href]')
+                focusable = gate.locator('input:enabled:visible,select:enabled:visible,textarea:enabled:visible,button:enabled:visible,a[href]:visible')
                 first_control, last_control = focusable.first, focusable.last
                 last_control.focus()
                 page.keyboard.press('Tab')
@@ -180,7 +244,7 @@ def main():
                 if geometry['contentHeight'] > height:
                     check(geometry['scrollable'], prefix + ': tall form has a scroll container')
 
-                fields = gate.locator('input:not([type="checkbox"]):not([type="radio"]),select,textarea')
+                fields = gate.locator('input:not([type="checkbox"]):not([type="radio"]):visible,select:visible,textarea:visible')
                 metrics = fields.evaluate_all('''elements=>elements.map(element=>{
                   const style=getComputedStyle(element);
                   return {id:element.id,fontSize:parseFloat(style.fontSize),
@@ -211,7 +275,7 @@ def main():
                     check(reachable,
                           prefix + f': {metrics[index]["id"]} can be scrolled fully into view' +
                           ('' if reachable else f' ({rect})'))
-                for button in gate.locator('button').all():
+                for button in gate.locator('button:visible').all():
                     button.scroll_into_view_if_needed()
                     rect = button.bounding_box()
                     check(rect is not None and rect['height'] >= 44 and rect['y'] >= -1 and
@@ -235,21 +299,42 @@ def main():
                 if gate_name == 'request-access':
                     expect(gate).not_to_be_visible()
                     expect(page.locator('#cloudAuthGate')).to_be_visible()
-                    page.wait_for_function('document.getElementById("cloudAuthGate").contains(document.activeElement)')
+                    page.wait_for_function('()=>document.getElementById("cloudAuthGate").contains(document.activeElement)')
                     checks.append(prefix + ': Escape returns to Sign In with focus inside')
+                elif password_change:
+                    expect(gate).not_to_be_visible()
+                    expect(page.locator('#cloudChangePasswordBtn')).to_be_focused()
+                    check(not page.locator('#homeView').evaluate('element=>element.inert'),
+                          prefix + ': Escape returns focus to the account action and unlocks Home')
+                    account_metrics = page.locator('#cloudIdentityBar').evaluate('''element=>{
+                      const rect=element.getBoundingClientRect();
+                      return {left:rect.left,right:rect.right,scrollWidth:element.scrollWidth,
+                        width:element.clientWidth,buttons:[...element.querySelectorAll('button')].map(button=>{
+                          const r=button.getBoundingClientRect();return {height:r.height,left:r.left,right:r.right};
+                        })};
+                    }''')
+                    check(account_metrics['left'] >= -1 and account_metrics['right'] <= width + 1 and
+                          account_metrics['scrollWidth'] <= account_metrics['width'] + 1 and
+                          all(button['left'] >= -1 and button['right'] <= width + 1
+                              for button in account_metrics['buttons']),
+                          prefix + ': long account identity and actions remain inside the viewport')
+                    check(all(button['height'] >= 44 for button in account_metrics['buttons']),
+                          prefix + ': account and sign-out buttons provide 44px targets')
                 else:
                     check(gate.is_visible() and
                           gate.evaluate('element=>element.contains(document.activeElement)'),
                           prefix + ': Escape keeps the required authentication dialog open')
                 mutations.extend(page.evaluate('window.__authMutations'))
-            page.close()
+                session_exchanges.extend(page.evaluate('window.__layoutSessionExchanges'))
+                page.close()
         browser.close()
 
-    check(not mutations, 'no Supabase authentication or data mutation occurred')
+    check(not mutations, 'no account, email, password, or data mutation occurred')
     check(not unexpected_requests, 'all requests were local assets or synthetic read-only catalog')
     check(not page_errors, 'no browser JavaScript errors occurred')
     result = {'checks_passed': len(checks), 'checks': checks, 'failures': failures,
               'unexpected_requests': unexpected_requests, 'catalog_reads': len(catalog_reads),
+              'synthetic_session_exchanges': len(session_exchanges),
               'page_errors': page_errors, 'mutations': mutations, 'artifacts': screenshots}
     print(json.dumps(result, indent=2))
     assert not failures, f'{len(failures)} auth layout checks failed; see output above'

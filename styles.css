@@ -884,3 +884,22 @@ textarea#overallNotes{width:calc(100% - 24px);font-size:var(--font-body);line-he
   #activeTimersCard:not(.hidden){max-height:34dvh}
 }
 
+/* Account actions use the same readable controls as the authentication forms. */
+.cloudIdentityBar{font-size:var(--font-caption)}
+.cloudIdentityDot{flex:0 0 9px}
+#cloudIdentityText{flex:1 1 10rem;min-width:0;overflow-wrap:anywhere;line-height:1.5}
+.cloudAccountBtn,.cloudLogoutBtn{
+  flex:0 1 auto;min-width:44px;min-height:44px;max-width:100%;margin-left:0;
+  padding:8px 10px;font-size:var(--font-label);line-height:1.4;
+}
+.cloudAuthCard>h1{margin:4px 0 0;font-size:clamp(24px,5vw,34px);line-height:1.25;overflow-wrap:anywhere}
+.cloudAuthIntro{overflow-wrap:anywhere}
+.cloudPasswordRule{font-size:var(--font-caption);line-height:1.5}
+.cloudAuthGate [hidden]{display:none!important}
+#cloudChangePasswordVerification:not([hidden]){
+  display:grid;gap:10px;padding:12px;border:1px solid var(--line);
+  border-radius:9px;background:var(--bg);
+}
+#cloudChangePasswordVerification p{margin:0;font-size:var(--font-label);line-height:1.5}
+@media(max-width:560px){.cloudAccountBtn,.cloudLogoutBtn{width:100%}}
+
