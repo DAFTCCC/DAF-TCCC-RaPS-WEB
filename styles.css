@@ -758,3 +758,129 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   .observationTools{gap:6px}
 }
 
+/* Responsive usability: shared type sizes, stable controls, and readable forms. */
+:root{
+  --font-caption:.75rem;
+  --font-label:.875rem;
+  --font-body:1rem;
+  --field-bg:#101b24;
+}
+html{font-size:100%;-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{font-size:var(--font-body);line-height:1.5}
+button,input,select,textarea{font-family:inherit;line-height:1.4}
+input,select,textarea{font-size:var(--font-body)}
+button{min-width:44px;min-height:44px}
+button:disabled{cursor:not-allowed}
+.action.compact,.ghost.small,.daylightModeBtn,.filterChip{min-height:44px}
+.action,.ghost,.modeSegment,.areaTab{font-size:var(--font-label)}
+.action.primary,.tab.active{background:linear-gradient(180deg,#245f88,#174b70);border-color:#7cb7d6;color:#fff}
+.timerBtn.start{background:linear-gradient(180deg,#2c7056,#235c46);color:#fff}
+.timerBtn.stop{background:linear-gradient(180deg,#b13c39,#942f2d);color:#fff}
+.crit{background:#a82e35;color:#fff}
+.choice{font-size:var(--font-body);min-height:52px}
+.helper,.rowSub,.sub,.stamp,.timerMeta,.fieldHelp,.metaCell small,
+.syncBadge,.gradeSyncBadge,.statusPill,.assessmentSaveStatus,
+.assessmentConnectivity,.rosterCloudNote{font-size:var(--font-caption);line-height:1.5}
+.classSyncStatus{font-size:var(--font-label);line-height:1.5;overflow-wrap:anywhere}
+#evalHeader.collapsed .assessmentConnectivity{font-size:var(--font-caption)}
+.rowTitle{font-size:var(--font-body);line-height:1.45}
+.rowTitle,.rowSub,.metaCell b,.sheetHead h2,.cloudAuthMessage,
+.cloudAuthFoot,.safetyFinePrint,.programOwnership{overflow-wrap:anywhere}
+.kpis>div,.metaCell,.formGrid>*,.signGrid>*,.analyticsSplit>*,
+.classRow>*,.rosterRow>*,.brandRow>div,.cloudAuthBrand>div,.safetyBrand>div{min-width:0}
+.classMeta,.formGrid,.signGrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.signGrid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.analyticsSplit{grid-template-columns:minmax(0,1.35fr) minmax(0,.85fr)}
+.classRow,.rosterRow{grid-template-columns:minmax(0,1fr) auto}
+.rowActions{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;max-width:26rem}
+.rowActions>button{max-width:100%}
+.classQuickNav{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.brandRow{gap:10px}
+.compactHeader .brandRow>button,#evalHeader .brandRow>button{flex-shrink:0;white-space:nowrap}
+.compactHeader h1,.cloudAuthBrand h1,.safetyBrand h1{overflow-wrap:anywhere;line-height:1.25}
+.cloudAuthBrand img,.safetyBrand img{flex-shrink:0}
+.kpis small,#evalHeader.collapsed .kpis small{font-size:var(--font-caption)!important;line-height:1.35}
+.kpis strong{font-size:1.125rem;font-variant-numeric:tabular-nums}
+.rosterFilters{display:flex;flex-wrap:wrap;gap:8px;overflow:visible}
+.filterChip{flex:0 1 auto;min-width:44px;font-size:var(--font-label);white-space:normal}
+.tab{flex:0 0 auto;font-size:var(--font-label)}
+.tabs{scrollbar-width:thin;scroll-padding-inline:10px}
+.activeEvaluationLockBanner .action{white-space:normal}
+.toggleLabel{display:inline-flex;align-items:center;gap:8px;min-height:44px;white-space:normal}
+.toggleLabel input{flex-shrink:0;width:20px;height:20px;margin:0}
+#daylightModeBtn{max-width:none}
+.observeMode #evalHeader .kpis>.scoreKpi{display:none}
+#activeTimersCard{background:var(--card)}
+#activeTimersCard .cardHead{padding:8px 12px}
+#activeTimers{padding:6px 10px}
+#activeTimers .activeTimerRow{padding:6px}
+.item{scroll-margin-top:calc(var(--eval-sticky-height,var(--eval-header-height,195px)) + 12px)}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .toolCard{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .timerDisplay{flex:1 1 max-content;min-width:0;max-width:100%}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .timerBtns{flex:3 1 14rem;min-width:0}
+.observeMode :is(#globalTimerCard,#quickCufTimerCard) .timerMeta{flex:1 0 100%}
+
+/* Editable text stays at 16px or larger, including native mobile controls. */
+:where(.formGrid,.signGrid,.adminFormGrid,.cloudAuthForm,.remediationStart) :is(input:not([type="checkbox"]):not([type="radio"]),select,textarea),
+.rosterSearch,.note,#overallNotes{
+  display:block;width:100%;min-width:0;min-height:48px;
+  padding:10px 12px;border:1px solid #496275;border-radius:9px;
+  background:var(--field-bg);color:var(--text);font-size:var(--font-body);line-height:1.5;
+}
+.formGrid label,.adminFormGrid label,.cloudAuthForm label,.signoffField,.overallNotesLabel{
+  font-size:var(--font-label);line-height:1.45;color:var(--muted);
+}
+.formGrid>label:not(.inlineCheck):not(.diagnosticCheck),.adminFormGrid>label,.cloudAuthForm>label,.signoffField{
+  display:flex;flex-direction:column;gap:6px;min-width:0;
+}
+.formGrid>label>span,.adminFormGrid>label>span{margin-bottom:0}
+:where(.formGrid,.adminFormGrid,.cloudAuthForm,.signGrid)>label>:is(input:not([type="checkbox"]):not([type="radio"]),select,textarea){margin-top:auto}
+.overallNotesLabel{display:block;margin:0 12px 6px}
+textarea#overallNotes{width:calc(100% - 24px);font-size:var(--font-body);line-height:1.5}
+:where(.formGrid,.adminFormGrid,.cloudAuthForm,.signGrid)>label>:is(input:not([type="checkbox"]):not([type="radio"]),select){height:calc(1.5em + 22px)}
+.formGrid .diagnosticCheck{align-items:center;min-height:44px;margin:0;padding:8px 0}
+.formGrid .diagnosticCheck input[type="checkbox"]{flex-shrink:0}
+.formActions{flex-wrap:wrap;align-items:stretch}
+.formActions>button{max-width:100%}
+
+/* Dialogs and authentication remain scrollable on short windows and keyboards. */
+.modal{padding:max(10px,env(safe-area-inset-top)) max(10px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left))}
+.modal .sheet{
+  max-height:calc(100dvh - 20px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  padding:18px;background:var(--card);overscroll-behavior:contain;
+}
+.sheetHead{align-items:flex-start;gap:12px}
+.sheetHead h2{min-width:0;font-size:1.25rem;line-height:1.35}
+.sheetHead>button{flex:0 0 auto;white-space:nowrap}
+.cloudAuthGate{align-items:flex-start;overflow:auto;overscroll-behavior:contain;padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
+.cloudAuthCard{flex-shrink:0;margin-block:auto;min-width:0}
+.cloudAuthForm label{min-width:0}
+.cloudAuthTabs{display:flex;flex-wrap:wrap}
+.cloudAuthTabs>button{flex:1 1 7rem;white-space:normal;font-size:var(--font-label)}
+.homeMain,.evalMain,.compactHeader,#evalHeader{padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}
+#evalHeader{max-height:50dvh;overflow:auto;overscroll-behavior:contain}
+:root[data-field-display="daylight"]{--field-bg:#fff}
+
+@media(max-width:760px){.analyticsSplit{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:720px){
+  .classMeta,.formGrid,.signGrid{grid-template-columns:minmax(0,1fr)}
+  .phaseToolbar{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:520px){
+  .classRow,.rosterRow{grid-template-columns:minmax(0,1fr)}
+  .rowActions{justify-content:flex-start;max-width:100%}
+}
+/* Keep identity and controls visible without consuming a landscape lane. */
+@media(max-height:560px) and (min-width:480px){
+  #evalHeader,#evalHeader.collapsed{padding-top:6px;padding-bottom:6px}
+  #evalHeader .brandRow{flex-wrap:nowrap}
+  #evalHeader .studentBar{min-height:28px;margin-top:5px;padding:4px 8px}
+  #evalHeader #studentLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #evalHeader .assessmentSaveStatus{margin-top:4px;gap:3px 7px}
+  #evalHeader .assessmentConnectivity{flex:1 1 15rem}
+  #evalHeader .kpis,#evalHeader.collapsed .kpis{gap:6px;margin-top:5px}
+  .observeMode #evalHeader .kpis,.observeMode #evalHeader.collapsed .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
+  #evalHeader .kpis>div,#evalHeader.collapsed .kpis>div{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:3px 7px;min-height:28px;padding:4px}
+  #activeTimersCard:not(.hidden){max-height:34dvh}
+}
+

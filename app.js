@@ -1023,15 +1023,73 @@ async function deleteClass(){
 }
 
 // ---------- Forms ----------// ---------- Forms ----------
-let modalReturnFocus=null;
+const modalFocusState=new Map(),modalInertState=new Map();
+let activeModal=null,deferredModalFocus=null;
+function cloudGateIsOpen(){return !!document.querySelector('.cloudAuthGate.open');}
+function captureFocusTarget(element=document.activeElement){
+  if(!element||element===document.body)return null;
+  const names=['data-item','data-rating','data-section','data-failure','data-note','data-note-toggle','data-timer','data-act','data-mark-observation','data-observation-tag','data-observation-item','data-review-observation','data-open-class','data-restore-class','data-purge-class','data-start','data-attempt','data-delete-student','data-instant','data-open-branding'];
+  const attributes=names.filter(name=>element.hasAttribute(name)).map(name=>[name,element.getAttribute(name)]);
+  return {element,id:element.id,scopeId:element.parentElement?.closest('[id]')?.id||'',tag:element.tagName.toLowerCase(),attributes};
+}
+function canFocus(element){return !!element&&!element.disabled&&!element.closest('[inert]')&&element.getClientRects().length>0;}
+function restoreFocusTarget(target,useFallback=true){
+  let element=target?.element;
+  if(!element?.isConnected){
+    element=target?.id?$(target.id):null;
+    if(!element&&target?.attributes?.length){
+      const selector=target.tag+target.attributes.map(([name,value])=>`[${name}="${CSS.escape(value)}"]`).join('');
+      element=(target.scopeId?$(target.scopeId):document)?.querySelector(selector);
+    }
+  }
+  const timerId=target?.attributes?.find(([name])=>name==='data-timer')?.[1];
+  if(!canFocus(element)&&timerId)element=(target.scopeId?$(target.scopeId):document)?.querySelector(`[data-timer="${CSS.escape(timerId)}"][data-act="stop"]`);
+  if(!canFocus(element)&&useFallback)element=['reviewModeBtn','backHome','newClassBtn'].map($).find(canFocus);
+  if(canFocus(element)){element.focus({preventScroll:true});return true;}
+  return false;
+}
+function modalFocusable(modal){
+  return [...modal.querySelectorAll('button,input:not([type="hidden"]),select,textarea,a[href],[tabindex]')].filter(element=>element.tabIndex>=0&&canFocus(element));
+}
+function focusModal(modal){
+  const focusable=modalFocusable(modal),field=focusable.find(element=>element.matches('[autofocus],input,select,textarea'));
+  if(field||focusable.length)(field||focusable[0]).focus({preventScroll:true});
+  else{modal.tabIndex=-1;modal.focus({preventScroll:true});}
+}
+function syncModalAccessibility(){
+  const open=[...document.querySelectorAll('.modal.open')];
+  for(const modal of open)if(!modalFocusState.has(modal))modalFocusState.set(modal,captureFocusTarget());
+  const previous=activeModal,returnFocus=modalFocusState.get(previous);
+  for(const modal of modalFocusState.keys())if(!open.includes(modal))modalFocusState.delete(modal);
+  activeModal=open.at(-1)||null;
+  if(previous!==activeModal&&!activeModal)deferredModalFocus=returnFocus;
+  document.body.classList.toggle('modalOpen',!!activeModal);
+  // Authentication gates own the foreground until they close. Their state
+  // change event resumes this modal's own inert and focus restoration.
+  if(cloudGateIsOpen())return;
+  if(activeModal){
+    for(const child of document.body.children){
+      if(child.matches('.cloudAuthGate'))continue;
+      if(!modalInertState.has(child))modalInertState.set(child,child.inert);
+      child.inert=child!==activeModal;
+    }
+    deferredModalFocus=null;
+  }else{
+    for(const [child,inert] of modalInertState)child.inert=inert;
+    modalInertState.clear();
+  }
+  if(previous!==activeModal||activeModal&&!activeModal.contains(document.activeElement)||deferredModalFocus)setTimeout(()=>{
+    if(cloudGateIsOpen())return;
+    if(activeModal){if(!activeModal.contains(document.activeElement))focusModal(activeModal);}
+    else if(deferredModalFocus){const target=deferredModalFocus;deferredModalFocus=null;restoreFocusTarget(target);}
+  },0);
+}
 function openModal(id){
-  const m=$(id);if(!m)return;modalReturnFocus=document.activeElement;m.classList.add('open');m.setAttribute('aria-hidden','false');document.body.classList.add('modalOpen');
-  setTimeout(()=>m.querySelector('input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled])')?.focus(),20);
+  const m=$(id);if(!m)return;m.classList.add('open');m.setAttribute('aria-hidden','false');syncModalAccessibility();
 }
 function closeModal(id){
   const m=$(id);if(!m)return;m.classList.remove('open');m.setAttribute('aria-hidden','true');
-  if(!document.querySelector('.modal.open'))document.body.classList.remove('modalOpen');
-  const f=modalReturnFocus;modalReturnFocus=null;if(f&&document.contains(f))setTimeout(()=>f.focus(),0);
+  syncModalAccessibility();
 }
 function newClassForm(existing=null){
   if(existing&&isClassClosed(existing)){alert('Closed classes are permanently locked.');return;}
@@ -1178,6 +1236,7 @@ function openEvaluation(studentId,attemptNo){
 }
 function isObserveMode(st=evalState()){return st?.observeMode!==false;}
 function renderEval(){
+  const focused=captureFocusTarget();
   if(cls()?.deletedAt)return showHome();
   const c=cls(),t=tier(),s=student(),st=evalState(); if(!c||!s||!st)return openClass(currentClassId);
   $('tierTitle').textContent=`Tier ${t.id} — ${t.shortName}`; $('tierSource').textContent=t.source;
@@ -1192,9 +1251,10 @@ function renderEval(){
   const gd=(t.timers||[]).find(d=>d.section==='GLOBAL');
   if(gd){$('globalTimerCard').classList.remove('hidden');$('globalTimerStandard').textContent=gd.standard;$('globalTimer').innerHTML=timerMarkup(gd);}else $('globalTimerCard').classList.add('hidden');
   renderTabs(); renderSection(); renderTimeline(); renderKpis(); renderActiveTimers(); bindEvalDynamic(); renderObservationFeedback(); setReadOnly(!!st.finalizedAt||isClassClosed(c));
+  if(focused&&!focused.element.isConnected)restoreFocusTarget(focused,false);
 }
 function setReadOnly(readonly){
-  document.querySelectorAll('#evalView button[data-item],#evalView button[data-timer],#evalView button[data-failure],#evalView button[data-note-toggle],#evalView button[data-mark-observation],#evalView button[data-observation-tag],#evalView textarea,#evalView input').forEach(x=>{ if(!x.matches('#showNtToggle')) x.disabled=readonly; });
+  document.querySelectorAll('#evalView button[data-item],#evalView button[data-timer],#evalView button[data-failure],#evalView button[data-note-toggle],#evalView button[data-mark-observation],#evalView button[data-observation-tag],#evalView textarea,#evalView input').forEach(x=>{ if(!x.matches('#showNtToggle')) x.disabled=readonly||x.dataset.intrinsicDisabled==='true'; });
   $('nextUnresolvedBottomBtn').disabled=readonly;$('nextUnresolvedBtn').disabled=readonly;$('finalizeBtn').disabled=readonly;$('finalizeBtn').textContent=evalState()?.finalizedAt?'Evaluation Finalized':isClassClosed(cls())?'Class Closed':'Review / Finalize';
   $('voidAttemptBtn').classList.toggle('hidden',readonly);$('voidAttemptBtn').disabled=readonly;
 }
@@ -1208,7 +1268,7 @@ function sectionTabLabel(code){
 }
 function renderTabs(){
   const t=tier(),st=evalState();
-  $('tabs').innerHTML=t.sections.map(s=>`<button class="tab ${s.code===st.section?'active':''} ${sectionStatus(s)}" data-section="${esc(s.code)}">${esc(sectionTabLabel(s.code))}</button>`).join('');
+  $('tabs').innerHTML=t.sections.map(s=>`<button type="button" class="tab ${s.code===st.section?'active':''} ${sectionStatus(s)}" data-section="${esc(s.code)}" aria-pressed="${s.code===st.section}" aria-label="${esc(s.code)} — ${esc(s.title)}">${esc(sectionTabLabel(s.code))}</button>`).join('');
 }
 function renderSection(){
   const t=tier(),st=evalState(),sec=t.sections.find(s=>s.code===st.section)||t.sections[0]; st.section=sec.code;
@@ -1301,13 +1361,13 @@ function itemMarkup(item){
   const badges=`${item.critical?'<span class="crit">CRITICAL</span>':''}${reviewMode?(item.provenance==='daf'?'<span class="localBadge">DAF SUPPLEMENTAL</span>':'<span class="sourceBadge">JTS/DHA</span>'):''}${reviewMode&&item.sourceDiscrepancy?'<span class="noteBadge">SOURCE NOTE</span>':''}${forced?'<span class="forcedBadge">TIMER FAIL</span>':''}`;
   const sourceNote=reviewMode&&item.sourceNote?`<div class="sourceNote">${esc(item.sourceNote)}</div>`:'';
   const linkedTimers=linked.map(timerMarkup).join('');
-  const buttons=tier().ratings.map(x=>{let disabled=false;if(forced&&x.key!=='fail')disabled=true;if(x.key==='nt'&&linked.some(d=>timerHasStarted(d.id)))disabled=true;return `<button type="button" class="choice ${x.key} ${r===x.key?'sel':''}" aria-pressed="${r===x.key}" aria-label="${esc(item.id)} ${esc(x.label)}" data-item="${item.id}" data-rating="${x.key}" ${disabled?'disabled':''}>${esc(x.label)}</button>`;}).join('');
+  const buttons=tier().ratings.map(x=>{let disabled=false;if(forced&&x.key!=='fail')disabled=true;if(x.key==='nt'&&linked.some(d=>timerHasStarted(d.id)))disabled=true;return `<button type="button" class="choice ${x.key} ${r===x.key?'sel':''}" aria-pressed="${r===x.key}" aria-label="${esc(item.id)} ${esc(x.label)}" data-item="${item.id}" data-rating="${x.key}" data-intrinsic-disabled="${disabled}" ${disabled?'disabled':''}>${esc(x.label)}</button>`;}).join('');
   let status='Not yet graded'; if(r){status=`${r.toUpperCase()} · ${st.methods[item.id]||'explicit'} · ${wall(st.stamps[item.id])}`;const nr=st.ntReasons?.[item.id];if(r==='nt'&&nr)status+=` · ${nr.label}${nr.detail?`: ${nr.detail}`:''}`;}
   const fd=st.failureDetails?.[item.id];
   const failSummary=r==='fail'?`<div class="failureSummary ${fd?.mode==='unclassified'?'unclassified':''}"><span>${esc(fd?.modeLabel||fd?.mode||'Unclassified failure')}</span>${fd?.contributorLabel?`<b>${esc(fd.contributorLabel)}</b>`:''}<button class="ghost small" data-failure="${item.id}">${fd?.mode==='unclassified'?'Review failure':'Edit observation & coaching'}</button></div>`:'';
   const observation=st.observations?.[item.id]||{},tools=`<div class="observationTools"><button type="button" class="ghost small" data-mark-observation="${item.id}" aria-label="Mark ${esc(item.id)} for review">${observation.reviewNeeded?'Marked for review ✓':'Mark moment'}</button><button type="button" class="ghost small diagnosticReviewButton" data-failure="${item.id}">Observation &amp; coaching</button><div class="observationTags" role="group" aria-label="${esc(item.id)} diagnostic observations">${OBSERVATION_TAGS.map(([key,label])=>`<button type="button" class="ghost small" data-observation-tag="${key}" data-observation-item="${item.id}" aria-pressed="${(observation.tags||[]).includes(key)}">${esc(label)}</button>`).join('')}</div></div>`;
   const noteOpen=reviewMode||!!st.noteOpen?.[item.id],hasNote=!!String(st.notes[item.id]||'').trim();
-  const noteArea=noteOpen?`<textarea class="note" data-note="${item.id}" placeholder="Evaluator note">${esc(st.notes[item.id]||'')}</textarea>`:`<button class="noteToggle ghost small" data-note-toggle="${item.id}">Note${hasNote?' ✓':''}</button>`;
+  const noteArea=noteOpen?`<textarea class="note" data-note="${item.id}" aria-label="${esc(item.id)} evaluator note" placeholder="Evaluator note">${esc(st.notes[item.id]||'')}</textarea>`:`<button class="noteToggle ghost small" data-note-toggle="${item.id}">Note${hasNote?' ✓':''}</button>`;
   return `<article class="item ${hide?'hiddenNt':''}" data-article="${item.id}"><div class="itemText"><span class="id">${esc(item.id)}</span> · ${esc(item.text)} ${badges}</div>${sourceNote}${linkedTimers}<div class="choices" role="group" aria-label="${esc(item.id)} official grade">${buttons}</div>${tools}${failSummary}<div class="stamp">${esc(status)}</div>${noteArea}</article>`;
 }
 const NT_REASONS=[
@@ -1412,7 +1472,7 @@ function nextUnresolved(){
   // phase before moving to a later phase. This makes the bottom button useful without
   // requiring manual scrolling back through the checklist.
   if(sectionRemaining.length){
-    const headerBottom=document.getElementById('evalHeader')?.getBoundingClientRect().bottom||0;
+    const headerBottom=evaluationStickyMetrics().unobstructedTop;
     const candidateEls=[...document.querySelectorAll('#items [data-article]')]
       .filter(el=>!el.classList.contains('hiddenNt')&&el.getBoundingClientRect().bottom>headerBottom+6);
     for(const el of candidateEls){
@@ -1437,7 +1497,10 @@ function nextUnresolved(){
   setTimeout(()=>{
     const el=document.querySelector(`[data-article="${CSS.escape(target.id)}"]`);
     if(!el)return;
-    el.scrollIntoView({behavior:'smooth',block:'center'});
+    updateEvalHeaderCollapse();
+    el.scrollIntoView({behavior:'smooth',block:'start'});
+    const focus=criticalFailureCauseMissing(target,st)&&!isObserveMode(st)?el.querySelector('[data-failure]'):el.querySelector('[data-item]:not(:disabled)');
+    focus?.focus({preventScroll:true});
     el.classList.add('unresolvedFocus');
     setTimeout(()=>el.classList.remove('unresolvedFocus'),1100);
   },50);
@@ -1521,9 +1584,9 @@ function timerMarkup(d){
   const clsx=status==='notmet'||recovery?'bad':status==='met'||status==='live-met'?'good':'';
   const prov=d.provenance==='daf'?'<span class="localBadge">DAF SUPPLEMENTAL TIMER</span>':'<span class="sourceBadge">SOURCE TIMER</span>';
   const startLabel=x?.paused?'RESUME':x?.running?'RUNNING':'START';
-  const pauseBtn=d.pausePolicy==='admin-only'?`<button class="timerBtn admin" data-timer="${d.id}" data-act="admin">ADMIN HOLD</button>`:`<button class="timerBtn pause" data-timer="${d.id}" data-act="pause">PAUSE</button>`;
+  const pauseBtn=d.pausePolicy==='admin-only'?`<button type="button" class="timerBtn admin" data-timer="${d.id}" data-act="admin" aria-label="Administrative hold ${esc(d.label)}">ADMIN HOLD</button>`:`<button type="button" class="timerBtn pause" data-timer="${d.id}" data-act="pause" aria-label="Pause ${esc(d.label)}">PAUSE</button>`;
   const history=s.instances.filter(z=>z.wallStart).map(z=>`<div class="timerInstance"><span>#${z.index}${z.voided?' VOID':''}</span><span>${z.voided?esc(z.voidReason):`${fmt(gradingDuration(d,z,z.wallStop||now()))} · ${rawTimerResult(d,z,z.wallStop||now()).toUpperCase()}`}</span></div>`).join('');
-  return `<div class="toolCard"><div class="toolTitle">${esc(d.label)} · ${esc(d.standard)} ${prov}</div><div class="timerDisplay ${status==='notmet'||recovery?'bad':status==='incomplete'?'':'good'}" data-display="${d.id}">${recovery?'--:--':fmt(dur)}</div><div class="timerBtns"><button class="timerBtn start" data-timer="${d.id}" data-act="start" ${x?.running?'disabled':''}>${startLabel}</button>${pauseBtn}<button class="timerBtn stop" data-timer="${d.id}" data-act="stop">${d.section==='GLOBAL'?'END':'STOP'}</button>${d.repeatable?`<button class="timerBtn reset" data-timer="${d.id}" data-act="reset">NEXT / RESET</button>`:''}<button class="timerBtn reset" data-timer="${d.id}" data-act="void">VOID</button></div><div class="timerMeta"><span class="${clsx}">${liveStatus}</span> · Grading clock: ${esc(d.gradingClock||'active')}${d.continuousRequired?' · continuous segment required':''}${x?.paused?` · ${x.pauseKind==='admin'?'ADMIN HOLD':'TACTICAL PAUSE'}`:''}</div>${history?`<div class="timerHistory">${history}</div>`:''}</div>`;
+  return `<div class="toolCard"><div class="toolTitle">${esc(d.label)} · ${esc(d.standard)} ${prov}</div><div class="timerDisplay ${status==='notmet'||recovery?'bad':status==='incomplete'?'':'good'}" data-display="${d.id}">${recovery?'--:--':fmt(dur)}</div><div class="timerBtns"><button type="button" class="timerBtn start" data-timer="${d.id}" data-act="start" data-intrinsic-disabled="${!!x?.running}" aria-label="${esc(startLabel)} ${esc(d.label)}" ${x?.running?'disabled':''}>${startLabel}</button>${pauseBtn}<button type="button" class="timerBtn stop" data-timer="${d.id}" data-act="stop" aria-label="${d.section==='GLOBAL'?'End':'Stop'} ${esc(d.label)}">${d.section==='GLOBAL'?'END':'STOP'}</button>${d.repeatable?`<button type="button" class="timerBtn reset" data-timer="${d.id}" data-act="reset" aria-label="Next instance of ${esc(d.label)}">NEXT / RESET</button>`:''}<button type="button" class="timerBtn reset" data-timer="${d.id}" data-act="void" aria-label="Void instance of ${esc(d.label)}">VOID</button></div><div class="timerMeta"><span class="${clsx}">${liveStatus}</span> · Grading clock: ${esc(d.gradingClock||'active')}${d.continuousRequired?' · continuous segment required':''}${x?.paused?` · ${x.pauseKind==='admin'?'ADMIN HOLD':'TACTICAL PAUSE'}`:''}</div>${history?`<div class="timerHistory">${history}</div>`:''}</div>`;
 }
 function renderActiveTimers(){
   const t=tier(),st=evalState(),list=$('activeTimers');if(!t||!st||!list)return;
@@ -2055,6 +2118,13 @@ $('trainerSign').oninput=e=>{evalState().trainerSign=e.target.value;saveDb();};$
 $('finalizeBtn').onclick=reviewFinalize;$('voidAttemptBtn').onclick=voidCurrentAttempt;$('confirmFinalizeBtn').onclick=finalizeEvaluation;$('copyAar').onclick=async()=>{await navigator.clipboard.writeText($('aarText').textContent);alert('Review copied.');};$('individualPdfBtn').onclick=exportIndividualPdf;$('individualCsvBtn').onclick=exportIndividualCsv;$('attemptBackupBtn').onclick=backupAttempt;
 $('classPdfBtn').onclick=exportClassPdf;$('classSummaryCsvBtn').onclick=exportClassSummaryCsv;$('classCriteriaCsvBtn').onclick=exportClassCriteriaCsv;$('classTimersCsvBtn').onclick=exportClassTimersCsv;$('classEventsCsvBtn').onclick=exportClassEventsCsv;$('classAnalyticsCsvBtn').onclick=exportClassAnalyticsCsv;$('classEnterpriseCsvBtn').onclick=exportClassEnterpriseAnalyticsCsv;$('backupClassBtn').onclick=backupClass;$('closeClassBtn').onclick=closeClass;$('deleteClassBtn').onclick=()=>{void deleteClass();};
 const moreExportsBtn=$('moreExportsBtn'),moreExportsMenu=$('moreExportsMenu');
+if($('jumpRosterBtn'))$('jumpRosterBtn').onclick=()=>{
+  const search=$('rosterSearch'),header=document.querySelector('#classView .compactHeader');
+  if(!search)return;
+  const inset=(header?.getBoundingClientRect().height||0)+12;
+  window.scrollTo({top:window.scrollY+search.getBoundingClientRect().top-inset,behavior:'instant'});
+  search.focus({preventScroll:true});
+};
 function setMoreExportsOpen(open){
   if(!moreExportsBtn||!moreExportsMenu)return;
   moreExportsMenu.classList.toggle('hidden',!open);
@@ -2065,8 +2135,34 @@ if(moreExportsBtn)moreExportsBtn.onclick=()=>setMoreExportsOpen(moreExportsMenu.
 if(moreExportsMenu)moreExportsMenu.addEventListener('click',e=>{if(e.target.closest('button'))setMoreExportsOpen(false);});
 if($('managementMajcom'))$('managementMajcom').onchange=e=>{managementFilters.majcom=e.target.value;managementFilters.installationId='';renderManagementDashboard();};if($('managementInstallation'))$('managementInstallation').onchange=e=>{managementFilters.installationId=e.target.value;renderManagementDashboard();};if($('managementTier'))$('managementTier').onchange=e=>{managementFilters.tierId=e.target.value;renderManagementDashboard();};if($('managementCourseType'))$('managementCourseType').onchange=e=>{managementFilters.courseType=e.target.value;renderManagementDashboard();};if($('managementResetBtn'))$('managementResetBtn').onclick=()=>{managementFilters={majcom:'',installationId:'',tierId:'',courseType:''};renderManagementDashboard();};if($('managementSummaryCsvBtn'))$('managementSummaryCsvBtn').onclick=exportManagementSummaryCsv;if($('enterpriseAnalyticsCsvBtn'))$('enterpriseAnalyticsCsvBtn').onclick=exportScopedEnterpriseAnalyticsCsv;
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>closeModal(b.dataset.close));document.querySelectorAll('.modal').forEach(m=>m.onclick=e=>{if(e.target===m)closeModal(m.id);});
+// Branding opens its shared dialog independently; observe the same state so
+// every application dialog contains keyboard focus and releases it on close.
+const modalObserver=new MutationObserver(syncModalAccessibility);
+document.querySelectorAll('.modal').forEach(modal=>modalObserver.observe(modal,{attributes:true,attributeFilter:['class']}));
+window.addEventListener('raps-auth-gate-change',syncModalAccessibility);
+document.addEventListener('keydown',event=>{
+  if(!activeModal||cloudGateIsOpen())return;
+  if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeModal(activeModal.id);return;}
+  if(event.key!=='Tab')return;
+  const focusable=modalFocusable(activeModal),first=focusable[0],last=focusable.at(-1),current=document.activeElement;
+  if(!first){event.preventDefault();focusModal(activeModal);return;}
+  if(!activeModal.contains(current)||(event.shiftKey&&current===first)||(!event.shiftKey&&current===last)){
+    event.preventDefault();(event.shiftKey?last:first).focus({preventScroll:true});
+  }
+},true);
+document.addEventListener('focusin',event=>{if(activeModal&&!cloudGateIsOpen()&&!activeModal.contains(event.target))focusModal(activeModal);});
 
 let evalHeaderCollapsed=false;
+function evaluationStickyMetrics(){
+  const header=$('evalHeader')?.getBoundingClientRect(),dock=$('activeTimersCard');
+  const top=header?.bottom||0,height=header?.height||0;
+  if(!dock||dock.classList.contains('hidden'))return {height,unobstructedTop:top};
+  const rect=dock.getBoundingClientRect(),style=getComputedStyle(dock);
+  if(!rect.height||!['sticky','fixed'].includes(style.position))return {height,unobstructedTop:top};
+  const inset=Number.parseFloat(style.top)||0,gap=Math.max(0,inset-height);
+  const pinned=rect.top<=top+gap+1&&rect.bottom>top;
+  return {height:height+gap+rect.height,unobstructedTop:pinned?Math.max(top,rect.bottom):top};
+}
 function updateEvalHeaderCollapse(){
   const h=$('evalHeader');if(!h)return;
   // Scroll anchoring moves the document when the sticky header changes height.
@@ -2078,6 +2174,8 @@ function updateEvalHeaderCollapse(){
   if(evalVisible()){
     const height=`${Math.ceil(h.getBoundingClientRect().height)}px`;
     if(document.documentElement.style.getPropertyValue('--eval-header-height')!==height)document.documentElement.style.setProperty('--eval-header-height',height);
+    const stickyHeight=`${Math.ceil(evaluationStickyMetrics().height)}px`;
+    if(document.documentElement.style.getPropertyValue('--eval-sticky-height')!==stickyHeight)document.documentElement.style.setProperty('--eval-sticky-height',stickyHeight);
   }
 }
 window.addEventListener('scroll',updateEvalHeaderCollapse,{passive:true});
@@ -2205,7 +2303,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.4';
+  const UPDATE_BUILD = '3.4.12-web.5';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
