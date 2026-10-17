@@ -8,6 +8,7 @@ if(!APP_VERSION) throw new Error('Missing TCCC build version. Ensure version.js 
 const DB_KEY = 'TCCC_SUITE_DB';
 const LEGACY_DB_KEYS = ['TCCC_SUITE_V215_DB'];
 const TRASH_OUTBOX_PREFIX = 'RAPS_CLASS_TRASH_OUTBOX:';
+const LOCAL_COPY_EXCLUSION_PREFIX = 'RAPS_CLASS_LOCAL_EXCLUDED:';
 const $ = id => document.getElementById(id);
 const deep = x => JSON.parse(JSON.stringify(x));
 const now = () => Date.now();
@@ -184,6 +185,8 @@ function ownsTrashAction(classId){
 function rememberTrashAction(classId,action,options={}){
   const userId=currentCloudUserId();
   if(!userId||!hasEnterpriseAccess())throw new Error('Sign in as an Enterprise Administrator before queuing a class deletion or restoration.');
+  const c=db.classes.find(x=>x.id===classId);
+  if(!canAccessClass(action?.kind==='restore'?'restoreClass':'deleteClass',c))throw new Error('Your account does not have permission to change this class lifecycle.');
   const token={kind:action?.kind,requestedAt:Number(action?.requestedAt),expectedDeletedAt:Number(action?.expectedDeletedAt||0),expectedRestoredAt:Number(action?.expectedRestoredAt||0)};
   if(!classId||!['delete','restore'].includes(token.kind)||!Number.isFinite(token.requestedAt)||token.requestedAt<=0||![token.expectedDeletedAt,token.expectedRestoredAt].every(n=>Number.isFinite(n)&&n>=0))throw new Error('The class change does not have a valid lifecycle token.');
   const previous=readTrashOutbox(classId);
@@ -203,6 +206,7 @@ function applyTrashAction(c,action){
 function queueTrashAction(c,kind){
   const userId=currentCloudUserId();
   if(!userId){alert('Sign in as an Enterprise Administrator before deleting or restoring a class.');return false;}
+  if(!requireClassAccess(kind==='restore'?'restoreClass':'deleteClass',c))return false;
   const previous=readTrashOutbox(c.id);
   const action={kind,requestedAt:Math.max(now(),Number(previous?.action?.requestedAt||0)+1),expectedDeletedAt:Number(c.deletedAt||0),expectedRestoredAt:Number(c.restoredAt||0)};
   try{
@@ -264,6 +268,9 @@ function saveDb(targetClassId=currentClassId){
     }
   }
   if(c){
+    // A different tab may have removed a clean cached copy. Preserve any new
+    // work explicitly made in this tab instead of hiding unsynchronized data.
+    if(isLocalCopyHidden(c.id))clearLocalCopyHidden(c.id);
     const state=c.cloudSync||{};
     if(state.enabled===true && state.status!=='syncing' && state.status!=='conflict'){
       state.status=navigator.onLine?'pending':'offline';
@@ -282,6 +289,7 @@ function saveDb(targetClassId=currentClassId){
     }
   }
   try{
+    discardExcludedCleanCopies();
     localStorage.setItem(DB_KEY,JSON.stringify(db));
     window.rapsLocalSaveState={at:ts,error:''};
   }catch(error){
@@ -297,19 +305,74 @@ function tier(){ const c=cls(); return c ? (c.tierSnapshot||TIERS[c.tierId]) : n
 function student(){ const c=cls(); return c?.students.find(s=>s.id===currentStudentId); }
 function evalState(){ return student()?.attempts?.[String(currentAttemptNo)] || null; }
 function currentCloudUserId(){return String(window.RAPS_CLOUD?.user?.id||'');}
+function localRosterSignature(c){
+  return JSON.stringify((c?.students||[]).map(s=>({id:String(s?.id||''),name:String(s?.name||''),rank:String(s?.rank||''),trainingId:String(s?.trainingId||'')})).sort((a,b)=>a.id.localeCompare(b.id)));
+}
+function readLocalCopyExclusion(id){
+  try{
+    const entry=JSON.parse(localStorage.getItem(LOCAL_COPY_EXCLUSION_PREFIX+id));
+    return entry?.classId===id&&Number(entry.removedAt)>0?entry:null;
+  }catch{return null;}
+}
+function isLocalCopyHidden(id){return !!readLocalCopyExclusion(id);}
+function clearLocalCopyHidden(id){localStorage.removeItem(LOCAL_COPY_EXCLUSION_PREFIX+id);}
+function getExcludedLocalClassIds(){
+  const ids=[];
+  try{for(let i=0;i<localStorage.length;i++){const key=localStorage.key(i);if(key?.startsWith(LOCAL_COPY_EXCLUSION_PREFIX)){const id=key.slice(LOCAL_COPY_EXCLUSION_PREFIX.length);if(readLocalCopyExclusion(id))ids.push(id);}}}catch{}
+  return ids.sort();
+}
+function discardExcludedCleanCopies(){db.classes=db.classes.filter(c=>!isLocalCopyHidden(c.id)||localCopyRemovalIssue(c));}
+function canAccessClass(action,c,options){return window.RAPS_PERMISSIONS?.canClass(action,c,options)===true;}
+function classPermissionContext(c,action,{online=true,view=true}={}){
+  const permissions=window.RAPS_PERMISSIONS,token=permissions?.snapshot?.();
+  const check=()=>{
+    const current=db.classes.find(x=>x.id===c?.id);
+    if(!token||!permissions.isCurrent(token,{online})||!current||!canAccessClass(action,current,{online})||view&&currentClassId!==c.id)throw new Error('Your session or class permissions changed. Sign in and sync again before continuing.');
+    return current;
+  };
+  check();return {token,check};
+}
+function requireClassAccess(action,c,options){
+  if(canAccessClass(action,c,options))return true;
+  alert('Your active account does not have permission for this action at this class installation. Sign in again or contact an Enterprise Administrator.');
+  return false;
+}
+function canEditCurrentEvaluation(){
+  const a=evalState();
+  return !!a&&!a.finalizedAt&&!a.voidedAt&&!isClassClosed(cls())&&canAccessClass('evaluate',cls(),{online:false})&&attemptBelongsToCurrentEvaluator(a);
+}
+function guardEvaluationEdit(action,online=false){
+  return (...args)=>{
+    if(!canEditCurrentEvaluation()||online&&!canAccessClass('evaluate',cls())){alert('This assessment is read-only for your account. Only its assigned evaluator with active access to this installation can change it.');return;}
+    const token=window.RAPS_PERMISSIONS?.snapshot?.();
+    const result=action(...args);
+    if(result&&typeof result.then==='function')return Promise.resolve(result).finally(()=>{
+      if(!window.RAPS_PERMISSIONS?.isCurrent(token,{online}))scrubPrivateViews();
+    });
+    return result;
+  };
+}
+function guardClassExport(action){
+  return (...args)=>{
+    const c=cls();if(!requireClassAccess('exportClass',c,{online:false}))return;
+    const context=classPermissionContext(c,'exportClass',{online:false});
+    context.check();return action(...args);
+  };
+}
 function attemptBelongsToCurrentEvaluator(a){
   if(!a||a.finalizedAt||a.voidedAt||a.cloudShellOnly)return false;
   const uid=currentCloudUserId();
   if(uid){
     if(a.cloudEvaluatorUserId)return String(a.cloudEvaluatorUserId)===uid;
     if(a.startedByUserId)return String(a.startedByUserId)===uid;
+    return false;
   }
   if(a.startedByDeviceId)return String(a.startedByDeviceId)===String(db.deviceId||'');
   return !!a.deviceId&&String(a.deviceId)===String(db.deviceId||'');
 }
 function findActiveEvaluationLock(){
   const locks=[];
-  (db.classes||[]).filter(c=>!c.deletedAt&&!isClassClosed(c)).forEach(c=>{
+  (db.classes||[]).filter(c=>!c.deletedAt&&!isClassClosed(c)&&canAccessClass('evaluate',c,{online:false})).forEach(c=>{
     (c.students||[]).forEach(s=>{
       Object.values(s.attempts||{}).filter(Boolean).forEach(a=>{
         if(!a.startedAt||a.finalizedAt||a.voidedAt||a.cloudShellOnly||!attemptBelongsToCurrentEvaluator(a))return;
@@ -336,7 +399,7 @@ function activeEvaluationLockText(lock){
 function resumeActiveEvaluation(lock=findActiveEvaluationLock()){
   if(!lock)return false;
   const c=db.classes.find(x=>x.id===lock.classId),s=c?.students?.find(x=>x.id===lock.studentId),a=s?.attempts?.[String(lock.attemptNo)];
-  if(!c||!s||!a||a.finalizedAt)return false;
+  if(!c||!s||!a||a.finalizedAt||!canAccessClass('evaluate',c,{online:false})||!attemptBelongsToCurrentEvaluator(a))return false;
   currentClassId=c.id;currentStudentId=s.id;currentAttemptNo=lock.attemptNo;
   renderEval();showView('evalView');requestEvalWakeLock();return true;
 }
@@ -431,8 +494,10 @@ function event(label,detail=''){
 
 // ---------- Classes / roster ----------
 function createClass(data){
+  if(!requireClassAccess('manageClass',data))return null;
   const source=TIERS[data.tierId];
   const ts=now();const c={id:uuid(),name:String(data.name||'').trim(),tierId:data.tierId,roster:String(data.roster||'').trim(),scenario:String(data.scenario||'').trim(),scenarioVersion:String(data.scenarioVersion||'1').trim()||'1',date:data.date,siteCode:String(data.siteCode||'').trim(),courseType:String(data.courseType||'initial'),scenarioDifficulty:String(data.scenarioDifficulty||'standard'),scenarioProfile:String(data.scenarioProfile||'').trim(),leadEvaluator:String(data.leadEvaluator||'').trim(),evaluatorId:String(data.evaluatorId||'').trim(),curriculumId:`TCCC-TIER${data.tierId}`,appVersion:APP_VERSION,createdAt:ts,modifiedAt:ts,deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,status:'draft',closedAt:null,closedBy:'',deletedAt:null,scenarioNT:[],students:[],cloudSync:{enabled:true,status:navigator.onLine?'pending':'offline',error:'',createdBy:'',lastSyncedAt:0,localModifiedAt:ts,remoteModifiedAt:0},contentVersion:`${source.source} | app ${APP_VERSION}`,tierSnapshot:deep(source)};
+  c.localCreatedByUserId=currentCloudUserId();
   applyClassLocationFields(c,data);db.classes.unshift(c);saveDb();
   localStorage.setItem(DB_KEY,JSON.stringify(db));
   window.dispatchEvent(new CustomEvent('raps-local-class-change',{detail:{classId:c.id,at:ts}}));
@@ -449,6 +514,29 @@ function classStats(c){
 }
 function showView(id){ ['homeView','classView','evalView'].forEach(v=>$(v).classList.toggle('hidden',v!==id)); window.scrollTo(0,0); }
 function showHome(){ releaseEvalWakeLock();currentClassId=currentStudentId=null; renderHome(); showView('homeView'); }
+function scrubPrivateViews(){
+  releaseEvalWakeLock();currentClassId=currentStudentId=null;currentAttemptNo=1;
+  observationUndo=observationMessage=null;rosterSearchTerm='';rosterFilter='all';
+  managementFilters={majcom:'',installationId:'',tierId:'',courseType:''};
+  for(const id of ['formModal','reportModal'])closeModal(id);
+  modalFocusState.clear();deferredModalFocus=null;
+  for(const id of ['classTitle','classSub','classState','classMeta','closedBannerText','closedArchiveStatus',
+    'scenarioCoverage','classAnalyticsKpis','classGapTable','classRootCauses','studentComparison','classHeatmap',
+    'evaluatorSignals','rosterCount','rosterList','activeEvaluationLockBanner','studentLabel','attemptBadge',
+    'attemptLabel','tierTitle','tierSource','instructions','elapsedTop','criticalTop','gradedTop','unresolvedTop',
+    'globalTimer','quickCufTimer','activeTimers','activeTimerCount','items','tabs','sectionTitle','sectionProgress',
+    'sectionTools','timeline','eventCount','learnerPracticeHistory','observeFocus','diagnosticReviewQueue',
+    'observationFeedbackText','aarText','formModalTitle','formModalBody']){const element=$(id);if(element)element.textContent='';}
+  for(const id of ['trainerSign','attemptEvaluatorId','studentSign','overallNotes','rosterSearch','rosterFile','backupImportFile']){const element=$(id);if(element)element.value='';}
+  if($('activeEvaluationLockBanner'))$('activeEvaluationLockBanner').classList.add('hidden');
+  setReadOnly(true);setHomeArea('evaluate');showView('homeView');
+}
+function refreshPrivateViewAccess(){
+  if(currentClassId&&!canAccessClass('readClass',cls(),{online:false}))scrubPrivateViews();
+  renderHome();
+  if(currentClassId&&!$('classView')?.classList.contains('hidden'))renderClass();
+  if(currentClassId&&!$('evalView')?.classList.contains('hidden'))renderEval();
+}
 function setHomeArea(area){
   homeArea=['evaluate','manage','readiness','program'].includes(area)?area:'evaluate';
   document.querySelectorAll('[data-app-area]').forEach(el=>el.classList.toggle('hidden',el.dataset.appArea!==homeArea));
@@ -461,10 +549,56 @@ function cloudSyncBadge(c){
   const label=status==='synced'?'SYNCED':status==='syncing'?'SYNCING':status==='offline'?'OFFLINE':status==='conflict'?'CONFLICT':status==='error'?'SYNC ERROR':'PENDING';
   return `<span class="syncBadge ${esc(status)}" title="${esc(s.error||'')}">${label}</span>`;
 }
-function currentAccessRole(){return String(window.RAPS_CLOUD?.role||document.body?.dataset?.rapsRole||'');}
-function hasEnterpriseAccess(){return currentAccessRole()==='enterprise_admin';}
-function hasClassCloseAccess(){return ['program_manager','majcom_manager','enterprise_admin'].includes(currentAccessRole());}
-function currentCloudClient(){return window.RAPS_CLOUD?.client||window.RAPS_SUPABASE||null;}
+function hasEnterpriseAccess(){return window.RAPS_PERMISSIONS?.hasRole('enterprise_admin')===true;}
+function hasClassCloseAccess(c=cls()){return canAccessClass('closeClass',c);}
+function currentCloudClient(){
+  const client=window.RAPS_CLOUD?.client||window.RAPS_SUPABASE,c=cls();
+  if(!client||!c||!canAccessClass('readClass',c))return null;
+  const context=classPermissionContext(c,'readClass');
+  const check=action=>{
+    const current=context.check();
+    if(!canAccessClass(action,current))throw new Error('Your account no longer has permission for this class action.');
+  };
+  let sessionPromise=null;
+  const boundToken=()=>sessionPromise||(sessionPromise=(async()=>{
+    check('readClass');
+    if(!client.auth?.getSession)throw new Error('A verified signed-in session is required for this action.');
+    const {data,error}=await client.auth.getSession();
+    check('readClass');
+    const session=data?.session;
+    if(error||!session?.access_token||session.user?.id!==context.token.userId)throw new Error('Your sign-in session changed or expired. Sign in again.');
+    return session.access_token;
+  })());
+  const bindHeaders=(query,token)=>{
+    if(typeof query?.setHeader==='function')return query.setHeader('Authorization',`Bearer ${token}`);
+    if(query?.headers&&typeof query.headers.set==='function'){query.headers.set('Authorization',`Bearer ${token}`);return query;}
+    if(query?.headers&&typeof query.headers==='object'){query.headers={...query.headers,Authorization:`Bearer ${token}`};return query;}
+    throw new Error('RaPS could not bind this request to your signed-in account. Reload and try again.');
+  };
+  const wrap=(query,action)=>new Proxy(query,{
+    get(target,key){
+      if(key==='then')return (resolve,reject)=>(async()=>{
+        const token=await boundToken();check(action);
+        const result=await bindHeaders(target,token);check(action);return result;
+      })().then(resolve,reject);
+      const value=target[key];
+      return typeof value==='function'?(...args)=>{check(action);return wrap(value.apply(target,args),action);}:value;
+    }
+  });
+  const actions={claim_evaluation_authoritatively:'evaluate',finalize_evaluation_authoritatively:'evaluate',void_evaluation_authoritatively:'evaluate',close_class_authoritatively:'closeClass',request_closed_class_archive_deletion:'deleteClass'};
+  return {
+    from(table){check('readClass');return wrap(client.from(table),'readClass');},
+    rpc(name,args,options){
+      const action=actions[name];
+      if(!action)throw new Error('This class action is not available through the RaPS evaluator client.');
+      check(action);
+      return {then(resolve,reject){return (async()=>{
+        const token=await boundToken();check(action);
+        const result=await bindHeaders(client.rpc(name,args,options),token);check(action);return result;
+      })().then(resolve,reject);}};
+    }
+  };
+}
 function authoritativeEvaluationClient(action='Evaluation action'){
   const cloud=window.RAPS_CLOUD,client=currentCloudClient();
   if(!navigator.onLine)throw new Error(`${action} requires an online connection so RaPS can preserve the server-authoritative evaluator lock.`);
@@ -479,7 +613,7 @@ function serverActiveEvaluationText(data){
   const eventId=data?.existingEventId||data?.eventId||'';
   const participantId=data?.existingParticipantId||data?.participantId||'';
   const attemptNo=Number(data?.existingAttemptNumber||data?.attemptNumber||1);
-  const c=(db.classes||[]).find(x=>String(x.id)===String(eventId));
+  const c=(db.classes||[]).find(x=>String(x.id)===String(eventId)&&canAccessClass('readClass',x,{online:false}));
   const s=c?.students?.find(x=>String(x.id)===String(participantId));
   if(c&&s)return `${s.rank?`${s.rank} `:''}${s.name||'Student'} · Attempt ${attemptNo} · ${c.name||'Class'}`;
   return `Server evaluation ${data?.existingEvaluationId||data?.evaluationId||'already active'} · Attempt ${attemptNo}`;
@@ -507,15 +641,62 @@ async function claimEvaluationOnServer(c,s,a){
 }
 function archiveDate(value){if(!value)return '—';const d=new Date(value);return Number.isFinite(d.getTime())?d.toLocaleString():'—';}
 function archiveIntegrityShort(value){return value?String(value).slice(0,12)+'…':'—';}
+function homeClassRow(c,manage=false){
+  const st=classStats(c),t=c.tierSnapshot||TIERS[c.tierId],life=lifecycleStatus(c).toLowerCase(),loc=c.homeInstallationName||c.location||'Location not set',cmd=c.majcom?commandName(c.majcom):'MAJCOM not set';
+  const remove=manage&&hasEnterpriseAccess()?`<button class="ghost small" data-remove-local-class="${esc(c.id)}" title="Remove this browser copy after all class, roster, and grading changes have synchronized. Shared records stay on the server.">Remove Local Copy</button>`:'';
+  return `<div class="classRow"><div><div class="rowTitle">${esc(c.name||'Untitled Class')} <span class="statusPill ${life}">${life.toUpperCase()}</span> ${cloudSyncBadge(c)}</div><div class="rowSub">${esc(cmd)} · ${esc(loc)} · Tier ${c.tierId} ${esc(t.shortName)}<br>${esc(c.roster||'No roster #')} · ${esc(c.scenario||'Scenario not named')} · ${st.completed}/${st.total} finalized · ${st.qualified} qualified${c.closedAt?` · Closed ${new Date(c.closedAt).toLocaleDateString()}`:''}</div></div><div class="rowActions"><button class="action compact" data-open-class="${esc(c.id)}">${isClassClosed(c)?'View':'Open'}</button>${remove}</div></div>`;
+}
+function unverifiedLocalClasses(){return db.classes.filter(c=>!c.cloudSync?.createdBy&&!c.created_by&&!c.localCreatedByUserId);}
+function renderLocalRecoveryNotice(){
+  const count=unverifiedLocalClasses().length,active=(window.RAPS_PERMISSIONS?.activeMemberships()||[]).length>0;
+  for(const [target,id] of [['classList','localOwnershipRecoveryNotice'],['manageClassList','localOwnershipRecoveryManageNotice']]){
+    const list=$(target);if(!list)continue;
+    let notice=$(id);if(!notice){notice=document.createElement('div');notice.id=id;notice.className='helper localRecoveryNotice';notice.setAttribute('role','status');list.before(notice);}
+    notice.classList.toggle('hidden',!active||!count);
+    notice.innerHTML=active&&count?`<b>${count} local class${count===1?' needs':'es need'} ownership verification.</b> Reconnect and use Sync Classes to verify server ownership. Unsynced records remain on this device. An Enterprise Administrator can review or export a recovery backup.${hasEnterpriseAccess()?' <button class="ghost small" data-export-local-recovery>Export Recovery Backup</button>':''}`:'';
+  }
+  document.querySelectorAll('[data-export-local-recovery]').forEach(button=>button.onclick=async()=>{
+    if(!hasEnterpriseAccess())return;
+    const token=window.RAPS_PERMISSIONS.snapshot();
+    const records=unverifiedLocalClasses();if(!records.length)return;
+    if(!window.RAPS_PERMISSIONS.isCurrent(token)||!hasEnterpriseAccess())return;
+    await saveFile('TCCC_Unverified_Local_Recovery.json',bytes(JSON.stringify({type:'TCCC_LOCAL_RECOVERY_BACKUP',appVersion:APP_VERSION,classes:records},null,2)),'application/json');
+  });
+}
+function renderExcludedLocalCopies(){
+  const list=$('manageClassList');if(!list)return;
+  let panel=$('excludedLocalCopies');if(!panel){panel=document.createElement('div');panel.id='excludedLocalCopies';list.after(panel);}
+  const active=(window.RAPS_PERMISSIONS?.activeMemberships()||[]).length>0,ids=active?getExcludedLocalClassIds():[];
+  panel.classList.toggle('hidden',!ids.length);
+  panel.innerHTML=ids.length?`<p class="helper">${ids.length} shared class cop${ids.length===1?'y is':'ies are'} removed from this browser. Automatic sync keeps them removed. Loading a copy checks your current server permissions.</p>${ids.map(id=>`<div class="classRow"><div class="rowSub">Class ${esc(id)}</div><div class="rowActions"><button class="action compact" data-reload-local-class="${esc(id)}">Load Local Copy</button></div></div>`).join('')}`:'';
+  panel.querySelectorAll('[data-reload-local-class]').forEach(button=>button.onclick=async()=>{
+    const permissions=window.RAPS_PERMISSIONS,token=permissions?.snapshot?.(),id=button.dataset.reloadLocalClass;
+    if(!permissions?.isCurrent(token)){alert('Reconnect and sign in with an active training role to load this class.');return;}
+    if(!window.RAPS_CLASS_SYNC?.loadClass){alert('Class loading is not ready. Reload RaPS and try again.');return;}
+    button.disabled=true;
+    try{
+      const loaded=await window.RAPS_CLASS_SYNC.loadClass(id);
+      if(!permissions.isCurrent(token))return;
+      if(!loaded)throw new Error('The server did not grant access to this class.');
+      await window.RAPS_ROSTER_SYNC?.pullRosterAndShells?.();
+      if(!permissions.isCurrent(token))return;
+      await window.RAPS_GRADING_SYNC?.pullAll?.();
+      if(permissions.isCurrent(token))renderHome();
+    }catch(error){if(permissions.isCurrent(token))alert(`Class could not be loaded: ${error.message||error}`);}
+    finally{if(button.isConnected)button.disabled=false;}
+  });
+}
 function renderHome(){
-  const active=db.classes.filter(c=>!c.deletedAt),trash=db.classes.filter(c=>c.deletedAt),enterprise=hasEnterpriseAccess();
+  discardExcludedCleanCopies();
+  const visible=db.classes.filter(c=>canAccessClass('readClass',c,{online:false}));
+  const active=visible.filter(c=>!c.deletedAt),trash=visible.filter(c=>c.deletedAt),enterprise=hasEnterpriseAccess();
   active.forEach(ensureLocationFields);
   $('classCount').textContent=`${active.length} class${active.length===1?'':'es'}`;
-  $('classList').innerHTML=active.length?active.map(c=>{
-    const st=classStats(c),t=c.tierSnapshot||TIERS[c.tierId],life=lifecycleStatus(c).toLowerCase(),loc=c.homeInstallationName||c.location||'Location not set',cmd=c.majcom?commandName(c.majcom):'MAJCOM not set';
-    return `<div class="classRow"><div><div class="rowTitle">${esc(c.name||'Untitled Class')} <span class="statusPill ${life}">${life.toUpperCase()}</span> ${cloudSyncBadge(c)}</div><div class="rowSub">${esc(cmd)} · ${esc(loc)} · Tier ${c.tierId} ${esc(t.shortName)}<br>${esc(c.roster||'No roster #')} · ${esc(c.scenario||'Scenario not named')} · ${st.completed}/${st.total} finalized · ${st.qualified} qualified${c.closedAt?` · Closed ${new Date(c.closedAt).toLocaleDateString()}`:''}</div></div><div class="rowActions"><button class="action compact" data-open-class="${c.id}">${isClassClosed(c)?'View':'Open'}</button></div></div>`;
-  }).join(''):'<div class="empty">No classes yet. Create a class to begin.</div>';
-  if($('manageClassList'))$('manageClassList').innerHTML=$('classList').innerHTML;
+  $('classList').innerHTML=active.length?active.map(c=>homeClassRow(c)).join(''):'<div class="empty">No local classes are available for your active account. Create a class or load an authorized shared class to begin.</div>';
+  if($('manageClassList'))$('manageClassList').innerHTML=active.length?active.map(c=>homeClassRow(c,true)).join(''):$('classList').innerHTML;
+  const canCreate=(window.RAPS_PERMISSIONS?.activeMemberships()||[]).length>0;
+  if($('newClassBtn'))$('newClassBtn').disabled=!canCreate;
+  if($('importBackupBtn'))$('importBackupBtn').disabled=!canCreate;
   $('trashCard').classList.toggle('hidden',!enterprise||trash.length===0);
   $('trashCount').textContent=enterprise?`${trash.length}`:'0';
   $('trashList').innerHTML=enterprise?trash.map(c=>`<div class="classRow"><div><div class="rowTitle">${esc(c.name)} <span class="statusPill trash">TRASH</span> ${cloudSyncBadge(c)}</div><div class="rowSub">Removed ${new Date(c.deletedAt).toLocaleString()}${c.cloudSync?.error?`<br>${esc(c.cloudSync.error)}`:''}</div></div><div class="rowActions"><button class="action compact" data-restore-class="${c.id}">Restore across devices</button><button class="ghost small danger" data-purge-class="${c.id}">Remove Local Copy</button></div></div>`).join(''):'';
@@ -523,28 +704,63 @@ function renderHome(){
   if(enterprise){
     document.querySelectorAll('[data-restore-class]').forEach(b=>b.onclick=()=>restoreDeletedClass(b.dataset.restoreClass));
     document.querySelectorAll('[data-purge-class]').forEach(b=>b.onclick=()=>purgeDeletedClass(b.dataset.purgeClass));
+    document.querySelectorAll('[data-remove-local-class]').forEach(b=>b.onclick=()=>removeLocalClassCopy(b.dataset.removeLocalClass));
   }
+  renderLocalRecoveryNotice();renderExcludedLocalCopies();
   renderManagementDashboard();
   setHomeArea(homeArea);
 }
 function restoreDeletedClass(id){
   if(!hasEnterpriseAccess()){alert('Enterprise Administrator access is required to restore deleted classes.');return;}
   const c=db.classes.find(x=>x.id===id);if(!c)return;
+  if(!requireClassAccess('restoreClass',c))return;
   if(isClassClosed(c)){alert('Closed classes are retention records and are not restored through Local Trash. Open the closed class and use the audited archive controls instead.');return;}
   if(queueTrashAction(c,'restore'))renderHome();
 }
 function purgeDeletedClass(id){
+  return removeLocalClassCopy(id);
+}
+function localCopyRemovalIssue(c){
+  const state=c?.cloudSync||{};
+  if(!c?.id||state.enabled!==true)return 'This class has not been saved to the server. Sync the class before removing its local copy.';
+  if(readTrashOutbox(c.id)||state.trashAction)return 'Sync the pending shared deletion or restoration before removing this local copy.';
+  if(state.status!=='synced'||!state.baseMetadataSignature||!window.RAPS_CLASS_SYNC?.classMetadataSignature||window.RAPS_CLASS_SYNC.classMetadataSignature(c)!==state.baseMetadataSignature)return 'Class changes are not fully synchronized. Use Sync Classes and resolve any errors or conflicts first.';
+  if(c.cloudRosterSync?.status!=='synced'||c.cloudRosterSync.syncedByUserId!==currentCloudUserId()||!c.cloudRosterSync?.syncedRosterSignature||localRosterSignature(c)!==c.cloudRosterSync.syncedRosterSignature)return 'The server has not confirmed this exact roster for your account. Use Sync Classes before removing the local copy.';
+  for(const s of c.students||[]){
+    for(const a of Object.values(s.attempts||{}).filter(Boolean)){
+      if(a.startedAt&&!a.finalizedAt&&!a.voidedAt)return 'An assessment is still in progress. Finalize or void it before removing this local copy.';
+      if(a.cloudShellOnly)continue;
+      const grading=a.cloudGrading||{},signature=window.RAPS_GRADING_SYNC?.localGradingSignature;
+      if(grading.status!=='synced'||grading.syncedByUserId!==currentCloudUserId()||!grading.baseGradingSignature||!signature||signature(a)!==grading.baseGradingSignature)return 'Grading records have not been fully confirmed on the server for your account. Use Sync Classes and resolve any grading errors or conflicts first.';
+    }
+  }
+  return '';
+}
+function removeLocalClassCopy(id){
   if(!hasEnterpriseAccess()){alert('Enterprise Administrator access is required to remove local class copies.');return;}
   const c=db.classes.find(x=>x.id===id);if(!c)return;
-  if(isClassClosed(c)){alert('Closed classes cannot be locally purged. Use the audited closed-class archive deletion workflow.');return;}
-  if(!c.deletedAt)return;
-  let confirmedDeletion=0;try{confirmedDeletion=Number(JSON.parse(c.cloudSync?.baseMetadataSignature||'{}').deletedAt||0);}catch{}
-  if(c.cloudSync?.enabled&&(c.cloudSync.status!=='synced'||c.cloudSync.trashAction||confirmedDeletion!==Number(c.deletedAt))){alert('Sync this deletion before removing its local copy. This device still needs to send or confirm the shared deletion.');return;}
-  const token=prompt(`Remove the local copy of "${c.name}" from this browser/device?\n\nThis does not replace authoritative cloud retention controls.\n\nType REMOVE LOCAL to continue.`);
+  if(!requireClassAccess('readClass',c))return;
+  const issue=localCopyRemovalIssue(c);if(issue){alert(issue);return;}
+  const token=prompt(`Remove the local copy of "${c.name}" from this browser/device?\n\nShared classes, assessment records, and server archives will remain on the NUC and other devices. Automatic sync will leave this copy removed. Use Load Local Copy under Manage Training to load it again.\n\nType REMOVE LOCAL to continue.`);
   if(token!=='REMOVE LOCAL')return;
-  db.classes=db.classes.filter(x=>x.id!==id);localStorage.setItem(DB_KEY,JSON.stringify(db));renderHome();
+  if(!hasEnterpriseAccess()||!requireClassAccess('readClass',c))return;
+  const latestIssue=localCopyRemovalIssue(c);if(latestIssue){alert(latestIssue);return;}
+  let previous=null;
+  try{
+    const saved=JSON.parse(localStorage.getItem(DB_KEY));
+    const savedClass=saved?.classes?.find(x=>x.id===id);
+    if(!savedClass||JSON.stringify(savedClass)!==JSON.stringify(c)){alert('This class changed in another tab. Reload RaPS and sync before removing its local copy.');return;}
+    previous=localStorage.getItem(LOCAL_COPY_EXCLUSION_PREFIX+id);
+    localStorage.setItem(LOCAL_COPY_EXCLUSION_PREFIX+id,JSON.stringify({classId:id,userId:currentCloudUserId(),removedAt:now()}));
+    const nextDb={...saved,classes:saved.classes.filter(x=>x.id!==id)};
+    try{localStorage.setItem(DB_KEY,JSON.stringify(nextDb));}
+    catch(error){if(previous===null)clearLocalCopyHidden(id);else localStorage.setItem(LOCAL_COPY_EXCLUSION_PREFIX+id,previous);throw error;}
+    db=normalizeDb(nextDb)||nextDb;
+  }catch{alert('The local copy was kept because browser storage could not save its removal. Free storage and try again.');return;}
+  if(currentClassId===id)showHome();else renderHome();
+  window.dispatchEvent(new CustomEvent('raps-local-copy-removed',{detail:{classId:id}}));
 }
-function openClass(id){releaseEvalWakeLock();const c=db.classes.find(x=>x.id===id);if(!c||c.deletedAt){renderHome();return;}currentClassId=id;currentStudentId=null;renderClass();showView('classView');}
+function openClass(id){releaseEvalWakeLock();const c=db.classes.find(x=>x.id===id);if(!c||c.deletedAt){renderHome();return;}if(!requireClassAccess('readClass',c,{online:false}))return;currentClassId=id;currentStudentId=null;renderClass();showView('classView');}
 function finalStatusForStudent(s){
   const a1=s.attempts?.['1'],a2=s.attempts?.['2'];
   if(a2&&!a2.finalizedAt)return 'A2 IN PROGRESS';
@@ -645,7 +861,7 @@ function renderClassAnalytics(c,t){
 }
 function fmtRate(x){return x==null?'—':`${Math.round(x*100)}%`;}
 function managementScopeClasses(){
-  return db.classes.filter(c=>!c.deletedAt).filter(c=>{ensureLocationFields(c);return (!managementFilters.majcom||c.majcom===managementFilters.majcom)&&(!managementFilters.installationId||(managementFilters.installationId.startsWith('CUSTOM:')?(!c.homeInstallationId&&c.homeInstallationName===managementFilters.installationId.slice(7)):c.homeInstallationId===managementFilters.installationId))&&(!managementFilters.tierId||String(c.tierId)===managementFilters.tierId)&&(!managementFilters.courseType||c.courseType===managementFilters.courseType);});
+  return db.classes.filter(c=>!c.deletedAt&&canAccessClass('readClass',c,{online:false})).filter(c=>{ensureLocationFields(c);return (!managementFilters.majcom||c.majcom===managementFilters.majcom)&&(!managementFilters.installationId||(managementFilters.installationId.startsWith('CUSTOM:')?(!c.homeInstallationId&&c.homeInstallationName===managementFilters.installationId.slice(7)):c.homeInstallationId===managementFilters.installationId))&&(!managementFilters.tierId||String(c.tierId)===managementFilters.tierId)&&(!managementFilters.courseType||c.courseType===managementFilters.courseType);});
 }
 function aggregateManagement(classes){
   const out={classes:classes.length,students:0,a1Final:0,a1Pass:0,finalized:0,finalPass:0,remediationEligible:0,remediationFinal:0,remediationPass:0,criticalStudents:0,failObs:0,classifiedFailObs:0,rootCounts:{},modeCounts:{},gaps:{}};
@@ -675,7 +891,7 @@ function renderManagementFilters(classes){
   if($('managementTier'))$('managementTier').value=managementFilters.tierId;if($('managementCourseType'))$('managementCourseType').value=managementFilters.courseType;
 }
 function renderManagementDashboard(){
-  if(!$('managementKpis'))return;const all=db.classes.filter(c=>!c.deletedAt);all.forEach(ensureLocationFields);renderManagementFilters(all);let scope=managementScopeClasses();
+  if(!$('managementKpis'))return;const all=db.classes.filter(c=>!c.deletedAt&&canAccessClass('readClass',c,{online:false}));all.forEach(ensureLocationFields);renderManagementFilters(all);let scope=managementScopeClasses();
   const selectedInst=$('managementInstallation')?.value||managementFilters.installationId;
   const a=aggregateManagement(scope),maj=managementGroupRows(scope,'majcom'),inst=managementGroupRows(scope,'installation');
   const labels=[];if(managementFilters.majcom)labels.push(commandName(managementFilters.majcom));if(selectedInst)labels.push(selectedInst.startsWith('CUSTOM:')?selectedInst.slice(7):(installationById(selectedInst)?.name||selectedInst));if(managementFilters.tierId)labels.push(`Tier ${managementFilters.tierId}`);if(managementFilters.courseType)labels.push(managementFilters.courseType.replace(/-/g,' '));$('managementScopeLabel').textContent=labels.length?labels.join(' · '):'All local classes';
@@ -695,7 +911,7 @@ async function renderClosedArchiveStatus(c){
     return;
   }
   panel.classList.remove('hidden');
-  if(!hasEnterpriseAccess()){
+  if(!hasEnterpriseAccess()||!canAccessClass('readClass',c)){
     panel.dataset.state='retained';
     panel.innerHTML='<b>SERVER RETENTION ENABLED</b><span>Closed classes are automatically archived as CSV on the RaPS NUC in monthly folders. Archive deletion is restricted to Enterprise Administrator access.</span>';
     return;
@@ -709,11 +925,18 @@ async function renderClosedArchiveStatus(c){
   }
   panel.dataset.state='checking';
   panel.innerHTML='<b>CHECKING SERVER ARCHIVE</b><span>Verifying closed-class retention on the RaPS NUC…</span>';
-  const {data,error}=await client.from('closed_class_archives')
+  const context=classPermissionContext(c,'deleteClass');
+  let result;
+  try{result=await client.from('closed_class_archives')
     .select('original_class_id,archive_status,closed_at,archived_at,sha256,size_bytes,deletion_requested_at,deletion_reason,deleted_at,worker_error')
     .eq('original_class_id',c.id)
     .maybeSingle();
-  if(currentClassId!==c.id)return;
+    context.check();
+  }catch(error){
+    if(!window.RAPS_PERMISSIONS?.isCurrent(context.token)||currentClassId!==c.id)return;
+    panel.dataset.state='error';panel.innerHTML=`<b>ARCHIVE STATUS ERROR</b><span>${esc(error.message||error)}</span>`;return;
+  }
+  const {data,error}=result;
   if(error){
     panel.dataset.state='error';
     panel.innerHTML=`<b>ARCHIVE STATUS ERROR</b><span>${esc(error.message||String(error))}</span>`;
@@ -746,20 +969,30 @@ async function renderClosedArchiveStatus(c){
 async function requestClosedClassArchiveDeletion(c){
   if(!c||!isClassClosed(c))return;
   if(!hasEnterpriseAccess()){alert('Only an Enterprise Administrator may request deletion of a closed-class archive.');return;}
+  if(!requireClassAccess('deleteClass',c))return;
+  const context=classPermissionContext(c,'deleteClass');
   const cloud=window.RAPS_CLOUD,client=currentCloudClient();
   if(!cloud?.connected||!client){alert('Archive deletion requires an online Enterprise session. Reconnect and try again.');return;}
   const reason=prompt(`ENTERPRISE ARCHIVE DELETION REQUEST\n\nClass: ${c.name||'Untitled Class'}\n\nEnter the required deletion reason:`);
   if(!reason||!reason.trim())return;
   const token=prompt('This permanently removes the retained CSV from the NUC after the server worker processes the request.\n\nType DELETE ARCHIVE to continue.');
   if(token!=='DELETE ARCHIVE')return;
-  const {error}=await client.rpc('request_closed_class_archive_deletion',{p_class_id:c.id,p_reason:reason.trim()});
-  if(error){alert(`Archive deletion request failed:\n${error.message||error}`);await renderClosedArchiveStatus(c);return;}
-  alert('Archive deletion request accepted. The NUC archive worker will perform and audit the deletion.');
-  await renderClosedArchiveStatus(c);
+  try{
+    context.check();
+    const {error}=await client.rpc('request_closed_class_archive_deletion',{p_class_id:c.id,p_reason:reason.trim()});
+    context.check();
+    if(error)throw error;
+    alert('Archive deletion request accepted. The NUC archive worker will perform and audit the deletion.');
+    await renderClosedArchiveStatus(c);
+  }catch(error){
+    if(!window.RAPS_PERMISSIONS?.isCurrent(context.token)||currentClassId!==c.id)return;
+    alert(`Archive deletion request failed:\n${error.message||error}`);await renderClosedArchiveStatus(c);
+  }
 }
 
 function renderClass(){
   const c=cls();if(!c||c.deletedAt)return showHome();
+  if(!canAccessClass('readClass',c,{online:false}))return showHome();
   const t=tier(),stats=classStats(c);
   const closed=isClassClosed(c),life=lifecycleStatus(c);
   $('classTitle').textContent=c.name||'TCCC Class';
@@ -780,10 +1013,10 @@ function renderClass(){
   document.querySelectorAll('[data-roster-filter]').forEach(b=>b.classList.toggle('active',b.dataset.rosterFilter===rosterFilter));
   renderClassAnalytics(c,t);
   if($('analyticsScope'))$('analyticsScope').textContent=`${classAttempt1s(c).length} finalized A1 · normalized rates`;
-  $('editClassBtn').disabled=closed;$('scenarioBtn').disabled=closed;$('addStudentBtn').disabled=closed;$('importRosterBtn').disabled=closed;
+  $('editClassBtn').disabled=closed||!canAccessClass('manageClass',c);$('scenarioBtn').disabled=closed||!canAccessClass('manageClass',c);$('addStudentBtn').disabled=closed||!canAccessClass('manageRoster',c);$('importRosterBtn').disabled=closed||!canAccessClass('manageRoster',c);
   const classConflictBtn=$('resolveClassConflictBtn');
   if(classConflictBtn){
-    const conflicted=!closed&&String(c.cloudSync?.status||'')==='conflict';
+    const conflicted=!closed&&canAccessClass('manageClass',c)&&String(c.cloudSync?.status||'')==='conflict';
     classConflictBtn.classList.toggle('hidden',!conflicted);
     classConflictBtn.disabled=!conflicted;
     classConflictBtn.title=c.cloudSync?.error||'Resolve class metadata conflict';
@@ -809,6 +1042,7 @@ function gradingSyncBadge(a){
 }
 function rosterRow(c,s){
   const a1=s.attempts?.['1'],a2=s.attempts?.['2'],closed=isClassClosed(c),lock=findActiveEvaluationLock();
+  const canEvaluate=canAccessClass('evaluate',c,{online:false});
   const best=a2?.finalizedAt?a2:a1?.finalizedAt?a1:null;
   const status=a2&&!a2.finalizedAt?'A2 IN PROGRESS':a1&&!a1.finalizedAt?'A1 IN PROGRESS':best?best.finalResult:'NOT STARTED';
   const clsx=status==='PASS'?'pass':status==='FAIL'?'fail':status.includes('IN PROGRESS')?'progress':'';
@@ -824,15 +1058,15 @@ function rosterRow(c,s){
     if(a2)buttons+=` <button class="action compact" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,'View A2')}</button>`;
     if(!a1&&!a2)buttons='<span class="rowSub">No evaluation</span>';
   }else{
-    if(!a1)buttons=`<button class="action compact primary" data-start="${s.id}" data-attempt="1"${attrs(1)}>${label(1,'Start A1')}</button>`;
+    if(!a1)buttons=canEvaluate?`<button class="action compact primary" data-start="${s.id}" data-attempt="1"${attrs(1)}>${label(1,'Start A1')}</button>`:'<span class="rowSub">Not started · Read-only access</span>';
     else if(a1.cloudShellOnly)buttons=`<button class="action compact" data-start="${s.id}" data-attempt="1"${attrs(1)}>Cloud A1 Shell</button>`;
-    else buttons=`<button class="action compact${!a1.finalizedAt?' primary':''}" data-start="${s.id}" data-attempt="1"${attrs(1)}>${label(1,a1.finalizedAt?'View A1':'Continue A1')}</button>`;
-    if(a2)buttons+=a2.cloudShellOnly?` <button class="action compact" data-start="${s.id}" data-attempt="2"${attrs(2)}>Cloud A2 Shell</button>`:` <button class="action compact${!a2.finalizedAt?' primary':''}" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,a2.finalizedAt?'View A2':'Continue A2')}</button>`;
-    else if(a1?.finalizedAt&&a1.finalResult==='FAIL')buttons+=` <button class="action compact primary" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,'Start A2 Remediation')}</button>`;
+    else buttons=`<button class="action compact${!a1.finalizedAt&&canEvaluate&&attemptBelongsToCurrentEvaluator(a1)?' primary':''}" data-start="${s.id}" data-attempt="1"${attrs(1)}>${label(1,!a1.finalizedAt&&canEvaluate&&attemptBelongsToCurrentEvaluator(a1)?'Continue A1':'View A1')}</button>`;
+    if(a2)buttons+=a2.cloudShellOnly?` <button class="action compact" data-start="${s.id}" data-attempt="2"${attrs(2)}>Cloud A2 Shell</button>`:` <button class="action compact${!a2.finalizedAt&&canEvaluate&&attemptBelongsToCurrentEvaluator(a2)?' primary':''}" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,!a2.finalizedAt&&canEvaluate&&attemptBelongsToCurrentEvaluator(a2)?'Continue A2':'View A2')}</button>`;
+    else if(canEvaluate&&a1?.finalizedAt&&a1.finalResult==='FAIL')buttons+=` <button class="action compact primary" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,'Start A2 Remediation')}</button>`;
     else if(a1?.finalizedAt&&a1.finalResult==='PASS')buttons+=` <span class="rowSub">A2 not indicated after A1 PASS</span>`;
-    if(a1?.cloudGrading?.status==='conflict')buttons+=` <button class="ghost small" data-resolve-grade-conflict="${s.id}" data-attempt="1">Resolve Grade Conflict</button>`;
-    if(a2?.cloudGrading?.status==='conflict')buttons+=` <button class="ghost small" data-resolve-grade-conflict="${s.id}" data-attempt="2">Resolve Grade Conflict</button>`;
-    buttons+=` <button class="ghost small danger" data-delete-student="${s.id}"${lock?' disabled aria-disabled="true" title="Roster deletion is locked while an evaluation is in progress."':''}>Delete</button>`;
+    if(canEvaluate&&attemptBelongsToCurrentEvaluator(a1)&&a1?.cloudGrading?.status==='conflict')buttons+=` <button class="ghost small" data-resolve-grade-conflict="${s.id}" data-attempt="1">Resolve Grade Conflict</button>`;
+    if(canEvaluate&&attemptBelongsToCurrentEvaluator(a2)&&a2?.cloudGrading?.status==='conflict')buttons+=` <button class="ghost small" data-resolve-grade-conflict="${s.id}" data-attempt="2">Resolve Grade Conflict</button>`;
+    if(canAccessClass('manageRoster',c))buttons+=` <button class="ghost small danger" data-delete-student="${s.id}"${lock||Object.values(s.attempts||{}).some(a=>a?.startedAt)?' disabled aria-disabled="true" title="Assessment records must be retained. Only students without started assessments can be removed."':''}>Remove Student</button>`;
   }
   return `<div class="rosterRow"><div><div class="rowTitle">${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</div><div class="rowSub">${esc(s.trainingId||'No training ID')} · <span class="statusPill ${clsx}">${status}</span>${best?` · ${scoreStats(c.tierSnapshot,best).percentText} ${gradingSyncBadge(best)}`:a1?` ${gradingSyncBadge(a1)}`:''}</div></div><div class="rowActions">${buttons}</div></div>`;
 }
@@ -851,12 +1085,15 @@ function classConflictSummary(x){
 }
 async function resolveClassMetadataConflict(){
   const c=cls(),sync=window.RAPS_CLASS_SYNC;
+  if(!requireClassAccess('manageClass',c))return;
+  const context=classPermissionContext(c,'manageClass');
   if(!c||!sync?.inspectClassConflict||!sync?.resolveClassConflict){
     alert('Class conflict recovery is not available. Reload RaPS and try again.');
     return;
   }
   try{
     const inspection=await sync.inspectClassConflict(c);
+    context.check();
     const choice=String(prompt(
       'CLASS METADATA SYNC CONFLICT\n\n'+
       'Another device changed this class after this browser last synchronized. RaPS will not choose a winner automatically.\n\n'+
@@ -873,11 +1110,14 @@ async function resolveClassMetadataConflict(){
       : 'Use LOCAL class metadata?\n\nThis will replace the newer server class metadata. Roster and grading records are preserved.';
     if(!confirm(warning))return;
 
+    context.check();
     const ok=await sync.resolveClassConflict(c,choice.toLowerCase());
+    context.check();
     if(!ok)throw new Error('Class conflict resolution did not complete.');
     renderClass();
     alert(`CLASS CONFLICT RESOLVED\n\n${choice} is now the active class metadata version. Both pre-resolution branches were preserved locally.`);
   }catch(error){
+    if(!window.RAPS_PERMISSIONS?.isCurrent(context.token)||currentClassId!==c.id)return;
     alert('CLASS CONFLICT NOT RESOLVED\n\n'+String(error?.message||error));
     renderClass();
   }
@@ -895,8 +1135,11 @@ async function resolveGradeConflict(studentId,attemptNo){
     alert('Conflict recovery is not available. Reload RaPS and try again.');
     return;
   }
+  if(!requireClassAccess('resolveConflict',c)||!attemptBelongsToCurrentEvaluator(a)){alert('Only the assigned evaluator can resolve this assessment conflict.');return;}
+  const context=classPermissionContext(c,'resolveConflict');
   try{
     const inspection=await sync.inspectConflict(c,s,a);
+    context.check();
     const choice=String(prompt(
       'GRADING SYNC CONFLICT\n\n'+
       'Another device changed this evaluation after this browser last synchronized. RaPS will not choose a winner automatically.\n\n'+
@@ -913,19 +1156,49 @@ async function resolveGradeConflict(studentId,attemptNo){
       : 'Use LOCAL version?\n\nThis will replace the newer server grading, including criteria entered from another device. A recovery snapshot of both branches will be retained locally.';
     if(!confirm(warning))return;
 
+    if(!requireClassAccess('resolveConflict',c)||!attemptBelongsToCurrentEvaluator(a))return;
+    context.check();
     const ok=await sync.resolveConflict(c,s,a,choice.toLowerCase());
+    context.check();
     if(!ok)throw new Error('Conflict resolution did not complete.');
     renderClass();
     alert(`GRADING CONFLICT RESOLVED\n\n${choice} is now the active grading version. Both pre-resolution branches were preserved in the local recovery history.`);
   }catch(error){
+    if(!window.RAPS_PERMISSIONS?.isCurrent(context.token)||currentClassId!==c.id)return;
     alert('GRADING CONFLICT NOT RESOLVED\n\n'+String(error?.message||error));
     renderClass();
   }
 }
 function bindRosterRows(){
-  document.querySelectorAll('[data-start]').forEach(b=>b.onclick=()=>openEvaluation(b.dataset.start,Number(b.dataset.attempt)));
+  document.querySelectorAll('[data-start]').forEach(b=>b.onclick=()=>openAuthorizedEvaluation(b.dataset.start,Number(b.dataset.attempt)));
   document.querySelectorAll('[data-resolve-grade-conflict]').forEach(b=>b.onclick=()=>resolveGradeConflict(b.dataset.resolveGradeConflict,Number(b.dataset.attempt)));
-  document.querySelectorAll('[data-delete-student]').forEach(b=>b.onclick=()=>{const c=cls();if(isClassClosed(c))return;const st=c.students.find(x=>x.id===b.dataset.deleteStudent);if(confirm(`Delete ${st?.name||'student'} and all attempts?`)){c.students=c.students.filter(x=>x.id!==b.dataset.deleteStudent);saveDb();renderClass();}});
+  document.querySelectorAll('[data-delete-student]').forEach(b=>b.onclick=()=>{
+    const c=cls();if(!c||isClassClosed(c)||!requireClassAccess('manageRoster',c))return;
+    const st=c.students.find(x=>x.id===b.dataset.deleteStudent);if(!st)return;
+    if(findActiveEvaluationLock()||Object.values(st.attempts||{}).some(a=>a?.startedAt)){alert('Assessment records must be retained. Only students without started assessments can be removed.');return;}
+    if(confirm(`Remove ${st.name||'student'} from this roster?`)){
+      if(!requireClassAccess('manageRoster',c)||isClassClosed(c))return;
+      c.students=c.students.filter(x=>x.id!==b.dataset.deleteStudent);saveDb();renderClass();
+    }
+  });
+}
+function openAuthorizedEvaluation(studentId,attemptNo){
+  const c=cls(),a=c?.students?.find(s=>s.id===studentId)?.attempts?.[String(attemptNo)];
+  if(!requireClassAccess('readClass',c,{online:false}))return;
+  const needsStart=!a||a.cloudShellOnly&&!a.startedAt&&String(a.cloudStatus||'draft')==='draft';
+  if(needsStart&&!requireClassAccess('evaluate',c))return;
+  openEvaluation(studentId,attemptNo);
+  const begin=$('beginAttemptBtn');
+  if(needsStart&&begin){
+    const start=begin.onclick;
+    begin.onclick=(...args)=>{
+      if(cls()?.id!==c.id||!requireClassAccess('evaluate',c))return;
+      const context=classPermissionContext(c,'evaluate');
+      return Promise.resolve(start?.(...args)).finally(()=>{
+        if(!window.RAPS_PERMISSIONS?.isCurrent(context.token))scrubPrivateViews();
+      });
+    };
+  }
 }
 function closureIssues(c){
   const issues=[];
@@ -939,6 +1212,7 @@ function closureIssues(c){
   return issues;
 }
 async function syncClassForAuthoritativeClose(c){
+  const context=classPermissionContext(c,'closeClass');
   if(!navigator.onLine)throw new Error('Class closure requires an online connection to the RaPS server.');
   const cloud=window.RAPS_CLOUD,client=currentCloudClient();
   if(!cloud?.user?.id||!cloud?.connected||!client)throw new Error('Class closure requires an online authenticated RaPS session.');
@@ -946,8 +1220,10 @@ async function syncClassForAuthoritativeClose(c){
   if(!classSync?.pushClass||!rosterSync?.pushClassRosterAndShells||!gradingSync?.pushEvaluation)throw new Error('RaPS cloud synchronization is not fully initialized. Refresh the app and try again.');
 
   const classPushed=await classSync.pushClass(c);
+  context.check();
   if(!classPushed)throw new Error(c.cloudSync?.error||'Class metadata did not finish syncing.');
-  await rosterSync.pushClassRosterAndShells(c);
+  if(await rosterSync.pushClassRosterAndShells(c)===false)throw new Error('The class roster could not be confirmed on the server.');
+  context.check();
 
   for(const s of (c.students||[])){
     for(const a of Object.values(s.attempts||{})){
@@ -956,6 +1232,7 @@ async function syncClassForAuthoritativeClose(c){
       const alreadySynced=state.status==='synced'&&remoteMs&&localMs<=remoteMs+10;
       if(alreadySynced)continue;
       const pushed=await gradingSync.pushEvaluation(c,s,a);
+      context.check();
       if(!pushed){
         const detail=a.cloudGrading?.error?' — '+a.cloudGrading.error:'';
         throw new Error((s.name||'Student')+' Attempt '+(a.attemptNo||1)+' did not finish grading sync'+detail+'.');
@@ -965,10 +1242,10 @@ async function syncClassForAuthoritativeClose(c){
   return client;
 }
 async function closeClass(){
-  const c=cls();
+  let c=cls();
   if(!c||isClassClosed(c))return;
   if(!hasClassCloseAccess()){
-    alert('Class closure is limited to Program Managers, MAJCOM Managers, and Enterprise Administrators.');
+    alert('Class closure requires an active Program Manager for this installation or an Enterprise Administrator.');
     return;
   }
   const issues=closureIssues(c);
@@ -980,6 +1257,7 @@ async function closeClass(){
     alert('Class closure requires an online connection so the server can verify and lock the authoritative record. The class remains open locally.');
     return;
   }
+  const context=classPermissionContext(c,'closeClass');
   const token=prompt('VERIFY & CLOSE CLASS\n\nRaPS will first synchronize the roster and finalized grading records, then the server will verify completeness and permanently close the class. Viewing, PDF/CSV export, backup, and server retention remain available after closure. There is no reopen function.\n\nType CLOSE to continue.');
   if(token!=='CLOSE')return;
 
@@ -987,8 +1265,11 @@ async function closeClass(){
   if(btn){btn.disabled=true;btn.textContent='VERIFYING & CLOSING…';}
 
   try{
+    context.check();
     const client=await syncClassForAuthoritativeClose(c);
+    c=context.check();
     const {data,error}=await client.rpc('close_class_authoritatively',{p_class_id:c.id});
+    c=context.check();
     if(error)throw error;
     if(!data?.closed){
       const serverIssues=Array.isArray(data?.issues)?data.issues:[];
@@ -1002,19 +1283,21 @@ async function closeClass(){
     c.closedBy=String(data.closedBy||c.leadEvaluator||'');
     c.closureMode='server_authoritative';
     c.closureVersion=1;
-    saveDb();
+    saveDb(c.id);
     renderClass();
     alert('Class closed successfully. The server verified and locked the authoritative record; NUC CSV retention will proceed automatically.');
   }catch(error){
+    if(!window.RAPS_PERMISSIONS?.isCurrent(context.token)||currentClassId!==c.id)return;
     console.error('Authoritative class closure failed',error);
     alert('CLASS NOT CLOSED\n\n'+(error?.message||error)+'\n\nRaPS left the local class open. Resolve the sync or server issue and try again.');
   }finally{
-    if(btn&&!isClassClosed(c)){const canClose=hasClassCloseAccess();btn.disabled=!canClose;btn.classList.toggle('hidden',!canClose);btn.textContent='Verify & Close Class';}
+    if(btn&&!isClassClosed(c)&&window.RAPS_PERMISSIONS?.isCurrent(context.token)&&currentClassId===c.id){const canClose=hasClassCloseAccess();btn.disabled=!canClose;btn.classList.toggle('hidden',!canClose);btn.textContent='Verify & Close Class';}
   }
 }
 async function deleteClass(){
   const c=cls();if(!c)return;
   if(!hasEnterpriseAccess()){alert('Only an Enterprise Administrator may delete or archive classes.');return;}
+  if(!requireClassAccess('deleteClass',c))return;
   if(isClassClosed(c)){await requestClosedClassArchiveDeletion(c);return;}
   if((c.students||[]).some(s=>Object.values(s.attempts||{}).some(a=>a.startedAt&&!a.finalizedAt&&!a.voidedAt))){alert('Finalize or void every assessment in progress before deleting this class.');return;}
   const token=prompt(`Move this class to shared Enterprise Trash?\n\nOnce synced, it will be hidden on your other devices. Enterprise Administrators can restore it. Assessment records are retained. Closed classes use the audited NUC archive workflow.\n\nType DELETE to continue.`);
@@ -1028,7 +1311,7 @@ let activeModal=null,deferredModalFocus=null;
 function cloudGateIsOpen(){return !!document.querySelector('.cloudAuthGate.open');}
 function captureFocusTarget(element=document.activeElement){
   if(!element||element===document.body)return null;
-  const names=['data-item','data-rating','data-section','data-failure','data-note','data-note-toggle','data-timer','data-act','data-mark-observation','data-observation-tag','data-observation-item','data-review-observation','data-open-class','data-restore-class','data-purge-class','data-start','data-attempt','data-delete-student','data-instant','data-open-branding'];
+  const names=['data-item','data-rating','data-section','data-failure','data-note','data-note-toggle','data-timer','data-act','data-mark-observation','data-observation-tag','data-observation-item','data-review-observation','data-open-class','data-restore-class','data-purge-class','data-remove-local-class','data-start','data-attempt','data-delete-student','data-instant','data-open-branding'];
   const attributes=names.filter(name=>element.hasAttribute(name)).map(name=>[name,element.getAttribute(name)]);
   return {element,id:element.id,scopeId:element.parentElement?.closest('[id]')?.id||'',tag:element.tagName.toLowerCase(),attributes};
 }
@@ -1092,7 +1375,10 @@ function closeModal(id){
   syncModalAccessibility();
 }
 function newClassForm(existing=null){
+  if(existing&&!requireClassAccess('manageClass',existing))return;
+  if(!existing&&!(window.RAPS_PERMISSIONS?.activeMemberships()||[]).length){alert('An active training role is required to create a class. Sign in again or contact an Enterprise Administrator.');return;}
   if(existing&&isClassClosed(existing)){alert('Closed classes are permanently locked.');return;}
+  const published=!!existing&&(!!existing.cloudScope?.baseId||!!existing.cloudSync?.createdBy);
   if(existing)ensureLocationFields(existing);
   const tOpts=Object.values(TIERS).map(t=>`<option value="${t.id}" ${(existing?.tierId||'1')===t.id?'selected':''}>Tier ${t.id} — ${esc(t.name)}</option>`).join('');
   const courseOpts=[['initial','Initial qualification'],['sustainment','Sustainment / refresher'],['remediation','Remediation'],['calibration','Instructor / evaluator calibration'],['other','Other']].map(([v,l])=>`<option value="${v}" ${(existing?.courseType||'initial')===v?'selected':''}>${l}</option>`).join('');
@@ -1106,7 +1392,7 @@ function newClassForm(existing=null){
     <label><span>Date</span><input name="date" type="date" value="${esc(existing?.date||new Date().toISOString().slice(0,10))}"></label><label><span>Site code / local standardized ID</span><input name="siteCode" value="${esc(existing?.siteCode||'')}" placeholder="e.g., HIK-01"></label>
     <label class="full"><span>Supported MAJCOM / Command *</span><select name="majcom" required>${cmdOpts}</select><small class="fieldHelp">Select the command this training supports. The home-installation list filters to that command; use Show all for tenant/joint relationships.</small></label>
     <label class="full inlineCheck"><input name="showAllInstallations" type="checkbox"><span>Show all active-duty installations</span></label>
-    <label class="full"><span>Home installation *</span><select name="homeInstallationId" required></select><small class="fieldHelp">The stable installation ID is saved for analytics even if the displayed installation name changes.</small></label>
+    <label class="full"><span>Home installation *</span><select name="homeInstallationId" required></select><small class="fieldHelp">${published?'The home installation is locked after the class is published to preserve its permissions and assessment records. Use the training location for off-site training.':'The stable installation ID is saved for analytics even if the displayed installation name changes.'}</small></label>
     <div id="customHomeFields" class="full conditionalFields hidden"><label><span>Home installation / location *</span><input name="customHomeLocation" value="${esc(existingHomeCustom?existing.homeInstallationName:'')}"></label><label><span>State / region</span><input name="customHomeRegion" value="${esc(existingHomeCustom?existing.homeInstallationState||'':'')}"></label><label><span>Country / territory</span><input name="customHomeCountry" value="${esc(existingHomeCustom?existing.homeInstallationCountry||'':'')}"></label></div>
     <label class="full"><span>Unit / organization</span><input name="unit" value="${esc(existing?.unit||'')}" placeholder="e.g., 15 MDG"></label>
     <label class="full inlineCheck"><input name="sameTrainingLocation" type="checkbox" ${sameTraining?'checked':''}><span>Training location is the same as home installation</span></label>
@@ -1124,18 +1410,41 @@ function newClassForm(existing=null){
   function toggleHomeCustom(){const on=home.value==='__OTHER__';$('customHomeFields').classList.toggle('hidden',!on);form.elements.customHomeLocation.required=on;}
   function toggleTraining(){const on=!same.checked;$('trainingLocationFields').classList.toggle('hidden',!on);train.required=on;if(!on)form.elements.customTrainingLocation.required=false;toggleTrainingCustom();}
   function toggleTrainingCustom(){const on=!same.checked&&train.value==='__OTHER__';$('customTrainingFields').classList.toggle('hidden',!on);form.elements.customTrainingLocation.required=on;}
-  maj.onchange=()=>{if(!showAll.checked)refreshHome(false);};showAll.onchange=()=>refreshHome(true);home.onchange=toggleHomeCustom;same.onchange=toggleTraining;train.onchange=toggleTrainingCustom;refreshHome();refreshTraining();toggleTraining();
-  form.onsubmit=e=>{e.preventDefault();const f=new FormData(e.currentTarget),data=Object.fromEntries(f.entries());if(existing){['name','roster','date','scenario','scenarioVersion','siteCode','courseType','scenarioDifficulty','scenarioProfile','leadEvaluator','evaluatorId'].forEach(k=>existing[k]=String(f.get(k)||'').trim());applyClassLocationFields(existing,data);existing.cloudSync=existing.cloudSync||{};existing.cloudSync.enabled=true;saveDb();closeModal('formModal');renderClass();renderHome();}else{const c=createClass(data);closeModal('formModal');openClass(c.id);}};
+  maj.onchange=()=>{if(!published&&!showAll.checked)refreshHome(false);};showAll.onchange=()=>refreshHome(true);home.onchange=toggleHomeCustom;same.onchange=toggleTraining;train.onchange=toggleTrainingCustom;refreshHome();refreshTraining();toggleTraining();
+  if(published){
+    home.disabled=true;showAll.disabled=true;
+    for(const name of ['customHomeLocation','customHomeRegion','customHomeCountry'])form.elements[name].readOnly=true;
+  }
+  form.onsubmit=e=>{
+    e.preventDefault();const f=new FormData(e.currentTarget);
+    if(published){
+      f.set('homeInstallationId',existing.homeInstallationId||'__OTHER__');
+      f.set('customHomeLocation',existing.homeInstallationName||'');
+      f.set('customHomeRegion',existing.homeInstallationState||'');
+      f.set('customHomeCountry',existing.homeInstallationCountry||'');
+    }
+    const data=Object.fromEntries(f.entries());
+    if(existing&&(cls()?.id!==existing.id||!requireClassAccess('manageClass',existing)||isClassClosed(existing)))return;
+    if(!requireClassAccess('manageClass',data))return;
+    if(existing){
+      ['name','roster','date','scenario','scenarioVersion','siteCode','courseType','scenarioDifficulty','scenarioProfile','leadEvaluator','evaluatorId'].forEach(k=>existing[k]=String(f.get(k)||'').trim());
+      applyClassLocationFields(existing,data);existing.cloudSync=existing.cloudSync||{};existing.cloudSync.enabled=true;
+      saveDb();closeModal('formModal');renderClass();renderHome();
+    }else{const c=createClass(data);if(!c)return;closeModal('formModal');openClass(c.id);}
+  };
   openModal('formModal');
 }
 function addStudentForm(){
+  if(!requireClassAccess('manageRoster',cls()))return;
   if(isClassClosed()){alert('Closed classes are permanently locked.');return;}
   $('formModalTitle').textContent='Add Student';
   $('formModalBody').innerHTML=`<form id="studentForm"><div class="formGrid"><label><span>Name *</span><input name="name" required></label><label><span>Rank</span><input name="rank"></label><label class="full"><span>Training ID / privacy-safe identifier</span><input name="trainingId"></label></div><div class="formActions"><button class="action primary" type="submit">Add Student</button></div></form>`;
-  $('studentForm').onsubmit=e=>{e.preventDefault();const f=new FormData(e.currentTarget),c=cls();const ts=now();c.students.push({id:uuid(),classId:c.id,name:String(f.get('name')).trim(),rank:String(f.get('rank')||'').trim(),trainingId:String(f.get('trainingId')||'').trim(),appVersion:APP_VERSION,contentVersion:c.contentVersion||'',createdAt:ts,modifiedAt:ts,deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,attempts:{}});saveDb();closeModal('formModal');renderClass();};openModal('formModal');
+  const targetClassId=cls()?.id;
+  $('studentForm').onsubmit=e=>{e.preventDefault();const f=new FormData(e.currentTarget),c=cls();if(c?.id!==targetClassId||isClassClosed(c)||!requireClassAccess('manageRoster',c))return;const ts=now();c.students.push({id:uuid(),classId:c.id,name:String(f.get('name')).trim(),rank:String(f.get('rank')||'').trim(),trainingId:String(f.get('trainingId')||'').trim(),appVersion:APP_VERSION,contentVersion:c.contentVersion||'',createdAt:ts,modifiedAt:ts,deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,attempts:{}});saveDb();closeModal('formModal');renderClass();};openModal('formModal');
 }
 function scenarioForm(){
   const c=cls();if(isClassClosed(c)){alert('Closed classes are permanently locked.');return;}
+  if(!requireClassAccess('manageClass',c))return;
   const locked=hasStartedClass(c), t=tier(), selected=new Set(c.scenarioNT||[]);
   $('formModalTitle').textContent=`Scenario Applicability${locked?' — LOCKED':''}`;
   const rows=t.sections.map(s=>{
@@ -1143,7 +1452,7 @@ function scenarioForm(){
     return `<h3>${esc(s.code)} — ${esc(s.title)}</h3>${its.map(i=>`<label class="scenarioRow"><input type="checkbox" data-scenario-nt="${i.id}" ${selected.has(i.id)?'checked':''} ${locked?'disabled':''}><div><b>${esc(i.id)}</b> ${esc(i.text)} ${i.provenance==='daf'?'<span class="localBadge">DAF SUPPLEMENTAL</span>':''}<br><small>Check = NT by default for new attempts</small></div></label>`).join('')}`;
   }).join('');
   $('formModalBody').innerHTML=`<p class="helper">Use this only for NONCRITICAL criteria the base class scenario will not trigger. All critical criteria remain mandatory and are not eligible for class-level NT. Once the first attempt starts, the class profile locks for consistency. During an individual fluid scenario, an evaluator may still change a noncritical NT to an active grade when the scenario evolves.</p><div class="scenarioList">${rows}</div>${locked?'':`<div class="formActions"><button id="saveScenarioBtn" class="action primary">Save Scenario Profile</button></div>`}`;
-  if(!locked)$('saveScenarioBtn').onclick=()=>{c.scenarioNT=[...document.querySelectorAll('[data-scenario-nt]:checked')].map(x=>x.dataset.scenarioNt);saveDb();closeModal('formModal');renderClass();};openModal('formModal');
+  if(!locked)$('saveScenarioBtn').onclick=()=>{if(cls()?.id!==c.id||isClassClosed(c)||hasStartedClass(c)||!requireClassAccess('manageClass',c))return;c.scenarioNT=[...document.querySelectorAll('[data-scenario-nt]:checked')].map(x=>x.dataset.scenarioNt);saveDb();closeModal('formModal');renderClass();};openModal('formModal');
 }
 
 // ---------- Evaluation ----------
@@ -1239,6 +1548,7 @@ function renderEval(){
   const focused=captureFocusTarget();
   if(cls()?.deletedAt)return showHome();
   const c=cls(),t=tier(),s=student(),st=evalState(); if(!c||!s||!st)return openClass(currentClassId);
+  if(!canAccessClass('readClass',c,{online:false}))return showHome();
   $('tierTitle').textContent=`Tier ${t.id} — ${t.shortName}`; $('tierSource').textContent=t.source;
   $('studentLabel').textContent=`${s.rank?`${s.rank} `:''}${s.name} · ${c.name}`;
   $('attemptBadge').textContent=`Attempt ${st.attemptNo}${st.finalizedAt?' · FINALIZED':''}`; $('attemptLabel').textContent=`Attempt ${st.attemptNo}`; $('instructions').textContent=t.instructions;
@@ -1250,11 +1560,11 @@ function renderEval(){
   if(tq){$('quickCufTimerCard').classList.remove('hidden');$('quickCufTimerStandard').textContent=tq.standard;$('quickCufTimer').innerHTML=timerMarkup(tq);}else $('quickCufTimerCard').classList.add('hidden');
   const gd=(t.timers||[]).find(d=>d.section==='GLOBAL');
   if(gd){$('globalTimerCard').classList.remove('hidden');$('globalTimerStandard').textContent=gd.standard;$('globalTimer').innerHTML=timerMarkup(gd);}else $('globalTimerCard').classList.add('hidden');
-  renderTabs(); renderSection(); renderTimeline(); renderKpis(); renderActiveTimers(); bindEvalDynamic(); renderObservationFeedback(); setReadOnly(!!st.finalizedAt||isClassClosed(c));
+  renderTabs(); renderSection(); renderTimeline(); renderKpis(); renderActiveTimers(); bindEvalDynamic(); renderObservationFeedback(); setReadOnly(!canEditCurrentEvaluation());
   if(focused&&!focused.element.isConnected)restoreFocusTarget(focused,false);
 }
 function setReadOnly(readonly){
-  document.querySelectorAll('#evalView button[data-item],#evalView button[data-timer],#evalView button[data-failure],#evalView button[data-note-toggle],#evalView button[data-mark-observation],#evalView button[data-observation-tag],#evalView textarea,#evalView input').forEach(x=>{ if(!x.matches('#showNtToggle')) x.disabled=readonly||x.dataset.intrinsicDisabled==='true'; });
+  document.querySelectorAll('#evalView button[data-item],#evalView button[data-timer],#evalView button[data-failure],#evalView button[data-note-toggle],#evalView button[data-mark-observation],#evalView button[data-observation-tag],#evalView button[data-instant],#evalView button[data-active-timer-stop],#evalView textarea,#evalView input').forEach(x=>{ if(!x.matches('#showNtToggle')) x.disabled=readonly||x.dataset.intrinsicDisabled==='true'; });
   $('nextUnresolvedBottomBtn').disabled=readonly;$('nextUnresolvedBtn').disabled=readonly;$('finalizeBtn').disabled=readonly;$('finalizeBtn').textContent=evalState()?.finalizedAt?'Evaluation Finalized':isClassClosed(cls())?'Class Closed':'Review / Finalize';
   $('voidAttemptBtn').classList.toggle('hidden',readonly);$('voidAttemptBtn').disabled=readonly;
 }
@@ -1298,6 +1608,7 @@ function restoreObservation(st,itemId,snapshot){
 }
 function commitObservation(itemId,mutate,label,detail='',undoable=true){
   const st=evalState();if(!st||st.finalizedAt||st.voidedAt||cls()?.deletedAt||isClassClosed(cls()))return false;
+  if(!canEditCurrentEvaluation())return false;
   const before=observationSnapshot(st,itemId),eventCount=st.events.length;
   mutate(st);
   st.events.push({at:now(),elapsed:sessionElapsed(st),label,detail});
@@ -1333,7 +1644,7 @@ function reviewObservationQueue(){
   if(target)requestFailureClassification(target.id,!!target.critical&&st.ratings[target.id]==='fail');
 }
 function renderObservationFeedback(){
-  const st=evalState();if(!st)return;const pending=pendingDiagnosticItems(),locked=!!st.finalizedAt||!!st.voidedAt||isClassClosed(cls());
+  const st=evalState();if(!st)return;const pending=pendingDiagnosticItems(),locked=!canEditCurrentEvaluation();
   if($('observationFeedbackText'))$('observationFeedbackText').textContent=observationMessage?.attemptId===st.id?observationMessage.text:'Marks save on this device. Review explanations after the lane.';
   if($('undoObservationBtn')){$('undoObservationBtn').hidden=locked||observationUndo?.attemptId!==st.id;$('undoObservationBtn').onclick=undoLastObservation;}
   if($('reviewObservationsBtn')){$('reviewObservationsBtn').textContent=`Review observations (${pending.length})`;$('reviewObservationsBtn').disabled=locked||pending.length===0;$('reviewObservationsBtn').onclick=reviewObservationQueue;}
@@ -1345,8 +1656,9 @@ function renderObservationFeedback(){
 }
 function renderLearnerPracticeHistory(){
   const host=$('learnerPracticeHistory'),learner=student();if(!host||!learner)return;
+  if(!canAccessClass('readClass',cls(),{online:false})){host.innerHTML='';host.classList.add('hidden');return;}
   const trainingId=String(learner.trainingId||'').trim(),rows=[];
-  for(const c of db.classes.filter(c=>!c.deletedAt))for(const s of c.students||[]){
+  for(const c of db.classes.filter(c=>!c.deletedAt&&canAccessClass('readClass',c,{online:false})))for(const s of c.students||[]){
     if(trainingId?String(s.trainingId||'').trim()!==trainingId:s.id!==learner.id)continue;
     for(const a of Object.values(s.attempts||{}))for(const [id,d] of Object.entries(a?.failureDetails||{})){
       if(!d.practicePlan&&!d.reassessmentPlan&&!d.retentionDueAt)continue;
@@ -1354,7 +1666,7 @@ function renderLearnerPracticeHistory(){
     }
   }
   rows.sort((a,b)=>(b.a.startedAt||0)-(a.a.startedAt||0));host.classList.remove('hidden');
-  host.innerHTML=`<div class="cardHead"><span>Practice &amp; follow-up history</span><span>${rows.length} plans</span></div><p class="helper">${trainingId?'Matching training ID in classes stored on this device. Confirm learner identity and curriculum before comparing.':'Current roster entry only. A training ID is needed to find plans across local classes.'} These coaching records do not establish qualification.</p>${rows.map(({c,a,id,d})=>`<div class="diagnosticSummary"><b>${esc(id)} · ${esc(c.name)} · Attempt ${a.attemptNo}</b><div>${esc(c.tierSnapshot?.source||c.contentVersion||'')}</div><p>${esc(d.practicePlan||d.reassessmentPlan||'Follow-up planned')}</p><div>Reassessment: ${esc(d.reassessmentOutcome||'not-assessed')}${d.reassessedAt?` · ${esc(new Date(d.reassessedAt).toLocaleString())}`:''}${d.retentionDueAt?` · Follow-up due ${esc(new Date(d.retentionDueAt).toLocaleString())}`:''}</div></div>`).join('')||'<p class="helper">Add a practice plan or follow-up date during observation review.</p>'}`;
+  host.innerHTML=`<div class="cardHead"><span>Practice &amp; follow-up history</span><span>${rows.length} plans</span></div><p class="helper">${trainingId?'Matching training ID in classes available to your account on this device. Confirm learner identity and curriculum before comparing.':'Current roster entry only. A training ID is needed to find plans across local classes.'} These coaching records do not establish qualification.</p>${rows.map(({c,a,id,d})=>`<div class="diagnosticSummary"><b>${esc(id)} · ${esc(c.name)} · Attempt ${a.attemptNo}</b><div>${esc(c.tierSnapshot?.source||c.contentVersion||'')}</div><p>${esc(d.practicePlan||d.reassessmentPlan||'Follow-up planned')}</p><div>Reassessment: ${esc(d.reassessmentOutcome||'not-assessed')}${d.reassessedAt?` · ${esc(new Date(d.reassessedAt).toLocaleString())}`:''}${d.retentionDueAt?` · Follow-up due ${esc(new Date(d.retentionDueAt).toLocaleString())}`:''}</div></div>`).join('')||'<p class="helper">Add a practice plan or follow-up date during observation review.</p>'}`;
 }
 function itemMarkup(item){
   const st=evalState(),r=st.ratings[item.id]||'', forced=!!st.timerForced[item.id], linked=timersForItem(item.id), hide=r==='nt'&&!st.showNt&&!item.critical,reviewMode=!isObserveMode(st);
@@ -1597,7 +1909,7 @@ function renderActiveTimers(){
   const context=String(st.id||`${currentClassId}/${currentStudentId}/${currentAttemptNo}`);
   const rows=new Map([...list.children].map(row=>[row.dataset.activeTimerKey,row])),keep=new Set();
   running.forEach((d,index)=>{
-    const x=currentInstance(d.id),key=JSON.stringify([context,d.id,x.index]),recovery=timerNeedsRecovery(x),locked=!!st.finalizedAt||isClassClosed(cls());
+    const x=currentInstance(d.id),key=JSON.stringify([context,d.id,x.index]),recovery=timerNeedsRecovery(x),locked=!canEditCurrentEvaluation();
     let row=rows.get(key);
     if(!row){
       row=document.createElement('div');row.className='activeTimerRow';row.dataset.activeTimerKey=key;
@@ -2015,11 +2327,42 @@ function durationStatic(d,x){if(Number.isFinite(x.finalDurationMs))return x.fina
 function resultStatic(d,x){if(x.voided)return 'VOID';if(!x.wallStop)return 'INCOMPLETE';const dur=durationStatic(d,x);let met=false;if(d.mode==='max')met=dur<=d.seconds*1000;else if(d.mode==='min')met=dur>=d.seconds*1000;else met=dur>=(d.minSeconds||0)*1000&&dur<=(d.maxSeconds||Infinity)*1000;return met?'MET':'NOTMET';}
 async function backupClass(){const c=cls();await saveFile(`TCCC_${safe(c.name)}_Backup.json`,bytes(JSON.stringify({type:'TCCC_CLASS_BACKUP',appVersion:APP_VERSION,class:c},null,2)),'application/json');}
 async function backupAttempt(){const c=cls(),s=student(),a=evalState();await saveFile(`TCCC_${safe(c.name)}_${safe(s.name)}_A${a.attemptNo}_Backup.json`,bytes(JSON.stringify({type:'TCCC_ATTEMPT_BACKUP',appVersion:APP_VERSION,classMeta:{id:c.id,name:c.name,tierId:c.tierId},studentMeta:{id:s.id,name:s.name},attempt:a},null,2)),'application/json');}
-function restoreBackup(file){const r=new FileReader();r.onload=()=>{try{const x=JSON.parse(r.result);if(x.type!=='TCCC_CLASS_BACKUP'||!x.class)throw new Error('Not a class backup');const c=x.class;c.id=uuid();c.name=`${c.name} (Restored)`;db.classes.unshift(c);normalizeDb(db);saveDb();renderHome();alert('Class backup restored.');}catch(e){alert(`Restore failed: ${e.message||e}`);}};r.readAsText(file);}
+function prepareBackupClass(record){
+  if(!record||typeof record!=='object'||Array.isArray(record)||typeof record.id!=='string'||!record.id.trim()||!Array.isArray(record.students))throw new Error('The backup must contain the original class identifier and roster.');
+  if(db.classes.some(c=>c.id===record.id))throw new Error('This class already has a local copy. Sync it and resolve any conflicts before restoring a backup; existing work was kept.');
+  const c=deep(record);
+  const owner=String(c.cloudSync?.createdBy||c.created_by||'');
+  delete c.cloudAccess;delete c.cloudScope;delete c.base_id;delete c.created_by;
+  const canonical={id:c.id,homeInstallationId:c.homeInstallationId,cloudSync:{createdBy:owner},localCreatedByUserId:c.localCreatedByUserId||''};
+  if(!canAccessClass('readClass',canonical,{online:false}))throw new Error('Your account cannot verify access to this backup. Load the class from the server or ask an Enterprise Administrator to review the retained backup.');
+  c.cloudSync={...(c.cloudSync||{}),createdBy:owner,enabled:true,status:navigator.onLine?'pending':'offline',error:'Backup restored locally; server ownership and changes require verification.'};
+  c.cloudRosterSync={...(c.cloudRosterSync||{}),status:'pending',syncedRosterSignature:'',syncedByUserId:''};
+  for(const student of c.students)for(const attempt of Object.values(student.attempts||{}).filter(Boolean))attempt.cloudGrading={...(attempt.cloudGrading||{}),status:'pending',baseGradingSignature:'',syncedByUserId:''};
+  return normalizeDb({schemaVersion:5,deviceId:db.deviceId,classes:[c]})?.classes?.[0]||c;
+}
+function restoreBackup(file){
+  const permissions=window.RAPS_PERMISSIONS,token=permissions?.snapshot?.();
+  if(!permissions?.isCurrent(token,{online:false})){alert('An active training role is required to restore a backup.');return;}
+  const r=new FileReader();
+  r.onload=()=>{try{
+    if(!permissions.isCurrent(token,{online:false}))throw new Error('Your account changed while reading the backup. Select it again after signing in.');
+    const x=JSON.parse(r.result);if(x.type!=='TCCC_CLASS_BACKUP'||!x.class)throw new Error('Not a class backup');
+    const c=prepareBackupClass(x.class),previous=db.classes;
+    db.classes=[c,...previous];
+    try{saveDb(null);}catch(error){db.classes=previous;throw error;}
+    clearLocalCopyHidden(c.id);renderHome();
+    alert('Backup restored on this device with its original class and assessment identifiers. Sync Classes verifies server access and any conflicting changes.');
+  }catch(e){if(permissions.isCurrent(token,{online:false}))alert(`Restore failed: ${e.message||e}`);}};
+  r.readAsText(file);
+}
 function importRoster(file){
+  if(!requireClassAccess('manageRoster',cls()))return;
+  const targetClassId=cls()?.id;
+  const permissions=window.RAPS_PERMISSIONS,token=permissions?.snapshot?.();
   if(isClassClosed()){alert('Closed classes are permanently locked.');return;}
   const r=new FileReader();
   r.onload=()=>{
+    if(!permissions?.isCurrent(token)||cls()?.id!==targetClassId||isClassClosed()||!requireClassAccess('manageRoster',cls()))return;
     const lines=String(r.result).split(/\r?\n/).filter(x=>x.trim());
     if(!lines.length){alert('Roster CSV is empty.');return;}
     const parse=line=>{
@@ -2055,6 +2398,7 @@ function importRoster(file){
     const preview=`ROSTER IMPORT PREVIEW\n\nValid new students: ${valid.length}\nDuplicates skipped: ${duplicates.length}\nInvalid rows skipped: ${invalid.length}\n\n${duplicates.length?`Duplicates:\n${duplicates.slice(0,8).join('\n')}${duplicates.length>8?`\n+ ${duplicates.length-8} more`:''}\n\n`:''}${invalid.length?`Invalid:\n${invalid.slice(0,8).join('\n')}${invalid.length>8?`\n+ ${invalid.length-8} more`:''}\n\n`:''}Import ${valid.length} valid student(s)?`;
     if(!valid.length){alert(preview.replace(/\n\nImport 0 valid student\(s\)\?$/,''));return;}
     if(!confirm(preview))return;
+    if(!permissions?.isCurrent(token)||cls()?.id!==targetClassId||isClassClosed(c)||!requireClassAccess('manageRoster',c))return;
     c.students.push(...valid);saveDb();renderClass();alert(`Imported ${valid.length} student(s).`);
   };
   r.readAsText(file);
@@ -2097,26 +2441,26 @@ function setupNativeBackButton(){
 
 // ---------- Bindings ----------
 function bindEvalDynamic(){
-  document.querySelectorAll('[data-section]').forEach(b=>b.onclick=()=>{const st=evalState();st.section=b.dataset.section;saveDb();renderEval();});
-  document.querySelectorAll('[data-item]').forEach(b=>b.onclick=()=>setRating(b.dataset.item,b.dataset.rating,'explicit'));
-  document.querySelectorAll('[data-note]').forEach(n=>n.oninput=()=>{const st=evalState();st.notes[n.dataset.note]=n.value;saveDb();});
-  document.querySelectorAll('[data-note-toggle]').forEach(b=>b.onclick=()=>{const st=evalState();st.noteOpen=st.noteOpen||{};st.noteOpen[b.dataset.noteToggle]=!st.noteOpen[b.dataset.noteToggle];saveDb();renderSection();bindEvalDynamic();setTimeout(()=>[...document.querySelectorAll('[data-note]')].find(n=>n.dataset.note===b.dataset.noteToggle)?.focus(),0);});
-  document.querySelectorAll('[data-failure]').forEach(b=>b.onclick=()=>requestFailureClassification(b.dataset.failure,!!itemById(b.dataset.failure)?.critical&&evalState()?.ratings?.[b.dataset.failure]==='fail'));
-  document.querySelectorAll('[data-mark-observation]').forEach(b=>b.onclick=()=>markObservation(b.dataset.markObservation));
-  document.querySelectorAll('[data-observation-tag]').forEach(b=>b.onclick=()=>markObservation(b.dataset.observationItem,b.dataset.observationTag));
-  document.querySelectorAll('[data-timer]').forEach(b=>b.onclick=()=>timerAction(b.dataset.timer,b.dataset.act));
-  document.querySelectorAll('[data-instant]').forEach(b=>b.onclick=()=>{const st=evalState(),d=tier().instantEvents.find(x=>x.id===b.dataset.instant);st.instants[d.id]=now();event(d.label);saveDb();renderEval();});
+  document.querySelectorAll('[data-section]').forEach(b=>b.onclick=()=>{const st=evalState();st.section=b.dataset.section;if(canEditCurrentEvaluation())saveDb();renderEval();});
+  document.querySelectorAll('[data-item]').forEach(b=>b.onclick=guardEvaluationEdit(()=>setRating(b.dataset.item,b.dataset.rating,'explicit')));
+  document.querySelectorAll('[data-note]').forEach(n=>n.oninput=guardEvaluationEdit(()=>{const st=evalState();st.notes[n.dataset.note]=n.value;saveDb();}));
+  document.querySelectorAll('[data-note-toggle]').forEach(b=>b.onclick=guardEvaluationEdit(()=>{const st=evalState();st.noteOpen=st.noteOpen||{};st.noteOpen[b.dataset.noteToggle]=!st.noteOpen[b.dataset.noteToggle];saveDb();renderSection();bindEvalDynamic();setReadOnly(!canEditCurrentEvaluation());setTimeout(()=>[...document.querySelectorAll('[data-note]')].find(n=>n.dataset.note===b.dataset.noteToggle)?.focus(),0);}));
+  document.querySelectorAll('[data-failure]').forEach(b=>b.onclick=guardEvaluationEdit(()=>requestFailureClassification(b.dataset.failure,!!itemById(b.dataset.failure)?.critical&&evalState()?.ratings?.[b.dataset.failure]==='fail')));
+  document.querySelectorAll('[data-mark-observation]').forEach(b=>b.onclick=guardEvaluationEdit(()=>markObservation(b.dataset.markObservation)));
+  document.querySelectorAll('[data-observation-tag]').forEach(b=>b.onclick=guardEvaluationEdit(()=>markObservation(b.dataset.observationItem,b.dataset.observationTag)));
+  document.querySelectorAll('[data-timer]').forEach(b=>b.onclick=guardEvaluationEdit(()=>timerAction(b.dataset.timer,b.dataset.act)));
+  document.querySelectorAll('[data-instant]').forEach(b=>b.onclick=guardEvaluationEdit(()=>{const st=evalState(),d=tier().instantEvents.find(x=>x.id===b.dataset.instant);st.instants[d.id]=now();event(d.label);saveDb();renderEval();}));
 }
-if($('activeTimers'))$('activeTimers').onclick=e=>{const b=e.target.closest('[data-active-timer-stop]');if(!b||b.disabled)return;timerAction(b.dataset.activeTimerStop,'stop');};
+if($('activeTimers'))$('activeTimers').onclick=guardEvaluationEdit(e=>{const b=e.target.closest('[data-active-timer-stop]');if(!b||b.disabled)return;timerAction(b.dataset.activeTimerStop,'stop');});
 document.querySelectorAll('[data-home-area]').forEach(b=>b.onclick=()=>setHomeArea(b.dataset.homeArea));
 $('newClassBtn').onclick=()=>newClassForm();$('importBackupBtn').onclick=()=>$('backupImportFile').click();$('backupImportFile').onchange=e=>e.target.files[0]&&restoreBackup(e.target.files[0]);
 $('backHome').onclick=()=>{releaseEvalWakeLock();showHome();};$('editClassBtn').onclick=()=>newClassForm(cls());if($('resolveClassConflictBtn'))$('resolveClassConflictBtn').onclick=resolveClassMetadataConflict;$('addStudentBtn').onclick=addStudentForm;$('importRosterBtn').onclick=()=>$('rosterFile').click();$('rosterFile').onchange=e=>e.target.files[0]&&importRoster(e.target.files[0]);$('scenarioBtn').onclick=scenarioForm;
 if($('rosterSearch'))$('rosterSearch').oninput=e=>{rosterSearchTerm=e.target.value;renderClass();};document.querySelectorAll('[data-roster-filter]').forEach(b=>b.onclick=()=>{rosterFilter=b.dataset.rosterFilter;renderClass();});
-$('backRoster').onclick=()=>navigateBackSafely();$('nextUnresolvedBottomBtn').onclick=nextUnresolved;$('nextUnresolvedBtn').onclick=nextUnresolved;if($('observeModeBtn'))$('observeModeBtn').onclick=()=>{const st=evalState();st.observeMode=true;st.fieldMode=true;saveDb();renderEval();};if($('reviewModeBtn'))$('reviewModeBtn').onclick=()=>{const st=evalState();st.observeMode=false;st.fieldMode=false;saveDb();renderEval();};$('showNtToggle').onchange=e=>{const st=evalState();st.showNt=e.target.checked;saveDb();renderSection();bindEvalDynamic();};
-$('prevPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i>0){st.section=t.sections[i-1].code;saveDb();renderEval();}};$('nextPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i<t.sections.length-1){st.section=t.sections[i+1].code;saveDb();renderEval();}};
-$('trainerSign').oninput=e=>{evalState().trainerSign=e.target.value;saveDb();};$('attemptEvaluatorId').oninput=e=>{evalState().evaluatorId=e.target.value;saveDb();};$('studentSign').oninput=e=>{evalState().studentSign=e.target.value;saveDb();};$('overallNotes').oninput=e=>{evalState().overallNotes=e.target.value;saveDb();};
-$('finalizeBtn').onclick=reviewFinalize;$('voidAttemptBtn').onclick=voidCurrentAttempt;$('confirmFinalizeBtn').onclick=finalizeEvaluation;$('copyAar').onclick=async()=>{await navigator.clipboard.writeText($('aarText').textContent);alert('Review copied.');};$('individualPdfBtn').onclick=exportIndividualPdf;$('individualCsvBtn').onclick=exportIndividualCsv;$('attemptBackupBtn').onclick=backupAttempt;
-$('classPdfBtn').onclick=exportClassPdf;$('classSummaryCsvBtn').onclick=exportClassSummaryCsv;$('classCriteriaCsvBtn').onclick=exportClassCriteriaCsv;$('classTimersCsvBtn').onclick=exportClassTimersCsv;$('classEventsCsvBtn').onclick=exportClassEventsCsv;$('classAnalyticsCsvBtn').onclick=exportClassAnalyticsCsv;$('classEnterpriseCsvBtn').onclick=exportClassEnterpriseAnalyticsCsv;$('backupClassBtn').onclick=backupClass;$('closeClassBtn').onclick=closeClass;$('deleteClassBtn').onclick=()=>{void deleteClass();};
+$('backRoster').onclick=()=>navigateBackSafely();$('nextUnresolvedBottomBtn').onclick=nextUnresolved;$('nextUnresolvedBtn').onclick=nextUnresolved;if($('observeModeBtn'))$('observeModeBtn').onclick=()=>{const st=evalState();st.observeMode=true;st.fieldMode=true;if(canEditCurrentEvaluation())saveDb();renderEval();};if($('reviewModeBtn'))$('reviewModeBtn').onclick=()=>{const st=evalState();st.observeMode=false;st.fieldMode=false;if(canEditCurrentEvaluation())saveDb();renderEval();};$('showNtToggle').onchange=e=>{const st=evalState();st.showNt=e.target.checked;if(canEditCurrentEvaluation())saveDb();renderSection();bindEvalDynamic();setReadOnly(!canEditCurrentEvaluation());};
+$('prevPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i>0){st.section=t.sections[i-1].code;if(canEditCurrentEvaluation())saveDb();renderEval();}};$('nextPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i<t.sections.length-1){st.section=t.sections[i+1].code;if(canEditCurrentEvaluation())saveDb();renderEval();}};
+$('trainerSign').oninput=guardEvaluationEdit(e=>{evalState().trainerSign=e.target.value;saveDb();});$('attemptEvaluatorId').oninput=guardEvaluationEdit(e=>{evalState().evaluatorId=e.target.value;saveDb();});$('studentSign').oninput=guardEvaluationEdit(e=>{evalState().studentSign=e.target.value;saveDb();});$('overallNotes').oninput=guardEvaluationEdit(e=>{evalState().overallNotes=e.target.value;saveDb();});
+$('finalizeBtn').onclick=guardEvaluationEdit(reviewFinalize);$('voidAttemptBtn').onclick=guardEvaluationEdit(voidCurrentAttempt,true);$('confirmFinalizeBtn').onclick=guardEvaluationEdit(finalizeEvaluation,true);$('copyAar').onclick=guardClassExport(async()=>{await navigator.clipboard.writeText($('aarText').textContent);alert('Review copied.');});$('individualPdfBtn').onclick=guardClassExport(exportIndividualPdf);$('individualCsvBtn').onclick=guardClassExport(exportIndividualCsv);$('attemptBackupBtn').onclick=guardClassExport(backupAttempt);
+$('classPdfBtn').onclick=guardClassExport(exportClassPdf);$('classSummaryCsvBtn').onclick=guardClassExport(exportClassSummaryCsv);$('classCriteriaCsvBtn').onclick=guardClassExport(exportClassCriteriaCsv);$('classTimersCsvBtn').onclick=guardClassExport(exportClassTimersCsv);$('classEventsCsvBtn').onclick=guardClassExport(exportClassEventsCsv);$('classAnalyticsCsvBtn').onclick=guardClassExport(exportClassAnalyticsCsv);$('classEnterpriseCsvBtn').onclick=guardClassExport(exportClassEnterpriseAnalyticsCsv);$('backupClassBtn').onclick=guardClassExport(backupClass);$('closeClassBtn').onclick=closeClass;$('deleteClassBtn').onclick=()=>{void deleteClass();};
 const moreExportsBtn=$('moreExportsBtn'),moreExportsMenu=$('moreExportsMenu');
 if($('jumpRosterBtn'))$('jumpRosterBtn').onclick=()=>{
   const search=$('rosterSearch'),header=document.querySelector('#classView .compactHeader');
@@ -2185,6 +2529,7 @@ let liveClockRaf=null,lastLivePaint=0;
 function updateLiveClocks(force=false){
   const view=$('evalView');
   if(!view||view.classList.contains('hidden')||!evalState())return;
+  if(!canAccessClass('readClass',cls(),{online:false})){scrubPrivateViews();renderHome();return;}
   try{renderKpis();}catch(e){console.warn('KPI live refresh failed',e);}
   try{renderActiveTimers();}catch(e){console.warn('Active timer live refresh failed',e);}
   document.querySelectorAll('[data-display]').forEach(el=>{
@@ -2232,16 +2577,29 @@ startLiveClockLoop();
 setupNativeBackButton();
 if($('appVersion'))$('appVersion').textContent=APP_VERSION;
 
+let lastViewIdentity=currentCloudUserId(),lastViewPermissions=window.RAPS_PERMISSIONS?.snapshot?.().signature||'';
 window.addEventListener('raps-cloud-identity',()=>{
+  const identity=currentCloudUserId(),signature=window.RAPS_PERMISSIONS?.snapshot?.().signature||'';
+  if(identity!==lastViewIdentity||signature!==lastViewPermissions||currentClassId&&!canAccessClass('readClass',cls(),{online:false}))scrubPrivateViews();
+  lastViewIdentity=identity;lastViewPermissions=signature;
   recoverTrashActions();
-  renderHome();
-  if(currentClassId&&!$('classView')?.classList.contains('hidden'))renderClass();
+  refreshPrivateViewAccess();
+});
+window.addEventListener('raps-class-access-refresh',refreshPrivateViewAccess);
+window.addEventListener('storage',event=>{
+  if(!event.key?.startsWith(LOCAL_COPY_EXCLUSION_PREFIX))return;
+  discardExcludedCleanCopies();
+  if(currentClassId&&!db.classes.some(c=>c.id===currentClassId))showHome();else renderHome();
 });
 
 window.RAPS_CLASS_STORE = Object.freeze({
   getClasses:()=>db.classes,
   getClass:id=>db.classes.find(c=>c.id===id)||null,
   deviceId:()=>db.deviceId,
+  isLocalCopyHidden,
+  clearLocalCopyHidden,
+  localRosterSignature,
+  getExcludedLocalClassIds,
   recoverTrashActions,
   ownsTrashAction,
   rememberTrashAction,
@@ -2263,12 +2621,15 @@ window.RAPS_CLASS_STORE = Object.freeze({
     return c;
   },
   persistCloudMerge:()=>{
+    discardExcludedCleanCopies();
     localStorage.setItem(DB_KEY,JSON.stringify(db));
     renderHome();
     if(currentClassId&&!$('classView')?.classList.contains('hidden'))renderClass();
   },
   upsertFromCloud:(remote,options={})=>{
     if(!remote?.id)return null;
+    const excluded=isLocalCopyHidden(remote.id);
+    if(excluded&&options.restoreLocalCopy!==true)return null;
     const idx=db.classes.findIndex(c=>c.id===remote.id);
     if(idx<0){db.classes.unshift(normalizeDb({schemaVersion:5,deviceId:db.deviceId,classes:[remote]})?.classes?.[0]||remote);}
     else{
@@ -2278,6 +2639,7 @@ window.RAPS_CLASS_STORE = Object.freeze({
       ensureLocationFields(db.classes[idx]);
     }
     localStorage.setItem(DB_KEY,JSON.stringify(db));
+    if(excluded)clearLocalCopyHidden(remote.id);
     if(remote.deletedAt&&currentClassId===remote.id){releaseEvalWakeLock();showHome();}
     renderHome();
     return db.classes.find(c=>c.id===remote.id)||null;
@@ -2303,7 +2665,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.6';
+  const UPDATE_BUILD = '3.4.12-web.7';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 

@@ -34,7 +34,7 @@ window.__responsive = {
     c.students.push({...deep(s),id:'test-student-2',name:'Christopher-Jonathan Santiago Rodriguez',attempts:{}});
     renderEval();
     if(scene==='home'){showHome();setHomeArea('evaluate');}
-    if(scene==='manage'){window.RAPS_CLOUD.role='enterprise_admin';showHome();setHomeArea('manage');}
+    if(scene==='manage'){window.__setRapsFixtureRole('enterprise_admin');showHome();setHomeArea('manage');}
     if(scene==='readiness'||scene==='program'){
       window.__rapsTest.allPassAndMet();
       const st=evalState();st.finalizedAt=now();st.finalResult='FAIL';st.ratings['CMC-001']='fail';
@@ -126,7 +126,7 @@ def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=os.environ.get('CHROMIUM_EXECUTABLE', '/usr/bin/chromium'), headless=True)
         context = browser.new_context(service_workers='block')
-        context.add_init_script("window.RAPS_CLOUD={user:{id:'responsive-fixture'},role:'evaluator',client:{rpc:async()=>{throw new Error('Cloud calls forbidden in responsive tests');}}};")
+        context.add_init_script(WORKFLOW.IDENTITY_FIXTURE)
 
         def fulfill(route):
             url = urlsplit(route.request.url)

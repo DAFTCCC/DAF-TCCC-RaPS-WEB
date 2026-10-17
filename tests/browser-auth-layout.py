@@ -80,7 +80,8 @@ const identityRows=table=>{
   if(table==='profiles')return [{id:layoutUser.id,email:layoutUser.email,display_name:layoutUser.email}];
   if(table==='memberships')return [{id:'synthetic-layout-membership',user_id:layoutUser.id,
     active:true,role:'evaluator',base_id:'test-base',
-    bases:{id:'test-base',code:'TEST',name:'Synthetic Installation'}}];
+    bases:{id:'test-base',code:'TEST',name:'Synthetic Installation',active:true,
+      majcom_id:'test-command',majcoms:{id:'test-command',active:true}}}];
   return rejectOperation('unexpected table '+table)();
 };
 const identityQuery=table=>{
@@ -102,7 +103,7 @@ def test_html():
     html = (ROOT / 'index.html').read_text()
 
     def keep_auth_script(match):
-        return match.group(0) if urlsplit(match.group(1)).path == 'cloud-auth.js' else ''
+        return match.group(0) if urlsplit(match.group(1)).path in {'permissions.js', 'cloud-auth.js'} else ''
 
     return re.sub(r'<script\s+src="([^"]+)"[^>]*></script>', keep_auth_script, html)
 

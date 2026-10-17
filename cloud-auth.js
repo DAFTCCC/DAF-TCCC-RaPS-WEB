@@ -33,6 +33,7 @@ let resetPending = false;
 let resetAvailableAt = 0;
 let resetCooldownTimer = null;
 let sessionBlocked = false;
+let identityExpiryTimer = null;
 
 const byId = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -107,18 +108,8 @@ function clearCachedIdentity() {
   } catch {}
 }
 
-function activeMemberships(rows = []) {
-  const now = Date.now();
-  return rows.filter(row => {
-    if (!row?.active || !ROLE_ORDER[row.role]) return false;
-    const starts = row.starts_at ? Date.parse(row.starts_at) : null;
-    const ends = row.ends_at ? Date.parse(row.ends_at) : null;
-    if (row.starts_at && !Number.isFinite(starts)) return false;
-    if (row.ends_at && !Number.isFinite(ends)) return false;
-    if (Number.isFinite(starts) && starts > now) return false;
-    if (Number.isFinite(ends) && ends <= now) return false;
-    return true;
-  });
+function activeMemberships(rows = [], userId = authenticatedUser?.id) {
+  return rows.filter(row => window.RAPS_PERMISSIONS?.validMembership(row, { userId }));
 }
 
 function primaryMembership(rows = []) {
@@ -462,6 +453,8 @@ function setStatus(mode, text) {
 }
 
 function clearRuntimeIdentity(clearCache = true) {
+  window.clearTimeout(identityExpiryTimer);
+  identityExpiryTimer = null;
   identityGeneration++;
   identity = null;
   if (clearCache) clearCachedIdentity();
@@ -477,8 +470,9 @@ function adoptUser(user) {
 }
 
 function exposeIdentity(value, mode) {
-  identity = value;
-  const membership = value?.primaryMembership || primaryMembership(value?.memberships || []);
+  const memberships = activeMemberships(value?.memberships || [], value?.user?.id);
+  const membership = primaryMembership(memberships);
+  identity = { ...value, memberships, primaryMembership: membership };
   const profile = value?.profile || {};
   const displayName = profile.display_name || value?.user?.email || 'RaPS user';
   const role = membership?.role || '';
@@ -491,7 +485,7 @@ function exposeIdentity(value, mode) {
     offlineCached: mode === 'offline',
     user: value?.user || null,
     profile,
-    memberships: value?.memberships || [],
+    memberships,
     primaryMembership: membership,
     role,
     scope,
@@ -508,6 +502,20 @@ function exposeIdentity(value, mode) {
   }
 
   window.dispatchEvent(new CustomEvent('raps-cloud-identity', { detail: window.RAPS_CLOUD }));
+  window.clearTimeout(identityExpiryTimer);
+  const expiry = Math.min(...memberships.map(row => Date.parse(row.ends_at)).filter(Number.isFinite));
+  if (Number.isFinite(expiry)) {
+    const owner = identity;
+    identityExpiryTimer = window.setTimeout(() => {
+      if (identity !== owner) return;
+      if (primaryMembership(owner.memberships)) exposeIdentity(owner, mode);
+      else {
+        clearRuntimeIdentity();
+        setStatus('denied', 'Your RaPS membership has expired');
+        setGate(true, 'Your RaPS membership has expired. Contact an Enterprise Administrator to renew access.', 'error');
+      }
+    }, Math.min(Math.max(1, expiry - Date.now()), 2147483647));
+  }
 }
 
 async function loadIdentity(user) {
@@ -523,21 +531,30 @@ async function loadIdentity(user) {
     .from('memberships')
     .select(`
       id,
+      user_id,
       role,
       active,
       starts_at,
       ends_at,
       base_id,
       majcom_id,
-      bases ( id, code, name ),
-      majcoms ( id, code, name )
+      bases ( id, code, name, active, majcom_id, majcoms ( id, active ) ),
+      majcoms ( id, code, name, active )
     `)
     .eq('user_id', user.id)
     .eq('active', true);
 
   if (membershipError) throw membershipError;
 
-  const active = activeMemberships(memberships || []);
+  // A fresh server response must positively confirm each scoped organization.
+  // Catalog RLS can hide an inactive organization as a null nested relation;
+  // that is not evidence of an active scope. Legacy offline caches are filtered
+  // separately and retain their existing compatibility rules.
+  const active = activeMemberships(memberships || [], user.id).filter(row => {
+    if (row.role === 'enterprise_admin') return true;
+    if (row.role === 'majcom_manager') return row.majcoms?.active === true;
+    return row.bases?.active === true && row.bases?.majcoms?.active === true;
+  });
   const primary = primaryMembership(active);
 
   return {
@@ -560,7 +577,7 @@ function useCachedIdentity(expectedUserId = null) {
   const cached = readCachedIdentity();
   if (!cached?.user?.id) return false;
   if (expectedUserId && cached.user.id !== expectedUserId) return false;
-  cached.memberships = activeMemberships(cached.memberships || []);
+  cached.memberships = activeMemberships(cached.memberships || [], cached.user.id);
   cached.primaryMembership = primaryMembership(cached.memberships);
   if (!cached.primaryMembership) return false;
 

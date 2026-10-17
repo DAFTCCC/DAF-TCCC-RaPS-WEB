@@ -2,6 +2,7 @@
 'use strict';
 
 let mounted = false;
+let loadGeneration = 0;
 let busy = false;
 let lastLoadedBaseId = null;
 
@@ -12,14 +13,24 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
 
 function cloud() { return window.RAPS_CLOUD || null; }
 function client() { return window.RAPS_SUPABASE || null; }
-function membership() { return cloud()?.primaryMembership || null; }
+function membership() { return window.RAPS_PERMISSIONS?.membership('program_manager') || null; }
 function isProgramManager() {
-  const c = cloud(), m = membership();
-  return c?.role === 'program_manager' && !!m?.base_id;
+  return window.RAPS_PERMISSIONS?.hasRole('program_manager') === true;
 }
+function dashboardRequest() {
+  const permissions = window.RAPS_PERMISSIONS;
+  const token = permissions?.snapshot();
+  const source = client();
+  const generation = loadGeneration;
+  const current = () => generation === loadGeneration && permissions?.isCurrent(token) && isProgramManager();
+  return { client:source, current, assert() {
+    if (!current()) throw new Error('Your account or reporting access changed. Refresh the dashboard.');
+  } };
+}
+
 function baseLabel() {
   const m = membership();
-  return m?.bases?.code || m?.bases?.name || cloud()?.scope || 'Assigned base';
+  return m?.bases?.code || m?.bases?.name || 'Assigned base';
 }
 function humanize(value) {
   if (!value) return 'Unclassified';
@@ -134,11 +145,13 @@ function inject() {
   mounted = true;
 }
 
-async function pagedQuery(makeQuery, pageSize=1000) {
+async function pagedQuery(makeQuery, pageSize=1000, access = null) {
   const rows = [];
   for (let from = 0; ; from += pageSize) {
     const to = from + pageSize - 1;
+    access?.assert();
     const { data, error } = await makeQuery(from, to);
+    access?.assert();
     if (error) throw error;
     const batch = data || [];
     rows.push(...batch);
@@ -147,16 +160,17 @@ async function pagedQuery(makeQuery, pageSize=1000) {
   return rows;
 }
 
-async function queryInChunks(table, select, column, values, extraBuilder=null, chunkSize=100) {
+async function queryInChunks(table, select, column, values, extraBuilder=null, chunkSize=100, access = null) {
+  access?.assert();
   if (!values.length) return [];
   const out = [];
   for (let i = 0; i < values.length; i += chunkSize) {
     const ids = values.slice(i, i + chunkSize);
     const part = await pagedQuery((from, to) => {
-      let q = client().from(table).select(select).in(column, ids);
+      let q = (access?.client || client()).from(table).select(select).in(column, ids);
       if (extraBuilder) q = extraBuilder(q);
       return q.range(from, to);
-    });
+    }, 1000, access);
     out.push(...part);
   }
   return out;
@@ -403,6 +417,11 @@ async function loadDashboard(force=false) {
 
   if (!force && lastLoadedBaseId === baseId && $('pmBaseKpis')?.children.length) return;
 
+  const access = dashboardRequest();
+  const readPages = (makeQuery, pageSize = 1000) => pagedQuery(makeQuery, pageSize, access);
+  const readChunks = (table, select, column, values, extra = null, chunkSize = 100) =>
+    queryInChunks(table, select, column, values, extra, chunkSize, access);
+
   setBusy(true);
   setStatus(`Loading ${label} cloud operations…`, 'working');
 
@@ -410,7 +429,7 @@ async function loadDashboard(force=false) {
     const days = daysValue();
     const cutoff = cutoffIso(days);
 
-    const classes = await pagedQuery((from,to) => {
+    const classes = await readPages((from,to) => {
       let q = supabase.from('classes')
         .select('id,base_id,name,course_type,start_date,end_date,status,created_by,app_data,updated_at')
         .eq('base_id', baseId)
@@ -422,7 +441,7 @@ async function loadDashboard(force=false) {
     const classIds = classes.map(x => x.id);
     let events = [];
     if (classIds.length) {
-      events = await queryInChunks(
+      events = await readChunks(
         'evaluation_events',
         'id,class_id,base_id,name,event_date,status,created_by,updated_at',
         'class_id',
@@ -433,7 +452,7 @@ async function loadDashboard(force=false) {
     const eventIds = events.map(x => x.id);
     let evaluations = [];
     if (eventIds.length) {
-      evaluations = await queryInChunks(
+      evaluations = await readChunks(
         'evaluations',
         'id,event_id,participant_id,evaluator_id,status,overall_result,score_numerator,score_denominator,started_at,completed_at,updated_at',
         'event_id',
@@ -444,7 +463,7 @@ async function loadDashboard(force=false) {
     const evaluationIds = evaluations.map(x => x.id);
     let failures = [];
     if (evaluationIds.length) {
-      failures = await queryInChunks(
+      failures = await readChunks(
         'criterion_results',
         'evaluation_id,result,failure_mode,primary_contributor',
         'evaluation_id',
@@ -459,7 +478,7 @@ async function loadDashboard(force=false) {
     let profileRows = [];
     if (evaluatorIds.length) {
       try {
-        profileRows = await queryInChunks(
+        profileRows = await readChunks(
           'profiles',
           'id,display_name,email',
           'id',
@@ -473,7 +492,7 @@ async function loadDashboard(force=false) {
     let participantRows = [];
     if (participantIds.length) {
       try {
-        participantRows = await queryInChunks(
+        participantRows = await readChunks(
           'participants',
           'id,participant_identifier,display_name',
           'id',
@@ -484,6 +503,7 @@ async function loadDashboard(force=false) {
       }
     }
 
+    access.assert();
     const model = buildModel({ classes, events, evaluations, failures, profileRows, participantRows });
     renderModel(model);
     lastLoadedBaseId = baseId;
@@ -491,15 +511,25 @@ async function loadDashboard(force=false) {
     const windowLabel = days ? `last ${days === 365 ? '12 months' : `${days} days`}` : 'all available data';
     setStatus(`${label} · ${windowLabel} · refreshed ${new Date().toLocaleTimeString()}`, 'success');
   } catch (error) {
+    if (!access.current()) return;
     console.error('Program Manager My Base dashboard failed', error);
     setStatus(`Dashboard load failed: ${error?.message || error}`, 'error');
   } finally {
-    setBusy(false);
+    if (access.current()) setBusy(false);
   }
 }
 
 window.addEventListener('raps-cloud-identity', () => {
   inject();
+  loadGeneration++;
+  setBusy(false);
+  for (const id of ['pmBaseClassTable', 'pmBaseContributors', 'pmBaseEvaluatorTable', 'pmBaseFailureModes', 'pmBaseIncompleteTable', 'pmBaseKpis']) {
+    const element = $(id);
+    if (element) element.innerHTML = '';
+  }
+  setStatus('');
+  const scope = $('pmBaseScope');
+  if (scope) scope.textContent = '';
   lastLoadedBaseId = null;
   loadDashboard(true);
 });

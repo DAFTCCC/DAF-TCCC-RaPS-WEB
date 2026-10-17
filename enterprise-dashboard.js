@@ -2,12 +2,24 @@
 'use strict';
 
 let mounted = false;
+let loadGeneration = 0;
 let loading = false;
 let raw = null;
 
 const byId = (id) => document.getElementById(id);
 const cloud = () => window.RAPS_CLOUD || null;
 const supabase = () => window.RAPS_SUPABASE || null;
+
+function dashboardRequest() {
+  const permissions = window.RAPS_PERMISSIONS;
+  const token = permissions?.snapshot();
+  const client = supabase();
+  const generation = loadGeneration;
+  const current = () => generation === loadGeneration && permissions?.isCurrent(token) && isEnterpriseAdmin();
+  return { client, current, assert() {
+    if (!current()) throw new Error('Your account or reporting access changed. Refresh the dashboard.');
+  } };
+}
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
@@ -20,7 +32,7 @@ function esc(value) {
 }
 
 function isEnterpriseAdmin() {
-  return cloud()?.role === 'enterprise_admin';
+  return window.RAPS_PERMISSIONS?.hasRole('enterprise_admin') === true;
 }
 
 function pretty(value) {
@@ -201,12 +213,14 @@ function inject() {
   mounted = true;
 }
 
-async function paged(makeQuery, pageSize = 1000) {
+async function paged(makeQuery, pageSize = 1000, access = null) {
   const rows = [];
 
   for (let from = 0; ; from += pageSize) {
     const to = from + pageSize - 1;
+    access?.assert();
     const { data, error } = await makeQuery(from, to);
+    access?.assert();
     if (error) throw error;
 
     const batch = data || [];
@@ -218,7 +232,8 @@ async function paged(makeQuery, pageSize = 1000) {
   return rows;
 }
 
-async function queryChunks(table, select, column, values, extra = null, chunkSize = 100) {
+async function queryChunks(table, select, column, values, extra = null, chunkSize = 100, access = null) {
+  access?.assert();
   if (!values.length) return [];
 
   const out = [];
@@ -227,10 +242,10 @@ async function queryChunks(table, select, column, values, extra = null, chunkSiz
     const ids = values.slice(i, i + chunkSize);
 
     const rows = await paged((from, to) => {
-      let q = supabase().from(table).select(select).in(column, ids);
+      let q = (access?.client || supabase()).from(table).select(select).in(column, ids);
       if (extra) q = extra(q);
       return q.range(from, to);
-    });
+    }, 1000, access);
 
     out.push(...rows);
   }
@@ -1096,19 +1111,24 @@ async function load(force = false) {
   const client = supabase();
   if (!client) return;
 
+  const access = dashboardRequest();
+  const readPages = (makeQuery, pageSize = 1000) => paged(makeQuery, pageSize, access);
+  const readChunks = (table, select, column, values, extra = null, chunkSize = 100) =>
+    queryChunks(table, select, column, values, extra, chunkSize, access);
+
   setLoading(true);
   setMessage('Loading enterprise cloud operations…', 'working');
 
   try {
     const [majcoms, bases] = await Promise.all([
-      paged((from, to) =>
+      readPages((from, to) =>
         client.from('majcoms')
           .select('id,code,name,active')
           .eq('active', true)
           .order('code')
           .range(from, to)
       ),
-      paged((from, to) =>
+      readPages((from, to) =>
         client.from('bases')
           .select('id,code,name,majcom_id,active')
           .eq('active', true)
@@ -1117,28 +1137,28 @@ async function load(force = false) {
       )
     ]);
 
-    const classes = await queryChunks(
+    const classes = await readChunks(
       'classes',
       'id,base_id,name,course_type,start_date,end_date,status,created_by,app_data,updated_at',
       'base_id',
       bases.map((base) => base.id)
     );
 
-    const events = await queryChunks(
+    const events = await readChunks(
       'evaluation_events',
       'id,class_id,base_id,name,event_date,status,created_by,updated_at',
       'class_id',
       classes.map((c) => c.id)
     );
 
-    const evaluations = await queryChunks(
+    const evaluations = await readChunks(
       'evaluations',
       'id,event_id,participant_id,evaluator_id,curriculum_version_id,attempt_number,status,overall_result,score_numerator,score_denominator,started_at,completed_at,updated_at',
       'event_id',
       events.map((event) => event.id)
     );
 
-    const failures = await queryChunks(
+    const failures = await readChunks(
       'criterion_results',
       'evaluation_id,result,failure_mode,primary_contributor',
       'evaluation_id',
@@ -1157,7 +1177,7 @@ async function load(force = false) {
     let profileRows = [];
     if (evaluatorIds.length) {
       try {
-        profileRows = await queryChunks(
+        profileRows = await readChunks(
           'profiles',
           'id,display_name,email',
           'id',
@@ -1171,7 +1191,7 @@ async function load(force = false) {
     let participantRows = [];
     if (participantIds.length) {
       try {
-        participantRows = await queryChunks(
+        participantRows = await readChunks(
           'participants',
           'id,participant_identifier,display_name',
           'id',
@@ -1182,6 +1202,7 @@ async function load(force = false) {
       }
     }
 
+    access.assert();
     raw = {
       majcoms,
       bases,
@@ -1196,15 +1217,23 @@ async function load(force = false) {
     refreshFilterOptions();
     render();
   } catch (error) {
+    if (!access.current()) return;
     console.error('Enterprise Operations dashboard failed', error);
     setMessage('Dashboard load failed: ' + (error?.message || error), 'error');
   } finally {
-    setLoading(false);
+    if (access.current()) setLoading(false);
   }
 }
 
 window.addEventListener('raps-cloud-identity', () => {
   inject();
+  loadGeneration++;
+  setLoading(false);
+  for (const id of ['enterpriseAttention', 'enterpriseMajcomFilter', 'enterpriseBaseFilter', 'enterpriseBaseTable', 'enterpriseClassTable', 'enterpriseContributors', 'enterpriseCourseTable', 'enterpriseDataQuality', 'enterpriseEvaluatorTable', 'enterpriseFailureModes', 'enterpriseIncompleteTable', 'enterpriseKpis', 'enterpriseMajcomTable', 'enterpriseTierTable', 'enterpriseTrendTable']) {
+    const element = byId(id);
+    if (element) element.innerHTML = '';
+  }
+  setMessage('');
   raw = null;
   load(true);
 });

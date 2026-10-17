@@ -436,7 +436,7 @@ body.cloudAuthLocked{overflow:hidden}
 .adminMessage{min-height:18px;margin:8px 0;font-size:11px}
 .adminMessage.success{color:#bdebd7}
 .adminMessage.error{color:#ffc2c2}
-.adminMessage.working{color:#ffe0a3}
+.adminMessage.working,.adminMessage.warning{color:#ffe0a3}
 .adminTable td{vertical-align:top}
 @media (max-width:900px){.adminFormGrid{grid-template-columns:1fr 1fr}}
 @media (max-width:600px){.adminFormGrid{grid-template-columns:1fr}}

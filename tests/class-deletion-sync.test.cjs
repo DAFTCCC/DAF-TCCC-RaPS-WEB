@@ -113,12 +113,15 @@ function sharedServer({ rowCap = Infinity, endRangeErrorCode = null } = {}) {
 
 function browser(server, deviceId) {
   const classes = [], statePatches = [];
+  const accessRefreshes=[];
+  const hidden = new Set(), clientSettings = [];
   const tier = { id: '1', source: 'JTS-standard', sections: [{ code: 'M', items: [] }], timers: [] };
   const getClass = id => classes.find(c => c.id === id) || null;
   const store = {
     getClasses: () => classes,
     getClass,
     deviceId: () => deviceId,
+    isLocalCopyHidden:id => hidden.has(id),
     persistCloudMerge() {},
     patchCloudState(id, patch) {
       const c = getClass(id);
@@ -127,6 +130,8 @@ function browser(server, deviceId) {
       return c;
     },
     upsertFromCloud(remote, options = {}) {
+      if (hidden.has(remote.id) && !options.restoreLocalCopy) return null;
+      if (options.restoreLocalCopy) hidden.delete(remote.id);
       const index = classes.findIndex(c => c.id === remote.id);
       if (index < 0) classes.push(copy(remote));
       else {
@@ -140,16 +145,20 @@ function browser(server, deviceId) {
   const scheduled = [];
   const window = {
     RAPS_CLASS_STORE: store,
-    RAPS_CLOUD: { user: { id: 'enterprise-user' }, role: 'enterprise_admin', connected: true },
-    RAPS_SUPABASE: server.client(deviceId),
+    RAPS_CLOUD: { user: { id: 'enterprise-user' }, role: 'enterprise_admin', connected: true,
+      memberships:[{id:'enterprise-membership',user_id:'enterprise-user',role:'enterprise_admin',active:true,base_id:null,majcom_id:null,starts_at:null,ends_at:null}] },
+    RAPS_CLOUD_CONFIG:{ projectUrl:'https://supabase.example.test',publishableKey:'synthetic-anon' },
+    RAPS_SUPABASE: { ...server.client(deviceId), auth:{getSession:async () => ({data:{session:{user:{id:window.RAPS_CLOUD.user?.id},access_token:`synthetic-${window.RAPS_CLOUD.user?.id}`}},error:null})} },
+    supabase:{createClient:(_url,_key,settings) => {clientSettings.push(settings);return server.client(deviceId);}},
     TCCC_TIERS: { 1: tier },
     addEventListener(type, callback) { listeners.set(type, callback); },
-    dispatchEvent(event) { listeners.get(event.type)?.(event); },
+    dispatchEvent(event) { if(event.type==='raps-class-access-refresh')accessRefreshes.push(event);listeners.get(event.type)?.(event); },
     setTimeout(callback) { scheduled.push(callback); }
   };
   const context = vm.createContext({ window, navigator: { onLine: true }, console,
     document: { readyState: 'loading', addEventListener() {}, getElementById() { return null; } },
     CustomEvent: class { constructor(type, options = {}) { this.type = type; this.detail = options.detail; } } });
+  vm.runInContext(fs.readFileSync(path.join(root,'permissions.js'),'utf8'),context,{filename:'permissions.js'});
   vm.runInContext(syncSource, context, { filename: 'cloud-sync.js' });
   const api = window.RAPS_CLASS_SYNC;
   function change(id, patch) {
@@ -159,7 +168,7 @@ function browser(server, deviceId) {
     return c;
   }
   return {
-    api, classes, window, getClass, change, statePatches,
+    api, classes, window, getClass, change, statePatches, hidden, clientSettings, context, accessRefreshes,
     createClass() {
       const now = server.tick();
       const c = { id: 'class-1', name: 'TCCC skills assessment', tierId: '1', roster: 'A', date: '2026-10-15',
@@ -169,6 +178,7 @@ function browser(server, deviceId) {
         trainingInstallationId: 'TEST', trainingLocationName: 'Test Installation', location: 'Test Installation',
         status: 'draft', deletedAt: null, closedAt: null, tierSnapshot: copy(tier),
         students: [], createdAt: now, modifiedAt: now, lastModifiedDeviceId: deviceId,
+        localCreatedByUserId:window.RAPS_CLOUD.user.id,
         cloudSync: { enabled: true, status: 'pending', remoteModifiedAt: 0 } };
       classes.push(c);
       return c;
@@ -385,6 +395,7 @@ test('acknowledged trash is not rescheduled or rewritten on each synchronization
 test('legacy trash repair retains enterprise authorization when an older row is paginated', async () => {
   const { server, phone } = await twoBrowsers({ rowCap: 2 });
   phone.window.RAPS_CLOUD.role = 'evaluator';
+  Object.assign(phone.window.RAPS_CLOUD.memberships[0],{role:'evaluator',base_id:'base-1'});
   phone.getClass('class-1').deletedAt = server.tick();
   phone.getClass('class-1').cloudSync = { ...phone.getClass('class-1').cloudSync, enabled: false, status: 'local' };
   addNewerClasses(server);
@@ -571,6 +582,7 @@ test('trash patch preserves another device metadata edits and unknown applicatio
 test('non-enterprise explicit trash intent cannot archive or restore a shared class', async () => {
   const { server, desktop, phone } = await twoBrowsers();
   phone.window.RAPS_CLOUD.role = 'evaluator';
+  Object.assign(phone.window.RAPS_CLOUD.memberships[0],{role:'evaluator',base_id:'base-1'});
   requestTrashAction(server, phone, 'delete');
   await phone.api.pushClass(phone.getClass('class-1'));
   assert.notEqual(server.tables.classes[0].status, 'archived');
@@ -795,10 +807,11 @@ function appLifecycleActions({ enterprise, closed = false }) {
   assert.ok(outboxPrefix, 'Missing trash outbox storage key');
   let selectedClass = c;
   const context = vm.createContext({ db: { classes: [c] }, cls: () => selectedClass,
-    hasEnterpriseAccess: () => enterprise, isClassClosed: value => !!value.closedAt,
+    isClassClosed: value => !!value.closedAt,
     alert: value => alerts.push(value), prompt: () => 'DELETE', now: () => 123,
     currentCloudUserId: () => 'enterprise-user', TRASH_OUTBOX_PREFIX: outboxPrefix,
-    navigator: { onLine: true }, window: {},
+    navigator: { onLine: true }, window: { RAPS_CLOUD:{user:{id:'enterprise-user'},connected:true,
+      memberships:[{id:'test-membership',user_id:'enterprise-user',role:enterprise?'enterprise_admin':'evaluator',base_id:enterprise?null:'base-1',majcom_id:null,active:true}]},addEventListener(){} },
     localStorage: {
       getItem: key => storage.get(key) || null,
       setItem: (key, value) => storage.set(key, value),
@@ -807,11 +820,13 @@ function appLifecycleActions({ enterprise, closed = false }) {
     saveDb: id => saves.push({ id, trashAction: copy(c.cloudSync?.trashAction || null) }),
     showHome() { selectedClass = null; }, renderHome() {},
     requestClosedClassArchiveDeletion: value => archiveRequests.push(value.id) });
-  for (const name of ['readTrashOutbox', 'rememberTrashAction', 'applyTrashAction', 'queueTrashAction', 'deleteClass', 'restoreDeletedClass']) {
+  vm.runInContext(fs.readFileSync(path.join(root,'permissions.js'),'utf8'),context,{filename:'permissions.js'});
+  for (const name of ['hasEnterpriseAccess','canAccessClass','requireClassAccess','readTrashOutbox', 'rememberTrashAction', 'applyTrashAction', 'queueTrashAction', 'deleteClass', 'restoreDeletedClass']) {
     const marker = new RegExp(`^(?:async )?function ${name}\\(`, 'm');
     const match = marker.exec(source);
     assert.ok(match, `Missing app lifecycle function ${name}`);
-    const end = source.indexOf('\n}', match.index) + 2;
+    const lineEnd = source.indexOf('\n',match.index);
+    const end = source.slice(match.index,lineEnd).trimEnd().endsWith('}') ? lineEnd : source.indexOf('\n}', match.index) + 2;
     vm.runInContext(source.slice(match.index, end), context);
   }
   return { context, c, alerts, saves, archiveRequests, storage, outboxPrefix, atHome: () => selectedClass === null };
@@ -859,4 +874,288 @@ test('application closed-class deletion routes through archive controls and cann
   assert.equal(fixture.c.deletedAt, null);
   assert.equal(fixture.saves.length, 0);
   assert.equal(fixture.alerts.length, 1);
+});
+
+function useRole(device, role, overrides={}) {
+  const userId = overrides.userId || 'enterprise-user';
+  device.window.RAPS_CLOUD = { user:{id:userId},role,connected:true,memberships:[{
+    id:`${role}-membership`,user_id:userId,role,active:true,starts_at:null,ends_at:null,
+    base_id:['evaluator','program_manager'].includes(role)?'base-1':null,
+    majcom_id:role==='majcom_manager'?'majcom-1':null,...overrides
+  }] };
+}
+
+test('automatic synchronization preserves device exclusions until an explicit class reload', async () => {
+  const {server,desktop,phone}=await twoBrowsers();
+  phone.classes.length=0;
+  phone.hidden.add('class-1');
+  const before=server.writes.length;
+  assert.equal(await phone.api.pullVisibleClasses(),0);
+  await phone.api.syncAll({silent:true});
+  assert.equal(phone.getClass('class-1'),null);
+  assert.equal(phone.hidden.has('class-1'),true);
+  assert.equal(server.writes.length,before);
+  assert.equal(await phone.api.loadClass('class-1'),true);
+  assert.equal(phone.hidden.has('class-1'),false);
+  assert.equal(phone.getClass('class-1').name,desktop.getClass('class-1').name);
+  assert.equal(phone.api.classMetadataSignature(phone.getClass('class-1')),phone.getClass('class-1').cloudSync.baseMetadataSignature);
+});
+
+test('removing a copy while a pull is in flight cannot reimport it', async () => {
+  const {server,phone}=await twoBrowsers();
+  phone.classes.length=0;
+  server.afterNextClassPage(()=>phone.hidden.add('class-1'));
+  assert.equal(await phone.api.pullVisibleClasses(),0);
+  assert.equal(phone.getClass('class-1'),null);
+  assert.equal(phone.hidden.has('class-1'),true);
+});
+
+test('sign-out during a class fetch suppresses writes and local state changes', async () => {
+  const {server,phone}=await twoBrowsers();
+  phone.change('class-1',{name:'Pending old account change'});
+  const gate=server.pauseNextClassFetch('phone');
+  const beforeWrites=server.writes.length,beforePatches=phone.statePatches.length;
+  const request=phone.api.pushClass(phone.getClass('class-1'));
+  await gate.snapshotReady;
+  phone.window.RAPS_CLOUD={user:null,connected:false,memberships:[]};
+  gate.release();
+  assert.equal(await request,false);
+  assert.equal(server.writes.length,beforeWrites);
+  assert.equal(phone.statePatches.length,beforePatches);
+});
+
+test('a full-sync push stops if that local class is excluded during its fetch', async () => {
+  const {server,phone}=await twoBrowsers();
+  phone.change('class-1',{name:'Pending local metadata'});
+  const gate=server.pauseNextClassFetch('phone');
+  const before=server.writes.length;
+  const request=phone.api.syncAll({silent:true});
+  await gate.snapshotReady;
+  phone.hidden.add('class-1');
+  const beforePatches=phone.statePatches.length;
+  gate.release();
+  await request;
+  assert.equal(server.writes.length,before);
+  assert.equal(phone.statePatches.length,beforePatches);
+});
+
+test('queued class pushes retain the account that queued them', async () => {
+  const {server,phone}=await twoBrowsers();
+  phone.change('class-1',{name:'Old-account queued change'});
+  const gate=server.pauseNextClassFetch('phone');
+  const first=phone.api.pushClass(phone.getClass('class-1'));
+  await gate.snapshotReady;
+  const queued=phone.api.pushClass(phone.getClass('class-1'));
+  const before=server.writes.length,created=phone.clientSettings.length;
+  useRole(phone,'enterprise_admin',{userId:'new-enterprise-user'});
+  gate.release();
+  assert.equal(await first,false);
+  assert.equal(await queued,false);
+  assert.equal(server.writes.length,before);
+  assert.equal(phone.clientSettings.length,created);
+});
+
+test('cached, expired, inactive, missing, and offline memberships cannot perform live class synchronization', async () => {
+  for (const invalid of ['cached','expired','inactive','missing','offline']) {
+    const server=sharedServer(),device=browser(server,invalid);
+    device.createClass();
+    if(invalid==='cached')device.window.RAPS_CLOUD.offlineCached=true;
+    if(invalid==='expired')device.window.RAPS_CLOUD.memberships[0].ends_at='2000-01-01T00:00:00Z';
+    if(invalid==='inactive')device.window.RAPS_CLOUD.memberships[0].active=false;
+    if(invalid==='missing')device.window.RAPS_CLOUD.memberships=[];
+    if(invalid==='offline')vm.runInContext('navigator.onLine=false',device.context);
+    assert.equal(await device.api.pushClass(device.getClass('class-1')),false,invalid);
+    assert.equal(await device.api.pullVisibleClasses(),0,invalid);
+    assert.equal(server.writes.length,0);
+    assert.equal(server.reads.length,0);
+    assert.equal(device.clientSettings.length,0);
+  }
+});
+
+test('background synchronization never assigns unknown or another account local classes to the current user', async () => {
+  for(const role of ['enterprise_admin','evaluator','program_manager']) {
+    for(const owner of ['', 'other-user']) {
+      const server=sharedServer(),device=browser(server,`${role}-${owner}`);
+      useRole(device,role);
+      const c=device.createClass();
+      delete c.localCreatedByUserId;
+      if(owner)c.localCreatedByUserId=owner;
+      const before=server.writes.length;
+      assert.equal(await device.api.pushClass(c),false,`${role}/${owner}`);
+      await device.api.syncAll({silent:true});
+      assert.equal(server.writes.length,before);
+      assert.equal(server.tables.classes.length,0);
+      assert.equal(c.localCreatedByUserId,owner || undefined);
+    }
+  }
+  const server=sharedServer(),device=browser(server,'inconsistent-owner');
+  const c=device.createClass();
+  c.cloudSync.createdBy='other-user';
+  assert.equal(await device.api.pushClass(c),false);
+  assert.equal(server.writes.length,0);
+});
+
+test('class operations bind their bearer token and abort session changes before client creation', async () => {
+  const server=sharedServer(),device=browser(server,'bound');
+  device.createClass();
+  assert.equal(await device.api.pushClass(device.getClass('class-1')),true);
+  const settings=device.clientSettings[0];
+  assert.equal(settings.global.headers.Authorization,'Bearer synthetic-enterprise-user');
+  assert.equal(settings.auth.persistSession,false);
+  assert.equal(settings.auth.autoRefreshToken,false);
+  assert.equal(settings.auth.detectSessionInUrl,false);
+  let release;
+  device.window.RAPS_SUPABASE.auth.getSession=()=>new Promise(resolve=>{release=resolve;});
+  const request=device.api.pullVisibleClasses();
+  await new Promise(resolve=>setImmediate(resolve));
+  const before=device.clientSettings.length;
+  useRole(device,'enterprise_admin',{userId:'replacement-user'});
+  release({data:{session:{user:{id:'enterprise-user'},access_token:'stale-token'}},error:null});
+  assert.equal(await request,0);
+  assert.equal(device.clientSettings.length,before);
+});
+
+test('relational class scope overrides editable app metadata for reads and writes', async () => {
+  const {server,phone}=await twoBrowsers();
+  server.tables.bases.push({id:'base-2',code:'OTHER',name:'Other Installation',majcom_id:'majcom-2',active:true});
+  server.tables.majcoms.push({id:'majcom-2',code:'OTHER',name:'Other Command',active:true});
+  const row=server.tables.classes[0];
+  row.base_id='base-2';
+  row.app_data.homeInstallationId='TEST';
+  row.app_data.cloudScope={baseId:'base-1',majcomId:'majcom-1'};
+  useRole(phone,'program_manager');
+  const before=server.writes.length;
+  phone.change('class-1',{name:'Attempted cross-scope update'});
+  assert.equal(await phone.api.pushClass(phone.getClass('class-1')),false);
+  phone.classes.length=0;
+  assert.equal(await phone.api.pullVisibleClasses(),0);
+  assert.equal(server.writes.length,before);
+  await assert.rejects(phone.api.loadClass('class-1'),/access/);
+});
+
+test('Program Managers cannot move an existing class outside their installation', async () => {
+  const {server,phone}=await twoBrowsers();
+  server.tables.bases.push({id:'base-2',code:'OTHER',name:'Other Installation',majcom_id:'majcom-1',active:true});
+  useRole(phone,'program_manager');
+  phone.change('class-1',{homeInstallationId:'OTHER',homeInstallationName:'Other Installation'});
+  const before=server.writes.length;
+  assert.equal(await phone.api.pushClass(phone.getClass('class-1')),false);
+  assert.equal(server.tables.classes[0].base_id,'base-1');
+  assert.equal(server.writes.length,before);
+});
+
+test('MAJCOM oversight reads its command without class administration', async () => {
+  const {server,phone}=await twoBrowsers();
+  phone.classes.length=0;
+  useRole(phone,'majcom_manager');
+  assert.equal(await phone.api.pullVisibleClasses(),1);
+  phone.change('class-1',{name:'Oversight cannot edit'});
+  const before=server.writes.length;
+  assert.equal(await phone.api.pushClass(phone.getClass('class-1')),false);
+  assert.equal(server.writes.length,before);
+});
+
+test('class and event evaluator assignments grant read/evaluate access without metadata administration', async () => {
+  for (const assignment of ['class','event']) {
+    const {server,phone}=await twoBrowsers({rowCap:2});
+    phone.classes.length=0;
+    useRole(phone,'evaluator',{userId:'assigned-evaluator'});
+    if(assignment==='class')server.tables.class_evaluators=[
+      ...['aaa-1','aaa-2','aaa-3'].map(class_id=>({class_id,evaluator_id:'assigned-evaluator'})),
+      {class_id:'class-1',evaluator_id:'assigned-evaluator'}];
+    else server.tables.event_evaluators=[
+      ...['aaa-1','aaa-2','aaa-3'].map(event_id=>({event_id,evaluator_id:'assigned-evaluator',evaluation_events:{class_id:'other'}})),
+      {event_id:'separate-event',evaluator_id:'assigned-evaluator',evaluation_events:{class_id:'class-1'}}];
+    assert.equal(await phone.api.pullVisibleClasses(),1,assignment);
+    const c=phone.getClass('class-1');
+    assert.equal(c.cloudScope.baseId,'base-1');
+    assert.equal(c.cloudScope.majcomId,'majcom-1');
+    assert.equal(c.cloudAccess.userId,'assigned-evaluator');
+    assert.equal(c.cloudAccess.assignedEvaluator,true);
+    assert.equal(phone.window.RAPS_PERMISSIONS.canClass('evaluate',c),true);
+    phone.change('class-1',{name:'Assigned does not own metadata'});
+    const before=server.writes.length;
+    assert.equal(await phone.api.pushClass(c),false);
+    assert.equal(server.writes.length,before);
+  }
+});
+
+test('fresh assignment reads revoke cached access even when RLS no longer returns the class', async () => {
+  for(const assignment of ['class','event']) {
+    const {server,phone}=await twoBrowsers();
+    phone.classes.length=0;
+    useRole(phone,'evaluator',{userId:'assigned-evaluator'});
+    if(assignment==='class')server.tables.class_evaluators=[{class_id:'class-1',evaluator_id:'assigned-evaluator'}];
+    else server.tables.event_evaluators=[{event_id:'separate-event',evaluator_id:'assigned-evaluator',evaluation_events:{class_id:'class-1'}}];
+    assert.equal(await phone.api.pullVisibleClasses(),1);
+    const local=phone.getClass('class-1');
+    local.students=[{id:'retained-learner',name:'Retained locally'}];
+    assert.equal(phone.window.RAPS_PERMISSIONS.canClass('readClass',local),true);
+    server.tables.class_evaluators=[];
+    server.tables.event_evaluators=[];
+    server.tables.classes=[]; // The authoritative row is now hidden by RLS.
+    const before=phone.accessRefreshes.length;
+    assert.equal(await phone.api.pullVisibleClasses(),0);
+    assert.equal(phone.window.RAPS_PERMISSIONS.canClass('readClass',local),false);
+    assert.equal(phone.window.RAPS_PERMISSIONS.canClass('evaluate',local),false);
+    assert.equal(local.cloudAccess.assignedEvaluator,false);
+    assert.equal(local.students[0].id,'retained-learner');
+    assert.equal(phone.accessRefreshes.length,before+1);
+  }
+});
+
+test('metadata equality and conflicts cannot retain revoked evaluator assignments', async () => {
+  for(const conflict of [false,true]) {
+    const {server,phone}=await twoBrowsers();
+    useRole(phone,'majcom_manager');
+    server.tables.class_evaluators=[{class_id:'class-1',evaluator_id:'enterprise-user'}];
+    await phone.api.pullVisibleClasses();
+    const local=phone.getClass('class-1');
+    assert.equal(phone.window.RAPS_PERMISSIONS.canClass('evaluate',local),true);
+    if(conflict) {
+      phone.change('class-1',{name:'Unresolved local name'});
+      local.cloudSync.status='conflict';
+      server.tables.classes[0].name='Concurrent remote name';
+    }
+    server.tables.class_evaluators=[];
+    await phone.api.pullVisibleClasses();
+    assert.equal(phone.window.RAPS_PERMISSIONS.canClass('readClass',local),true);
+    assert.equal(phone.window.RAPS_PERMISSIONS.canClass('evaluate',local),false);
+    if(conflict)assert.equal(local.name,'Unresolved local name');
+  }
+});
+
+test('fresh organizational catalogs remove stale command scope from retained copies', async () => {
+  const {server,phone}=await twoBrowsers();
+  useRole(phone,'majcom_manager');
+  assert.equal(phone.window.RAPS_PERMISSIONS.canClass('readClass',phone.getClass('class-1')),true);
+  server.tables.majcoms.push({id:'majcom-2',code:'OTHER',name:'Other Command',active:true});
+  server.tables.bases[0].majcom_id='majcom-2';
+  assert.equal(await phone.api.pullVisibleClasses(),0);
+  assert.equal(phone.getClass('class-1').cloudScope.majcomId,'majcom-2');
+  assert.equal(phone.window.RAPS_PERMISSIONS.canClass('readClass',phone.getClass('class-1')),false);
+});
+
+test('fresh catalogs revoke scoped and assigned cached access when the installation or parent command is inactive', async () => {
+  for(const inactive of ['base','majcom']) {
+    for(const role of ['program_manager','evaluator']) {
+      const {server,phone}=await twoBrowsers();
+      useRole(phone,role);
+      if(role==='evaluator')server.tables.class_evaluators=[{class_id:'class-1',evaluator_id:'enterprise-user'}];
+      await phone.api.pullVisibleClasses();
+      const local=phone.getClass('class-1');
+      assert.equal(local.cloudScope.available,true);
+      assert.equal(phone.window.RAPS_PERMISSIONS.canClass('readClass',local),true);
+      if(inactive==='base')server.tables.bases[0].active=false;
+      else server.tables.majcoms[0].active=false;
+      await phone.api.pullVisibleClasses();
+      assert.equal(local.cloudScope.baseId,'base-1');
+      assert.equal(local.cloudScope.available,false,`${inactive}/${role}`);
+      assert.equal(phone.window.RAPS_PERMISSIONS.canClass('readClass',local),false,`${inactive}/${role}`);
+      assert.equal(phone.window.RAPS_PERMISSIONS.canClass('evaluate',local),false,`${inactive}/${role}`);
+      useRole(phone,'enterprise_admin');
+      assert.equal(phone.window.RAPS_PERMISSIONS.canClass('readClass',local),true);
+      assert.equal(phone.window.RAPS_PERMISSIONS.canClass('deleteClass',local),true);
+    }
+  }
 });

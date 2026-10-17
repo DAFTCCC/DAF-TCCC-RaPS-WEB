@@ -30,10 +30,7 @@ def main():
             headless=True,
         )
         context = browser.new_context(service_workers='block', viewport={'width': 1024, 'height': 768})
-        context.add_init_script("""
-          window.RAPS_CLOUD={user:{id:'test-evaluator'},role:'evaluator',
-            client:{rpc:async()=>{throw new Error('No cloud operations allowed in isolated UI test');}}};
-        """)
+        context.add_init_script(WORKFLOW.IDENTITY_FIXTURE)
 
         def fulfill(route):
             url = urlsplit(route.request.url)

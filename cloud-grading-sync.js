@@ -11,6 +11,110 @@ const getClient=()=>window.RAPS_SUPABASE;
 const getCloud=()=>window.RAPS_CLOUD;
 const getStore=()=>window.RAPS_CLASS_STORE;
 
+function permissionContext(c, action) {
+  const permissions = window.RAPS_PERMISSIONS;
+  if (!permissions?.snapshot || !permissions?.isCurrent || !permissions?.canClass?.(action, c)) return null;
+  const identity = permissions.snapshot();
+  const check = () => {
+    const current = getStore()?.getClass?.(c.id);
+    if (!permissions.isCurrent(identity) || !permissions.canClass(action, current || c)
+      || getStore()?.isLocalCopyHidden?.(c.id) || (getStore()?.getClass && !current)) {
+      throw new Error('Session or class permissions changed. Sign in and sync again.');
+    }
+  };
+  try { check(); } catch { return null; }
+  return boundRequestContext(identity, check);
+}
+// Each operation owns its JWT. The shared SDK may adopt another tab's
+// session before the cloud identity event reaches this tab.
+let requestClientId = 0;
+function boundRequestContext(identity, scopeCheck) {
+  const source = getClient();
+  if (!source?.auth?.getSession) return null;
+  let bound = null, accessToken = '', preparation = null, abandoned = false;
+  const abort = () => {
+    abandoned = true;
+    const error = new Error('Your sign-in session changed. Sign in and sync again.');
+    error.code = 'RAPS_SESSION_CHANGED';
+    throw error;
+  };
+  const check = () => {
+    if (abandoned || source !== getClient()) abort();
+    scopeCheck();
+  };
+  const session = async () => {
+    check();
+    let result;
+    try {result = await source.auth.getSession();} catch {abort();}
+    check();
+    const value = result?.data?.session;
+    if (result?.error || typeof value?.access_token !== 'string' || !value.access_token.trim()
+      || value.user?.id !== identity.userId
+      || (value.expires_at != null && (!Number.isFinite(Number(value.expires_at)) || Number(value.expires_at) * 1000 <= Date.now()))) abort();
+    return value.access_token;
+  };
+  const verify = async () => {
+    if (!accessToken || await session() !== accessToken) abort();
+    check();
+  };
+  const ready = () => preparation ||= (async () => {
+    accessToken = await session();
+    const config = window.RAPS_CLOUD_CONFIG;
+    if (!config?.projectUrl || !config?.publishableKey || !window.supabase?.createClient) abort();
+    bound = window.supabase.createClient(config.projectUrl, config.publishableKey, {
+      auth:{persistSession:false, autoRefreshToken:false, detectSessionInUrl:false, storageKey:`raps-grading-request-${++requestClientId}`},
+      global:{headers:{Authorization:`Bearer ${accessToken}`}}
+    });
+    await verify();
+  })();
+  const wrap = query => new Proxy(query, {
+    get(target, key) {
+      if (key === 'then') return (resolve, reject) => Promise.resolve()
+        .then(verify).then(() => target)
+        .then(async result => {await verify(); return result;}).then(resolve, reject);
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? (...args) => {check(); return wrap(value.apply(target, args));} : value;
+    }
+  });
+  return {identity, check, ready, verify, client:{from(table) {
+    check();
+    if (!bound) abort();
+    return wrap(bound.from(table));
+  }}};
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().filter(k => value[k] !== undefined).map(k => [k, canonical(value[k])]));
+  return value;
+}
+function localGradingSignature(a) {
+  const defaults = {id:'',attemptNo:1,startedAt:null,finalizedAt:null,voidedAt:null,finalResult:null,section:'',
+    ratings:{},methods:{},stamps:{},ntReasons:{},failureDetails:{},observations:{},notes:{},timerForced:{},timers:{},
+    events:[],instants:{},trainerSign:'',evaluatorId:'',studentSign:'',overallNotes:'',showNt:false,observeMode:true,
+    remediation:null,appVersion:'',contentVersion:'',scenarioVersion:'1'};
+  return JSON.stringify(canonical(Object.fromEntries(Object.entries(defaults).map(([key,value]) => [key,a?.[key] ?? value]))));
+}
+
+function canEditEvaluation(c, a, remote) {
+  const userId = String(getCloud()?.user?.id || '');
+  return !!userId && !!window.RAPS_PERMISSIONS?.canClass?.('evaluate', c)
+    && String(remote?.evaluator_id || '') === userId
+    && (!a?.cloudEvaluatorUserId || String(a.cloudEvaluatorUserId) === userId)
+    && (!a?.startedByUserId || String(a.startedByUserId) === userId);
+}
+function classWithServerScope(c, row) {
+  return {...c, created_by:row.created_by || '', cloudSync:{...c.cloudSync,createdBy:row.created_by || ''},
+    localCreatedByUserId:'', cloudScope:{baseId:row.base_id, baseCode:row.bases?.code || '', majcomId:row.bases?.majcom_id || ''}};
+}
+
+async function evaluationBelongsToClass(c, s, row, client) {
+  if(String(row?.participant_id || '')!==String(s?.id || '') || !row?.event_id)return false;
+  const {data:event,error}=await client.from('evaluation_events').select('id,class_id').eq('id',row.event_id).maybeSingle();
+  if(error)throw error;
+  return !!event && String(event.class_id || '')===String(c.id);
+}
+
 function iso(ms){if(ms===null||ms===undefined||ms==='')return null;const n=Number(ms);return Number.isFinite(n)?new Date(n).toISOString():null}
 function ms(v){const n=v?Date.parse(v):NaN;return Number.isFinite(n)?n:0}
 function err(e){return String(e?.message||e||'Unknown sync error').slice(0,240)}
@@ -85,23 +189,24 @@ function removeLocalAttemptByEvaluationId(c,s,evaluationId){
   return removed;
 }
 
-async function curriculumIdFor(c){
+async function curriculumIdFor(c,client=getClient()){
   const courseMap={'1':'ASM','2':'CLS','3':'CMC','4':'CPP'};
   const t=tierFor(c),course=courseMap[String(c.tierId)];
-  const {data,error}=await getClient().from('curriculum_versions').select('id')
+  const {data,error}=await client.from('curriculum_versions').select('id')
     .eq('course_type',course).eq('version',t?.source||'').eq('published',true).maybeSingle();
   if(error)throw error;if(!data?.id)throw new Error('Published curriculum version not found.');
   return data.id;
 }
-async function criteriaFor(curriculumId){
+async function criteriaFor(curriculumId,client=getClient(),check=()=>{}){
+  check();
   if(criteriaCache.has(curriculumId))return criteriaCache.get(curriculumId);
-  const {data,error}=await getClient().from('criteria')
+  const {data,error}=await client.from('criteria')
     .select('id,criterion_code,critical,timer_required,timer_standard_ms')
     .eq('curriculum_version_id',curriculumId).eq('active',true);
   if(error)throw error;
   const byCode=new Map((data||[]).map(r=>[r.criterion_code,r]));
   const byId=new Map((data||[]).map(r=>[r.id,r]));
-  const out={rows:data||[],byCode,byId};criteriaCache.set(curriculumId,out);return out;
+  const out={rows:data||[],byCode,byId};check();criteriaCache.set(curriculumId,out);return out;
 }
 function timerDuration(def,x){
   if(Number.isFinite(Number(x?.finalDurationMs)))return Math.round(Number(x.finalDurationMs));
@@ -116,7 +221,13 @@ function timerStandardMs(def){
 }
 
 async function pushEvaluation(c,s,a,options={}){
-  const client=getClient(),cloud=getCloud();
+  const cloud=getCloud(),context=permissionContext(c,'evaluate');
+  if(!getClient()||!context)return false;
+  await context.ready();
+  const client=context.client;
+  const userId=String(cloud?.user?.id || '');
+  const liveAttempt=a, uploadSignature=localGradingSignature(a);
+  a=cloneJson(a);
   const forceConflict=options?.forceConflict===true;
   const expectedRemoteModifiedAt=Number(options?.expectedRemoteModifiedAt||0);
   const skipRosterSync=options?.skipRosterSync===true;
@@ -126,15 +237,15 @@ async function pushEvaluation(c,s,a,options={}){
   // Closed classes are server-authoritative retention records. Never write
   // grading data after closure, including from a stale browser.
   if(c?.closedAt||c?.status==='closed'){
-    patchAttempt(a,{status:'synced',error:'',lastSyncedAt:Date.now()});
-    return true;
+    return false;
   }
   const {data:classRow,error:classError}=await client.from('classes')
-    .select('status').eq('id',c.id).maybeSingle();
+    .select('status,created_by,base_id,bases(id,code,majcom_id)').eq('id',c.id).maybeSingle();
   if(classError)throw classError;
+  if(!classRow || !window.RAPS_PERMISSIONS.canClass('evaluate',classWithServerScope(c,classRow)))return false;
   if(classRow?.status==='archived')return false;
   if(classRow?.status==='completed'){
-    patchAttempt(a,{status:'conflict',error:'Class is closed on the server. Pull authoritative state before continuing.'});
+    patchAttempt(liveAttempt,{status:'conflict',error:'Class is closed on the server. Pull authoritative state before continuing.'});
     return false;
   }
 
@@ -142,38 +253,48 @@ async function pushEvaluation(c,s,a,options={}){
   // Criteria/timers are pushed before finalize/void; once the server marks
   // the parent terminal, background sync must not attempt a direct rewrite.
   if(a?.finalizedAt||a?.voidedAt){
-    patchAttempt(a,{status:'synced',error:'',lastSyncedAt:Date.now()});
-    return true;
+    return false;
   }
 
   if(attemptState(a).status==='conflict'&&!forceConflict){
-    patchAttempt(a,{
+    patchAttempt(liveAttempt,{
       status:'conflict',
       error:attemptState(a).error||'Resolve the grading conflict before syncing this evaluation.'
     });
     return false;
   }
 
-  if(!skipRosterSync&&window.RAPS_ROSTER_SYNC?.pushClassRosterAndShells){
+  // Assigned evaluators can grade their claimed records without editing the
+  // class event or everybody else's participant metadata. The existing server
+  // evaluation, participant link, and event/class relation are verified below.
+  const managesRoster=window.RAPS_PERMISSIONS.canClass('manageRoster',classWithServerScope(c,classRow));
+  if(!skipRosterSync&&managesRoster&&window.RAPS_ROSTER_SYNC?.pushClassRosterAndShells){
     if(await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c)===false)return false;
+    await context.verify();
     const store=getStore(),current=store?.getClass?.(c.id);
     if(store?.getClass&&!current)return false;
     c=current||c;
     if(c.deletedAt||c.closedAt||c.status==='closed')return false;
     const {data:latestClass,error:latestClassError}=await client.from('classes')
-      .select('status').eq('id',c.id).maybeSingle();
+      .select('status,created_by,base_id,bases(id,code,majcom_id)').eq('id',c.id).maybeSingle();
     if(latestClassError)throw latestClassError;
+    if(!latestClass || !window.RAPS_PERMISSIONS.canClass('evaluate',classWithServerScope(c,latestClass)))return false;
     if(latestClass?.status==='archived'||latestClass?.status==='completed')return false;
   }
 
-  const curriculumId=await curriculumIdFor(c);
-  const crit=await criteriaFor(curriculumId);
+  const curriculumId=await curriculumIdFor(c,client);
+  context.check();
+  const crit=await criteriaFor(curriculumId,client,context.check);
+  context.check();
   if(!crit.rows.length)throw new Error('Supabase criteria catalog is empty for this curriculum.');
 
   const {data:remote,error:remoteError}=await client.from('evaluations')
-    .select('id,client_modified_at,updated_at,source_device_id,evaluator_id,app_data')
+    .select('id,event_id,participant_id,curriculum_version_id,status,client_modified_at,updated_at,source_device_id,evaluator_id,app_data')
     .eq('id',a.id).maybeSingle();
   if(remoteError)throw remoteError;
+  if(!remote || String(remote.curriculum_version_id || '')!==String(curriculumId) || !canEditEvaluation(c,liveAttempt,remote) || ['finalized','voided'].includes(String(remote.status)))return false;
+  if(!await evaluationBelongsToClass(c,s,remote,client))return false;
+  context.check();
 
   const localMs=Number(a.modifiedAt||a.startedAt||Date.now());
   const remoteMs=ms(remote?.client_modified_at||remote?.updated_at);
@@ -186,7 +307,7 @@ async function pushEvaluation(c,s,a,options={}){
     : localMs;
 
   if(forceConflict&&expectedRemoteModifiedAt&&Math.abs(remoteMs-expectedRemoteModifiedAt)>10){
-    patchAttempt(a,{
+    patchAttempt(liveAttempt,{
       status:'conflict',
       error:'Cloud evaluation changed again while resolving the conflict. Review the latest server version before choosing again.',
       remoteModifiedAt:remoteMs
@@ -195,11 +316,11 @@ async function pushEvaluation(c,s,a,options={}){
   }
 
   if(!forceConflict&&remote&&remote.source_device_id&&remote.source_device_id!==getStore()?.deviceId?.()&&remoteMs>localMs+1000&&remoteMs>lastSeen+1000){
-    patchAttempt(a,{status:'conflict',error:'Newer cloud evaluation exists. Pull before overwriting.',remoteModifiedAt:remoteMs});
+    patchAttempt(liveAttempt,{status:'conflict',error:'Newer cloud evaluation exists. Pull before overwriting.',remoteModifiedAt:remoteMs});
     return false;
   }
 
-  patchAttempt(a,{status:'syncing',error:''});
+  patchAttempt(liveAttempt,{status:'syncing',error:''});
   const t=tierFor(c),sc=score(t,a);
   const cachedApp=jsonObject(a.cloudAppData),remoteApp=jsonObject(remote?.app_data);
   const failureDetails=preserveRecordMetadata(a.failureDetails,cachedApp.failureDetails,remoteApp.failureDetails);
@@ -213,7 +334,10 @@ async function pushEvaluation(c,s,a,options={}){
   const currentCriterionIds=new Set();
   for(const [code,rating] of Object.entries(a.ratings||{})){
     const cr=crit.byCode.get(code),dbResult=RESULT_TO_DB[rating];
-    if(!cr||!dbResult)continue;
+    if(!cr||!dbResult){
+      patchAttempt(liveAttempt,{status:'error',error:'A local rating does not match the published criteria catalog. Pull the current curriculum before syncing.'});
+      return false;
+    }
     currentCriterionIds.add(cr.id);
     const previousApp=jsonObject(existingCritById.get(cr.id)?.app_data);
     const fd={...jsonObject(previousApp.failureDetail),...jsonObject(failureDetails[code])};
@@ -251,7 +375,13 @@ async function pushEvaluation(c,s,a,options={}){
   const liveTimerKeys=new Set();
   const defs=new Map((t?.timers||[]).map(d=>[d.id,d]));
   for(const [timerId,store] of Object.entries(a.timers||{})){
-    const def=defs.get(timerId);if(!def)continue;
+    const def=defs.get(timerId);if(!def){
+      if((store?.instances||[]).some(x=>x?.wallStart)){
+        patchAttempt(liveAttempt,{status:'error',error:'A local timer does not match the published curriculum. Pull the current curriculum before syncing.'});
+        return false;
+      }
+      continue;
+    }
     const linked=def.linkedItemId?crit.byCode.get(def.linkedItemId):null;
     for(const x of (store?.instances||[])){
       if(!x?.wallStart)continue;
@@ -307,8 +437,8 @@ async function pushEvaluation(c,s,a,options={}){
     instants:a.instants||{},
     trainerSign:a.trainerSign||'',
     evaluatorId:a.evaluatorId||'',
-    cloudEvaluatorUserId:cloud.user.id,
-    startedByUserId:a.startedByUserId||cloud.user.id,
+    cloudEvaluatorUserId:userId,
+    startedByUserId:a.startedByUserId||userId,
     startedByDeviceId:a.startedByDeviceId||getStore()?.deviceId?.()||'',
     studentSign:a.studentSign||'',
     overallNotes:a.overallNotes||'',
@@ -321,7 +451,7 @@ async function pushEvaluation(c,s,a,options={}){
   };
 
   const {data:updated,error:updateError}=await client.from('evaluations').update({
-    evaluator_id:remote?.evaluator_id||cloud.user.id,
+    evaluator_id:remote?.evaluator_id||userId,
     status:a?.startedAt?'in_progress':'draft',
     overall_result:null,
     score_numerator:sc.pass,
@@ -334,14 +464,19 @@ async function pushEvaluation(c,s,a,options={}){
   }).eq('id',a.id).select('client_modified_at,updated_at').single();
   if(updateError)throw updateError;
 
-  a.cloudAppData=cloneJson(appData);
+  context.check();
+  liveAttempt.cloudAppData=cloneJson(appData);
   const acceptedMs=ms(updated?.client_modified_at||updated?.updated_at)||publishMs;
   if(forceConflict){
-    a.modifiedAt=acceptedMs;
-    a.lastModifiedDeviceId=getStore()?.deviceId?.()||a.lastModifiedDeviceId||'';
-    a.syncStatus='CLOUD';
+    if(localGradingSignature(liveAttempt)===uploadSignature){
+      liveAttempt.modifiedAt=acceptedMs;
+      liveAttempt.lastModifiedDeviceId=getStore()?.deviceId?.()||liveAttempt.lastModifiedDeviceId||'';
+      liveAttempt.syncStatus='CLOUD';
+    }
   }
-  patchAttempt(a,{status:'synced',error:'',lastSyncedAt:Date.now(),remoteModifiedAt:acceptedMs});
+  const unchanged=localGradingSignature(liveAttempt)===uploadSignature;
+  patchAttempt(liveAttempt,{status:unchanged?'synced':'pending',error:'',lastSyncedAt:Date.now(),remoteModifiedAt:acceptedMs,
+    baseGradingSignature:uploadSignature,syncedByUserId:userId});
   return true;
 }
 
@@ -349,12 +484,18 @@ function freshTimerStore(t){
   const out={};for(const d of (t?.timers||[]))out[d.id]={instances:[],currentIndex:-1};return out;
 }
 async function pullEvaluation(c,s,a,options={}){
-  const client=getClient();
+  const context=permissionContext(c,'readClass');
+  if(!getClient()||!context)return false;
+  await context.ready();
+  const client=context.client;
+  const initialSignature=localGradingSignature(a);
   const force=options?.force===true;
   const {data:row,error}=await client.from('evaluations')
-    .select('id,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id,curriculum_version_id,evaluator_id')
+    .select('id,event_id,participant_id,attempt_number,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id,curriculum_version_id,evaluator_id')
     .eq('id',a.id).maybeSingle();
   if(error)throw error;if(!row)return false;
+  if(!await evaluationBelongsToClass(c,s,row,client))return false;
+  context.check();
 
   // VOID is a server tombstone, not a resumable evaluation. Remove only
   // the matching local evaluation UUID; never delete a newer replacement
@@ -367,17 +508,24 @@ async function pullEvaluation(c,s,a,options={}){
   const localMs=Number(a.modifiedAt||0);
   const state=attemptState(a);
   const lastSeen=Number(state.remoteModifiedAt||0);
+  if(!force&&!a.cloudShellOnly&&state.baseGradingSignature&&initialSignature!==state.baseGradingSignature)return false;
   if(!force&&!a.cloudShellOnly&&lastSeen&&localMs>lastSeen+10)return false;
   if(!force&&!a.cloudShellOnly&&!lastSeen&&localMs>remoteMs+1000)return false;
-  if(!force&&!a.cloudShellOnly&&remoteMs<=lastSeen+10)return false;
+  const verifyLegacy=!force&&!a.cloudShellOnly&&!state.baseGradingSignature&&lastSeen&&remoteMs<=lastSeen+10;
+  if(!force&&!a.cloudShellOnly&&remoteMs<=lastSeen+10&&state.baseGradingSignature)return false;
 
-  const crit=await criteriaFor(row.curriculum_version_id);
+  const crit=await criteriaFor(row.curriculum_version_id,client,context.check);
+  context.check();
   const [{data:cr,error:crErr},{data:tr,error:trErr}]=await Promise.all([
     client.from('criterion_results').select('criterion_id,result,failure_mode,primary_contributor,evaluator_note,graded_at,app_data,client_modified_at').eq('evaluation_id',a.id),
     client.from('timer_results').select('criterion_id,timer_name,started_at,stopped_at,elapsed_ms,standard_ms,standard_met,sync_key,app_data,client_modified_at,source_device_id').eq('evaluation_id',a.id)
   ]);
   if(crErr)throw crErr;if(trErr)throw trErr;
+  context.check();
+  if(localGradingSignature(a)!==initialSignature)return false;
 
+  const liveAttempt=a;
+  a=cloneJson(a);
   const app=jsonObject(row.app_data);
   a.cloudAppData=cloneJson(app);
   a.observations=cloneJson(jsonObject(app.observations));
@@ -414,25 +562,38 @@ async function pullEvaluation(c,s,a,options={}){
   }
   a.timers=stores;
 
-  for(const k of ['section','timerForced','events','instants','trainerSign','evaluatorId','cloudEvaluatorUserId','startedByUserId','startedByDeviceId','studentSign','overallNotes','remediation'])if(app[k]!==undefined)a[k]=app[k];
-  if(!a.cloudEvaluatorUserId&&row.evaluator_id)a.cloudEvaluatorUserId=row.evaluator_id;
-  if(!a.startedByUserId&&a.cloudEvaluatorUserId)a.startedByUserId=a.cloudEvaluatorUserId;
-  if(app.showNt!==undefined)a.showNt=!!app.showNt;
-  if(app.observeMode!==undefined){a.observeMode=!!app.observeMode;a.fieldMode=a.observeMode;}
-  a.startedAt=ms(row.started_at)||a.startedAt;
+  const appDefaults={section:'',timerForced:{},events:[],instants:{},trainerSign:'',evaluatorId:'',
+    startedByUserId:row.evaluator_id||'',startedByDeviceId:'',studentSign:'',overallNotes:'',remediation:null};
+  for(const [key,value] of Object.entries(appDefaults))a[key]=cloneJson(app[key]??value);
+  a.cloudEvaluatorUserId=row.evaluator_id||'';
+  a.showNt=!!app.showNt;
+  a.observeMode=app.observeMode!==false;
+  a.fieldMode=a.observeMode;
+  a.attemptNo=Number(row.attempt_number||1);
+  a.startedAt=ms(row.started_at)||null;
+  a.voidedAt=null;
   a.finalizedAt=ms(row.completed_at)||null;
   a.finalResult=row.overall_result?String(row.overall_result).toUpperCase():null;
   a.modifiedAt=remoteMs||Date.now();
   a.lastModifiedDeviceId=row.source_device_id||'';
   a.syncStatus='CLOUD';
   a.cloudShellOnly=false;
-  a.cloudGrading={status:'synced',error:'',lastSyncedAt:Date.now(),remoteModifiedAt:remoteMs};
+  const serverSignature=localGradingSignature(a);
+  if(verifyLegacy&&serverSignature!==initialSignature)return false;
+  context.check();
+  if(localGradingSignature(liveAttempt)!==initialSignature)return false;
+  a.cloudGrading={status:'synced',error:'',lastSyncedAt:Date.now(),remoteModifiedAt:remoteMs,
+    baseGradingSignature:serverSignature,syncedByUserId:String(getCloud()?.user?.id||'')};
+  Object.assign(liveAttempt,a);
   persist();
   return true;
 }
 
 async function inspectConflict(c,s,a){
-  const client=getClient();
+  const context=permissionContext(c,'readClass');
+  if(!getClient()||!context)throw new Error('You do not have permission to read this evaluation.');
+  await context.ready();
+  const client=context.client;
   if(!client||!navigator.onLine)throw new Error('Conflict resolution requires an online connection.');
 
   const {data:row,error}=await client.from('evaluations')
@@ -440,8 +601,11 @@ async function inspectConflict(c,s,a){
     .eq('id',a.id).maybeSingle();
   if(error)throw error;
   if(!row)throw new Error('The server evaluation no longer exists.');
+  if(!await evaluationBelongsToClass(c,s,row,client))throw new Error('The evaluation does not belong to this class and participant.');
+  context.check();
 
-  const crit=await criteriaFor(row.curriculum_version_id||await curriculumIdFor(c));
+  const crit=await criteriaFor(row.curriculum_version_id||await curriculumIdFor(c,client),client,context.check);
+  context.check();
   const [{data:cr,error:crErr},{data:tr,error:trErr}]=await Promise.all([
     client.from('criterion_results')
       .select('criterion_id,result,failure_mode,primary_contributor,evaluator_note,graded_at,app_data,client_modified_at,source_device_id')
@@ -452,6 +616,7 @@ async function inspectConflict(c,s,a){
   ]);
   if(crErr)throw crErr;
   if(trErr)throw trErr;
+  context.check();
 
   const remoteRatings={};
   for(const r of cr||[]){
@@ -482,11 +647,16 @@ async function inspectConflict(c,s,a){
 }
 
 async function resolveConflict(c,s,a,strategy){
+  const context=permissionContext(c,'readClass');
+  if(!context)throw new Error('You do not have permission to resolve this evaluation.');
+  await context.ready();
   strategy=String(strategy||'').toLowerCase();
   if(!['server','local'].includes(strategy))throw new Error('Conflict resolution must choose SERVER or LOCAL.');
   if(attemptState(a).status!=='conflict')throw new Error('This evaluation is not currently in conflict.');
 
   const inspection=await inspectConflict(c,s,a);
+  await context.verify();
+  if(strategy==='local'&&!canEditEvaluation(c,a,inspection.serverSnapshot?.evaluation))throw new Error('Only the assigned evaluator can publish this evaluation.');
   const expected=Number(attemptState(a).remoteModifiedAt||0);
   if(expected&&Math.abs(inspection.remoteModifiedAt-expected)>10){
     patchAttempt(a,{
@@ -501,6 +671,7 @@ async function resolveConflict(c,s,a,strategy){
 
   if(strategy==='server'){
     const ok=await pullEvaluation(c,s,a,{force:true});
+    await context.verify();
     if(!ok)throw new Error('Unable to load the authoritative server evaluation.');
     a.conflictResolution={
       resolvedAt:Date.now(),
@@ -517,6 +688,7 @@ async function resolveConflict(c,s,a,strategy){
     expectedRemoteModifiedAt:inspection.remoteModifiedAt,
     skipRosterSync:true
   });
+  await context.verify();
   if(!ok)throw new Error(attemptState(a).error||'Unable to preserve this device as the authoritative grading version.');
   a.conflictResolution={
     resolvedAt:Date.now(),
@@ -529,27 +701,31 @@ async function resolveConflict(c,s,a,strategy){
 }
 
 async function pullAll(){
-  const store=getStore();if(!store)return 0;let n=0;
-  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled)){
+  const store=getStore(),permissions=window.RAPS_PERMISSIONS;if(!store||!permissions?.snapshot)return 0;
+  const identity=permissions.snapshot();if(!permissions.isCurrent(identity))return 0;let n=0;
+  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled&&!store.isLocalCopyHidden?.(x.id)&&permissions.canClass('readClass',x))){
     for(const s of c.students||[]){
       for(const a of Object.values(s.attempts||{})){
+        if(!permissions.isCurrent(identity))return n;
         if(!a?.id)continue;
-        try{if(await pullEvaluation(c,s,a))n++;}catch(e){console.warn('Evaluation pull failed',a.id,e)}
+        try{if(await pullEvaluation(c,s,a))n++;}catch(e){if(e?.code==='RAPS_SESSION_CHANGED'||!permissions.isCurrent(identity))return n;console.warn('Evaluation pull failed',a.id,e)}
       }
     }
   }
   return n;
 }
 async function pushAll(){
-  const store=getStore();if(!store)return 0;let n=0;
-  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled && !x?.deletedAt && !x?.closedAt && x?.status!=='closed')){
+  const store=getStore(),permissions=window.RAPS_PERMISSIONS;if(!store||!permissions?.snapshot)return 0;
+  const identity=permissions.snapshot();if(!permissions.isCurrent(identity))return 0;let n=0;
+  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled && !x?.deletedAt && !x?.closedAt && x?.status!=='closed'&&!store.isLocalCopyHidden?.(x.id)&&permissions.canClass('evaluate',x))){
     for(const s of c.students||[]){
       for(const a of Object.values(s.attempts||{})){
+        if(!permissions.isCurrent(identity))return n;
         if(!a?.id||a.cloudShellOnly)continue;
         const state=attemptState(a),localMs=Number(a.modifiedAt||0),remoteMs=Number(state.remoteModifiedAt||0);
         if(state.status==='conflict')continue;
-        if(state.status==='synced'&&remoteMs&&localMs<=remoteMs+10)continue;
-        try{if(await pushEvaluation(c,s,a))n++;}catch(e){patchAttempt(a,{status:'error',error:err(e)});console.warn('Evaluation push failed',a.id,e)}
+        if(state.status==='synced'&&state.baseGradingSignature===localGradingSignature(a)&&remoteMs&&localMs<=remoteMs+10)continue;
+        try{if(await pushEvaluation(c,s,a))n++;}catch(e){if(e?.code==='RAPS_SESSION_CHANGED'||!permissions.isCurrent(identity))return n;patchAttempt(a,{status:'error',error:err(e)});console.warn('Evaluation push failed',a.id,e)}
       }
     }
   }
@@ -558,7 +734,9 @@ async function pushAll(){
 async function syncAll(){
   if(busy||!navigator.onLine||!getCloud()?.user?.id)return;
   busy=true;
-  try{await pullAll();await pushAll();}
+  const identity=window.RAPS_PERMISSIONS?.snapshot?.();
+  try{await pullAll();if(identity&&window.RAPS_PERMISSIONS?.isCurrent?.(identity))await pushAll();}
+  catch(error){if(identity&&window.RAPS_PERMISSIONS?.isCurrent?.(identity))console.warn('Grading sync failed',error);}
   finally{busy=false}
 }
 function queue(classId){
@@ -568,13 +746,18 @@ function queue(classId){
 
 window.addEventListener('raps-local-class-change',e=>queue(e.detail?.classId));
 window.addEventListener('raps-class-sync-complete',()=>syncAll());
-window.addEventListener('raps-cloud-identity',()=>syncAll());
+window.addEventListener('raps-cloud-identity',()=>{
+  criteriaCache.clear();
+  for(const timeout of timers.values())clearTimeout(timeout);
+  timers.clear();
+  syncAll();
+});
 window.addEventListener('online',()=>syncAll());
 
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.11-web.8';
+window.RAPS_GRADING_SYNC_BUILD='3.4.12-web.7';
 window.RAPS_GRADING_SYNC=Object.freeze({
   syncAll,
   pushEvaluation,
@@ -582,6 +765,7 @@ window.RAPS_GRADING_SYNC=Object.freeze({
   pullAll,
   pushAll,
   inspectConflict,
-  resolveConflict
+  resolveConflict,
+  localGradingSignature
 });
 })();
