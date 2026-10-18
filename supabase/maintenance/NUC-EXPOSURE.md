@@ -64,7 +64,10 @@ The supplied inventories from `raps-nuc-exposure-83tab6si` and
 
 | Evidence | Interpretation |
 | --- | --- |
-| Router owner reports TCP 443 forwarded to NUC TCP 443; DMZ off | Known IPv4 entry is the HTTPS gateway. Other static/dynamic mappings still need confirmation. |
+| Router table shows TCP 80 and 443 forwarded to NUC `192.168.50.202`; DMZ off | Both web ports are configured for the gateway. Verify the HTTP-to-HTTPS redirect and outside-network reachability before changing either rule. |
+| Router table shows TCP 8443 redirected to router `192.168.50.1:8443` | This is a router entry point, separate from RaPS. ASUS commonly uses 8443 for WAN HTTPS administration; confirm the actual service and WAN-access setting. |
+| Router UPnP enabled; all pasted mappings labeled `VSERVER` | No UPnP-labeled mapping appears in the supplied table. Enabled UPnP can permit later automatic mappings. |
+| Router IPv6 connection type reported Disabled | No router IPv6 connection is configured according to the owner; the NUC summary also shows no global IPv6 address. |
 | Database/pooler host ports use `127.0.0.1`; database containers publish no ports | No direct non-loopback database publication is shown. This does not assess database access through authorized APIs. |
 | Studio and metadata probes return HTTP 401 with a Basic challenge | Those unauthenticated local gateway requests are blocked. The administration routes still exist behind HTTPS. |
 | `/storage/v1/status` returns HTTP 200 | A status endpoint response; no record disclosure was demonstrated. |
@@ -80,11 +83,14 @@ verify external reachability or establish that the NUC is unavailable.
 
 Outstanding assessment steps:
 
-1. Confirm router UPnP state, IPv6 connection type/inbound policy, and whether
-   additional static or dynamic mappings target the NUC. On ASUS firmware,
-   inspect **WAN → Internet Connection → Enable UPnP** and the **IPv6** page.
-2. Verify the intended HTTPS gateway from an independent network. A local
-   loopback or same-Wi-Fi test is insufficient for this step.
+1. Inspect **Administration → System → Remote Access Config → Enable Web Access
+   from WAN**, including its HTTPS port, to identify the router's 8443 rule.
+   Before disabling WAN administration, confirm a working local router login
+   and whether remote administration is required. Preserve LAN administration.
+2. Verify the web gateway from an independent network, including HTTP-to-HTTPS
+   redirection and unauthenticated administration-route blocking. A local
+   loopback or same-Wi-Fi test is insufficient. Preserve NUC ports 80/443 while
+   reviewing redirect and certificate-renewal dependencies.
 3. Confirm whether Samba is needed and how administrators access the NUC before
    preparing host restrictions. Test a separate SSH key-only connection before
    disabling password login. Preserve a private recovery path.
