@@ -27,6 +27,22 @@ list is saved beside the archive. Complete Auth recovery separately after
 validating a replacement against its running configuration; do not rerun the
 database migrations to finish that remaining step.
 
+If the installer reports existing guards, run `verify-web7-on-nuc.sh` instead
+of applying the migrations again. It compares the guarded function definitions,
+policies, triggers, table protections, and effective browser privileges with
+the reviewed PostgreSQL 17.6 enum/text fixtures. It checks the installed handler
+hashes, startup timestamps, and unauthenticated endpoints without changing
+records or services. A handler timestamp result of `False` requires review of
+the running Functions worker; successful read-only requests alone do not prove
+that a previously cached handler was refreshed.
+
+`inspect-auth-candidates-on-nuc.sh` compares the base configuration and both
+known historical Caddy candidates against the running Auth container. It only
+prints differing setting names. Its private diagnostic directory contains
+resolved secrets and must remain private. `MATCH` describes the checked Auth
+settings; it does not recover the missing override, validate other services in
+a historical file, or authorize a whole-stack recreation.
+
 The script verifies downloads, creates private backups, preflights both database
 migrations with a rollback, installs them in one transaction, and recreates only
 the functions and Auth services. It does not send email or create test accounts.
