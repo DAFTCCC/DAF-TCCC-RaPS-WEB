@@ -56,3 +56,39 @@ Run the isolated collector regressions with:
 ```sh
 python3 supabase/maintenance/test-nuc-exposure.py
 ```
+
+## Initial NUC findings
+
+The supplied inventories from `raps-nuc-exposure-83tab6si` and
+`raps-nuc-exposure-eu7fia9n` show the same exposure-relevant state:
+
+| Evidence | Interpretation |
+| --- | --- |
+| Router owner reports TCP 443 forwarded to NUC TCP 443; DMZ off | Known IPv4 entry is the HTTPS gateway. Other static/dynamic mappings still need confirmation. |
+| Database/pooler host ports use `127.0.0.1`; database containers publish no ports | No direct non-loopback database publication is shown. This does not assess database access through authorized APIs. |
+| Studio and metadata probes return HTTP 401 with a Basic challenge | Those unauthenticated local gateway requests are blocked. The administration routes still exist behind HTTPS. |
+| `/storage/v1/status` returns HTTP 200 | A status endpoint response; no record disclosure was demonstrated. |
+| SSH TCP 22 and Samba TCP 139/445 bind IPv4/IPv6 wildcard addresses | Host administration and file sharing are available to reachable networks, subject to filtering. The reported router rule does not establish WAN access to them. |
+| UFW inactive; INPUT policies ACCEPT; no input rules shown by the filtered summary | No host input restriction is demonstrated. Full rule behavior and network paths require review before remediation. |
+| SSH defaults permit passwords; root password login prohibited | Confirm the running connection's settings and working key access before changing SSH authentication. |
+| No global IPv6 address appears in the interface summary | This inventory does not show a current global host IPv6 address. Router IPv6 configuration and future address assignment remain separate checks. |
+| FieldReady ingress binds LAN TCP 18080 | Preserve the gateway-to-FieldReady dependency when restricting host/Docker traffic. |
+
+Two unauthenticated HTTPS metadata/health requests from the cloud assessment
+environment failed before an origin HTTP response was obtained. They do not
+verify external reachability or establish that the NUC is unavailable.
+
+Outstanding assessment steps:
+
+1. Confirm router UPnP state, IPv6 connection type/inbound policy, and whether
+   additional static or dynamic mappings target the NUC. On ASUS firmware,
+   inspect **WAN → Internet Connection → Enable UPnP** and the **IPv6** page.
+2. Verify the intended HTTPS gateway from an independent network. A local
+   loopback or same-Wi-Fi test is insufficient for this step.
+3. Confirm whether Samba is needed and how administrators access the NUC before
+   preparing host restrictions. Test a separate SSH key-only connection before
+   disabling password login. Preserve a private recovery path.
+4. Reduce confirmed unnecessary exposure with narrowly scoped rules, account
+   for Docker forwarding separately, and verify both RaPS and FieldReady health.
+
+No remediation or application change has been applied by this assessment.
