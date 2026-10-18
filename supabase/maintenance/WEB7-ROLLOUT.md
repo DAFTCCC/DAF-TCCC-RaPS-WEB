@@ -50,19 +50,30 @@ The migrations intentionally reject repeat installation; preserve the printed
 stage directory if an operation fails. It does not restore the database on a
 service failure, which could discard records written since the backup.
 
-Auth gains a persistent `docker-compose.raps-web7-auth.yml` override. Future
-Auth recreations must retain all three files:
+After a successful base-only Auth comparison, `harden-auth-on-nuc.sh` can finish
+the Auth settings separately. Pass the private diagnostic directory from that
+approved comparison. The helper checks that both the container and resolved
+base configuration still match the captured evidence, and that the proposed
+configuration changes only signup and password-minimum settings. It backs up
+the configuration privately and recreates only Auth. It does not rerun database
+migrations or replace administrative handlers.
+
+This verified base-only path uses the base file and a persistent
+`docker-compose.raps-web7-auth.yml` override. Future Auth recreations must retain
+both files and keep orphan removal disabled:
 
 ```sh
-sudo docker compose --project-directory /home/nuc/supabase-project \
+sudo env COMPOSE_REMOVE_ORPHANS=false COMPOSE_IGNORE_ORPHANS=true \
+  docker compose --project-directory /home/nuc/supabase-project \
   --env-file /home/nuc/supabase-project/.env -p supabase \
   -f /home/nuc/supabase-project/docker-compose.yml \
-  -f /home/nuc/supabase-project/docker-compose.caddy.yml \
   -f /home/nuc/supabase-project/docker-compose.raps-web7-auth.yml \
   up -d --force-recreate --no-deps --pull never --no-build auth
 ```
 
 The functions service continues to use the base and isolation files. Use each
-running service's recorded Compose files; the two override sets differ.
+running service's recorded Compose files; the override sets differ. The original
+full installer still requires its historical Caddy file; do not use that path
+to repeat migrations after completing the verified Auth-only step.
 Complete real-account role checks and verify web.7 on the devices after the
 script's database, Auth, and unauthenticated endpoint checks pass.
