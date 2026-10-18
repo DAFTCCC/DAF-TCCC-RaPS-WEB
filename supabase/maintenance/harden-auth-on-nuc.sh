@@ -68,6 +68,15 @@ def stable_config(c):
                         if not k.startswith('com.docker.compose.')}
     return result
 
+def stable_host_config(c):
+    result = copy.deepcopy(c['HostConfig'])
+    # Docker may serialize absent per-container DNS overrides as null or [].
+    # Preserve missing keys, nonempty DNS lists, and every other host setting.
+    for key in ('Dns','DnsOptions','DnsSearch'):
+        if key in result and result[key] is None:
+            result[key] = []
+    return result
+
 def stable_networks(c):
     return {name:{'NetworkID':value.get('NetworkID'),'Aliases':sorted(value.get('Aliases') or []),
                   'IPAMConfig':value.get('IPAMConfig') or {},'Links':sorted(value.get('Links') or []),
@@ -147,7 +156,7 @@ try:
     assert after['Id']!=before['Id'] and after['Image']==before['Image']
     assert env_map(after)==expected_env
     assert stable_config(after)==stable_config(before)
-    assert after['HostConfig']==before['HostConfig']
+    assert stable_host_config(after)==stable_host_config(before)
     assert sorted(after['Mounts'],key=lambda m:m['Destination'])==sorted(before['Mounts'],key=lambda m:m['Destination'])
     assert stable_networks(after)==stable_networks(before)
     assert after['Config']['Labels']['com.docker.compose.project.config_files'].split(',')==[str(root/'docker-compose.yml'),str(override)]

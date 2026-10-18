@@ -68,6 +68,15 @@ model. Its console output names differing fields and value types; private
 diagnostic files retain configuration values and must not be shared. It does
 not relax comparisons, recreate services, or roll back configuration.
 
+Docker can store unused `HostConfig.Dns`, `DnsOptions`, and `DnsSearch` fields as
+either `null` or empty lists after a recreation. Both mean no container-specific
+DNS override. Verification accepts this representation difference for these
+three fields only; missing keys, nonempty DNS lists (including their order), and
+all other host configuration differences still fail. The original pre-install
+evidence and the current-versus-saved restart checks remain exact. When these
+three empty DNS representations are the only differences and all other checks
+pass, the Auth update is complete; no additional service restart is needed.
+
 This verified base-only path uses the base file and a persistent
 `docker-compose.raps-web7-auth.yml` override. Future Auth recreations must retain
 both files and keep orphan removal disabled:

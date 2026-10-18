@@ -77,6 +77,15 @@ def stable_config(c):
                         if not k.startswith('com.docker.compose.')}
     return result
 
+def stable_host_config(c):
+    result = copy.deepcopy(c['HostConfig'])
+    # Docker may serialize absent per-container DNS overrides as null or [].
+    # Preserve missing keys, nonempty DNS lists, and every other host setting.
+    for key in ('Dns','DnsOptions','DnsSearch'):
+        if key in result and result[key] is None:
+            result[key] = []
+    return result
+
 def stable_networks(c):
     return {name:{'NetworkID':value.get('NetworkID'),'Aliases':sorted(value.get('Aliases') or []),
                   'IPAMConfig':value.get('IPAMConfig') or {},'Links':sorted(value.get('Links') or []),
@@ -145,7 +154,7 @@ try:
     report('Password minimum setting',str(minimum),env_map(current).get('GOTRUE_PASSWORD_MIN_LENGTH'))
     report('All Auth environment settings',expected_env,env_map(current))
     report('Container configuration',stable_config(before),stable_config(current))
-    report('Host configuration',before['HostConfig'],current['HostConfig'])
+    report('Host configuration',stable_host_config(before),stable_host_config(current))
     report('Mounts',sorted(before['Mounts'],key=lambda m:m['Destination']),
            sorted(current['Mounts'],key=lambda m:m['Destination']))
     previous_networks, current_networks = stable_networks(before), stable_networks(current)
@@ -169,7 +178,7 @@ try:
     report('Resolved Compose model',expected_model,run(args,'current-model'))
     phase = 'check Auth process health'
     report('Auth process healthy',True,healthy(current))
-    print('All exact checks passed:',str(all(checks)).lower())
+    print('All Auth verification checks passed:',str(all(checks)).lower())
     print('Private diagnostic directory:',stage)
     print('Only field names and check results were printed. Do not paste private diagnostic files.')
     print('No configuration files or services were changed.')
