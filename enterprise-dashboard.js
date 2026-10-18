@@ -10,6 +10,12 @@ const byId = (id) => document.getElementById(id);
 const cloud = () => window.RAPS_CLOUD || null;
 const supabase = () => window.RAPS_SUPABASE || null;
 
+// Shared Enterprise Trash retains its server records for recovery, but is not
+// training activity. Closed/completed retention records remain reportable.
+function isReportableClass(c) {
+  return !!c && c.status !== 'archived' && !c.app_data?.deletedAt;
+}
+
 function dashboardRequest() {
   const permissions = window.RAPS_PERMISSIONS;
   const token = permissions?.snapshot();
@@ -93,6 +99,13 @@ function setMessage(text, kind = '') {
   el.className = ('enterpriseDashboardMessage ' + kind).trim();
 }
 
+function clearRenderedReport() {
+  for (const id of ['enterpriseAttention', 'enterpriseMajcomFilter', 'enterpriseBaseFilter', 'enterpriseBaseTable', 'enterpriseClassTable', 'enterpriseReportingArchives', 'enterpriseContributors', 'enterpriseCourseTable', 'enterpriseDataQuality', 'enterpriseEvaluatorTable', 'enterpriseFailureModes', 'enterpriseIncompleteTable', 'enterpriseKpis', 'enterpriseMajcomTable', 'enterpriseTierTable', 'enterpriseTrendTable']) {
+    const element = byId(id);
+    if (element) element.innerHTML = '';
+  }
+}
+
 function setLoading(value) {
   loading = !!value;
   const btn = byId('enterpriseRefreshBtn');
@@ -118,6 +131,7 @@ function inject() {
       '<span>Enterprise Admin · Global RaPS View</span>',
     '</div>',
     '<p class="helper">Enterprise-wide cloud view across all cataloged MAJCOMs and installations. Filters change the analytical view only; Supabase Row Level Security remains the authorization boundary.</p>',
+    '<p class="helper">Removing a local copy keeps the server record in these reports. Shared Enterprise Trash and verified NUC CSV archives are excluded. Pending or failed CSV archives remain counted; closed classes remain as training history.</p>',
 
     '<div class="enterpriseToolbar">',
       '<label><span>Reporting window</span><select id="enterprisePeriod">',
@@ -170,6 +184,12 @@ function inject() {
     '</details>',
 
     '<details class="analyticsDetails">',
+      '<summary>NUC CSV Archive Queue and History</summary>',
+      '<p class="helper">Requests wait for the NUC archive worker. Classes leave the reporting totals only after their CSV files and manifest have been verified. Pending or failed requests stay counted. This list follows the MAJCOM, installation, and course filters.</p>',
+      '<div id="enterpriseReportingArchives"></div>',
+    '</details>',
+
+    '<details class="analyticsDetails">',
       '<summary>Evaluator Workload</summary>',
       '<div id="enterpriseEvaluatorTable"></div>',
     '</details>',
@@ -207,7 +227,7 @@ function inject() {
   byId('enterpriseBaseFilter')?.addEventListener('change', render);
 
   document.querySelector('[data-home-area="program"]')?.addEventListener('click', () => {
-    if (isEnterpriseAdmin()) window.setTimeout(() => load(false), 0);
+    if (isEnterpriseAdmin()) window.setTimeout(() => load(true), 0);
   });
 
   mounted = true;
@@ -439,7 +459,8 @@ function filteredData() {
     evaluations,
     failures,
     profileRows: raw.profileRows,
-    participantRows: raw.participantRows
+    participantRows: raw.participantRows,
+    reportingArchives: raw.reportingArchives
   };
 }
 
@@ -485,6 +506,7 @@ function buildModel(data) {
   const eventById = new Map(data.events.map((event) => [event.id, event]));
   const profiles = new Map(data.profileRows.map((profile) => [profile.id, profile]));
   const participants = new Map(data.participantRows.map((participant) => [participant.id, participant]));
+  const reportingArchives = new Map((data.reportingArchives || []).map(row => [row.class_id, row]));
 
   const finalized = data.evaluations.filter((evaluation) => evaluation.status === 'finalized');
   const incomplete = data.evaluations.filter((evaluation) =>
@@ -616,6 +638,8 @@ function buildModel(data) {
     const f = final.filter((evaluation) => evaluation.overall_result === 'fail').length;
 
     return {
+      id:c.id,
+      reportingArchiveStatus:reportingArchives.get(c.id)?.status || '',
       majcom: majcom?.code || majcom?.name || '—',
       base: base?.code || base?.name || '—',
       name: c.name || 'Untitled Class',
@@ -992,7 +1016,7 @@ function render() {
 
   byId('enterpriseClassTable').innerHTML = model.classRows.length ? [
     '<div class="analyticsTableWrap"><table class="analyticsTable enterpriseClassTable">',
-    '<thead><tr><th>MAJCOM</th><th>Installation</th><th>Class</th><th>Course</th><th>Date</th><th>Status</th><th>Finalized</th><th>Incomplete</th><th>Pass rate</th></tr></thead><tbody>',
+    '<thead><tr><th>MAJCOM</th><th>Installation</th><th>Class</th><th>Course</th><th>Date</th><th>Status</th><th>Finalized</th><th>Incomplete</th><th>Pass rate</th><th>NUC CSV archive</th></tr></thead><tbody>',
     model.classRows.slice(0, 250).map((row) => [
       '<tr>',
         '<td><b>', esc(row.majcom), '</b></td>',
@@ -1004,6 +1028,9 @@ function render() {
         '<td>', row.finalized, '/', row.evaluations, '</td>',
         '<td class="', row.incomplete ? 'warnText' : '', '">', row.incomplete, '</td>',
         '<td>', esc(pct(row.passRate)), '</td>',
+        '<td>', row.reportingArchiveStatus
+          ? esc(row.reportingArchiveStatus === 'requested' ? 'Archive requested' : 'Archive failed — NUC retry needed')
+          : '<button class="ghost small" type="button" data-enterprise-archive-class="' + esc(row.id) + '">Archive to NUC CSV</button>', '</td>',
       '</tr>'
     ].join('')).join(''),
     '</tbody></table></div>',
@@ -1011,6 +1038,11 @@ function render() {
       ? '<div class="classificationRate">Showing the 250 most recent of ' + model.classRows.length + ' classes in this view.</div>'
       : ''
   ].join('') : '<div class="analyticsEmpty">No classes in this scope and reporting window.</div>';
+
+  byId('enterpriseClassTable').querySelectorAll('[data-enterprise-archive-class]').forEach(button => {
+    button.addEventListener('click', () => requestReportingArchive(button.dataset.enterpriseArchiveClass, button));
+  });
+  renderReportingArchives();
 
   byId('enterpriseEvaluatorTable').innerHTML = model.evaluatorRows.length ? [
     '<div class="analyticsTableWrap"><table class="analyticsTable enterpriseEvaluatorTable">',
@@ -1088,6 +1120,178 @@ function render() {
   setMessage(scope + ' · refreshed ' + new Date().toLocaleTimeString(), 'success');
 }
 
+function renderReportingArchives() {
+  const target = byId('enterpriseReportingArchives');
+  if (!target || !raw) return;
+  const baseIds = new Set(organizationalBases().map(base => base.id));
+  const bases = new Map(raw.bases.map(base => [base.id, base]));
+  const classes = new Map(raw.allClasses.filter(c => baseIds.has(c.base_id)
+    && (!selectedCourse() || courseLabel(c) === selectedCourse())).map(c => [c.id, c]));
+  const rows = raw.reportingArchives.filter(row => classes.has(row.class_id))
+    .sort((a, b) => String(b.requested_at || '').localeCompare(String(a.requested_at || '')));
+  target.innerHTML = rows.length ? [
+    '<div class="analyticsTableWrap"><table class="analyticsTable">',
+    '<thead><tr><th>Installation</th><th>Class</th><th>Status</th><th>Requested</th><th>Verified CSV archive</th><th>Actions</th></tr></thead><tbody>',
+    rows.map(row => {
+      const c = classes.get(row.class_id);
+      const base = bases.get(c.base_id);
+      const status = row.status === 'archived' ? 'Archived — excluded from reports'
+        : row.status === 'requested' ? 'Requested — still counted'
+        : 'Failed — still counted; retry or cancel below';
+      return '<tr><td>' + esc(base?.code || base?.name || '—') + '</td><td>' + esc(c.name || 'Untitled Class')
+        + '<div class="helper">Class ID: ' + esc(row.class_id) + '</div>'
+        + '</td><td>' + esc(status) + '</td><td>' + esc(dateTime(row.requested_at))
+        + '</td><td>' + esc(row.status === 'archived' ? dateTime(row.archived_at) : 'Not verified') + '</td><td>'
+        + (row.status === 'failed' ? '<button class="ghost small" type="button" data-enterprise-retry-archive="' + esc(row.class_id) + '">Retry CSV archive</button> ' : '')
+        + (['requested', 'failed'].includes(row.status) ? '<button class="ghost small" type="button" data-enterprise-cancel-archive="' + esc(row.class_id)
+          + '" data-enterprise-archive-request="' + esc(row.request_id) + '">Cancel unfinished archive</button>' : 'Verified archive retained') + '</td></tr>';
+    }).join(''),
+    '</tbody></table></div>'
+  ].join('') : '<div class="analyticsEmpty">No NUC CSV archive requests for these filters.</div>';
+  target.querySelectorAll('[data-enterprise-retry-archive]').forEach(button => {
+    button.addEventListener('click', () => requestReportingArchive(button.dataset.enterpriseRetryArchive, button));
+  });
+  target.querySelectorAll('[data-enterprise-cancel-archive]').forEach(button => {
+    button.addEventListener('click', () => cancelReportingArchive(button.dataset.enterpriseCancelArchive, button.dataset.enterpriseArchiveRequest, button));
+  });
+}
+
+function localReportingArchiveIssue(classId, userId) {
+  const store = window.RAPS_CLASS_STORE;
+  if (typeof store?.getClass !== 'function') return 'Local class verification is unavailable. Reload RaPS before requesting an archive.';
+  let c;
+  try { c = store.getClass(classId); } catch { return 'The local class could not be verified. Reload RaPS and sync before archiving.'; }
+  // A deliberately removed local copy is not required to archive its server row.
+  if (!c) return '';
+  const state = c.cloudSync || {};
+  const metadataSignature = window.RAPS_CLASS_SYNC?.classMetadataSignature;
+  if (state.trashAction) return 'Sync the pending shared deletion or restoration before requesting a CSV archive.';
+  if (state.enabled !== true || state.status !== 'synced' || !state.baseMetadataSignature
+    || typeof metadataSignature !== 'function' || metadataSignature(c) !== state.baseMetadataSignature) {
+    return 'This device has unconfirmed class changes. Use Sync Classes and resolve errors or conflicts before archiving.';
+  }
+  const roster = c.cloudRosterSync || {};
+  if (roster.status !== 'synced' || roster.syncedByUserId !== userId || !roster.syncedRosterSignature
+    || typeof store.localRosterSignature !== 'function' || store.localRosterSignature(c) !== roster.syncedRosterSignature) {
+    return 'This device has an unconfirmed roster. Use Sync Classes before archiving.';
+  }
+  for (const student of c.students || []) {
+    for (const attempt of Object.values(student.attempts || {}).filter(Boolean)) {
+      if ((attempt.startedAt || ['in_progress', 'submitted'].includes(attempt.status)) && !attempt.finalizedAt && !attempt.voidedAt) {
+        return 'Finalize or void every assessment in progress and sync its records before archiving.';
+      }
+      if (attempt.cloudShellOnly) continue;
+      const grading = attempt.cloudGrading || {};
+      const signature = window.RAPS_GRADING_SYNC?.localGradingSignature;
+      if (grading.status !== 'synced' || grading.syncedByUserId !== userId || !grading.baseGradingSignature
+        || typeof signature !== 'function' || signature(attempt) !== grading.baseGradingSignature) {
+        return 'This device has unconfirmed grading records. Use Sync Classes and resolve grading errors or conflicts before archiving.';
+      }
+    }
+  }
+  return '';
+}
+
+function reportingArchiveContext() {
+  const permissions = window.RAPS_PERMISSIONS;
+  const token = permissions?.snapshot();
+  const current = () => permissions?.isCurrent(token) && isEnterpriseAdmin();
+  return { token, current, client:supabase(), assert() {
+    if (!current()) throw new Error('Your account or Enterprise access changed. Refresh the dashboard.');
+  } };
+}
+
+async function reportingArchiveRpc(context, name, args, preflight = null) {
+  context.assert();
+  const client = context.client;
+  if (!client?.auth?.getSession) throw new Error('A verified signed-in session is required for this archive action.');
+  const { data:sessionData, error:sessionError } = await client.auth.getSession();
+  context.assert();
+  const session = sessionData?.session;
+  if (sessionError || !session?.access_token || session.user?.id !== context.token.userId) {
+    throw new Error('Your sign-in session changed or expired. Sign in again.');
+  }
+  preflight?.();
+  // Bind the mutation to the account that confirmed the selected class.
+  let request = client.rpc(name, args);
+  if (typeof request?.setHeader === 'function') request = request.setHeader('Authorization', 'Bearer ' + session.access_token);
+  else if (typeof request?.headers?.set === 'function') request.headers.set('Authorization', 'Bearer ' + session.access_token);
+  else if (request?.headers && typeof request.headers === 'object') request.headers = { ...request.headers, Authorization:'Bearer ' + session.access_token };
+  else throw new Error('RaPS could not bind the archive request to your account. Reload and try again.');
+  context.assert();
+  const response = await request;
+  context.assert();
+  if (response.error) throw response.error;
+  return response.data;
+}
+
+async function refreshReportingArchiveAction(context, message) {
+  context.assert();
+  loadGeneration++;
+  raw = null;
+  setLoading(false);
+  await load(true);
+  if (context.current() && raw) setMessage(message, 'success');
+}
+
+async function requestReportingArchive(classId, button = null) {
+  const context = reportingArchiveContext();
+  const c = raw?.classes.find(row => row.id === classId);
+  const previous = raw?.reportingArchives.find(row => row.class_id === classId);
+  if (!context.current() || !context.client || !c || (previous && previous.status !== 'failed')) return;
+  const localIssue = localReportingArchiveIssue(classId, context.token.userId);
+  if (localIssue) { setMessage(localIssue, 'error'); return; }
+  const retry = previous?.status === 'failed';
+  const reason = window.prompt((retry ? 'RETRY SELECTED CLASS CSV ARCHIVE' : 'ARCHIVE SELECTED CLASS TO NUC CSV')
+    + '\n\nClass: ' + (c.name || 'Untitled Class')
+    + '\n\nSync Classes first to include device changes in the server records. Enter the reason for retaining this class as a CSV archive and removing it from operational reports:');
+  if (reason === null) return;
+  const cleanReason = String(reason).trim();
+  if (!cleanReason || cleanReason.length > 2000) {
+    setMessage('Enter an archive reason between 1 and 2000 characters.', 'error');
+    return;
+  }
+  if (!window.confirm((retry ? 'Retry archiving only "' : 'Archive only "') + (c.name || 'Untitled Class') + '" to the private NUC CSV folder?\n\n'
+    + 'The class will be locked while the request is processed. Finalize or void active assessments first. '
+    + 'Its data remains counted until the NUC verifies the CSV files and manifest. Server training records and previous export files are retained.\n\nReason: ' + cleanReason)) return;
+  if (!context.current()) return;
+  if (button) button.disabled = true;
+  try {
+    const data = await reportingArchiveRpc(context, 'request_class_reporting_archive', { p_class_id:classId, p_reason:cleanReason }, () => {
+      const issue = localReportingArchiveIssue(classId, context.token.userId);
+      if (issue) throw new Error(issue);
+    });
+    if (data?.class_id !== classId || !data.request_id || !['requested', 'failed', 'archived'].includes(data?.status)) {
+      throw new Error('The server did not confirm the selected class archive request. Refresh its status before retrying.');
+    }
+    await refreshReportingArchiveAction(context, 'Archive request accepted for the selected class. The NUC archive queue shows its verified status.');
+  } catch (error) {
+    if (context.current()) setMessage('Archive request failed: ' + (error?.message || error), 'error');
+  } finally {
+    if (context.current() && button?.isConnected) button.disabled = false;
+  }
+}
+
+async function cancelReportingArchive(classId, requestId, button = null) {
+  const context = reportingArchiveContext();
+  const c = raw?.allClasses.find(row => row.id === classId);
+  const archive = raw?.reportingArchives.find(row => row.class_id === classId);
+  if (!context.current() || !context.client || !c || !archive || archive.request_id !== requestId
+    || !['requested', 'failed'].includes(archive.status)) return;
+  if (!window.confirm('Cancel the unfinished CSV archive for "' + (c.name || 'Untitled Class') + '"?\n\n'
+    + 'The class remains in reporting totals and can be edited again. Existing files stay on the NUC. A completed, verified archive cannot be cancelled.')) return;
+  if (!context.current()) return;
+  if (button) button.disabled = true;
+  try {
+    await reportingArchiveRpc(context, 'cancel_class_reporting_archive', { p_class_id:classId, p_request_id:requestId });
+    await refreshReportingArchiveAction(context, 'Unfinished archive request cancelled. Server records and existing CSV files were retained.');
+  } catch (error) {
+    if (context.current()) setMessage('Archive cancellation failed: ' + (error?.message || error), 'error');
+  } finally {
+    if (context.current() && button?.isConnected) button.disabled = false;
+  }
+}
+
 async function load(force = false) {
   inject();
 
@@ -1137,12 +1341,28 @@ async function load(force = false) {
       )
     ]);
 
-    const classes = await readChunks(
+    const allClasses = (await readChunks(
       'classes',
       'id,base_id,name,course_type,start_date,end_date,status,created_by,app_data,updated_at',
       'base_id',
-      bases.map((base) => base.id)
-    );
+      bases.map((base) => base.id),
+      (q) => q.neq('status', 'archived')
+    )).filter(isReportableClass);
+
+    let reportingArchives;
+    try {
+      reportingArchives = await readPages((from, to) =>
+        client.from('class_reporting_archives')
+          .select('class_id,request_id,status,requested_at,archived_at,worker_error')
+          .order('class_id')
+          .range(from, to)
+      );
+    } catch (error) {
+      access.assert();
+      throw new Error('NUC CSV archive status is unavailable. Check the server archive setup, then refresh this report.');
+    }
+    const archivedIds = new Set(reportingArchives.filter(row => row.status === 'archived').map(row => row.class_id));
+    const classes = allClasses.filter(c => !archivedIds.has(c.id));
 
     const events = await readChunks(
       'evaluation_events',
@@ -1206,6 +1426,8 @@ async function load(force = false) {
     raw = {
       majcoms,
       bases,
+      allClasses,
+      reportingArchives,
       classes,
       events,
       evaluations,
@@ -1218,6 +1440,8 @@ async function load(force = false) {
     render();
   } catch (error) {
     if (!access.current()) return;
+    raw = null;
+    clearRenderedReport();
     console.error('Enterprise Operations dashboard failed', error);
     setMessage('Dashboard load failed: ' + (error?.message || error), 'error');
   } finally {
@@ -1229,14 +1453,23 @@ window.addEventListener('raps-cloud-identity', () => {
   inject();
   loadGeneration++;
   setLoading(false);
-  for (const id of ['enterpriseAttention', 'enterpriseMajcomFilter', 'enterpriseBaseFilter', 'enterpriseBaseTable', 'enterpriseClassTable', 'enterpriseContributors', 'enterpriseCourseTable', 'enterpriseDataQuality', 'enterpriseEvaluatorTable', 'enterpriseFailureModes', 'enterpriseIncompleteTable', 'enterpriseKpis', 'enterpriseMajcomTable', 'enterpriseTierTable', 'enterpriseTrendTable']) {
-    const element = byId(id);
-    if (element) element.innerHTML = '';
-  }
+  clearRenderedReport();
   setMessage('');
   raw = null;
   load(true);
 });
+
+// A completed sync may have moved classes to/from shared Trash. Cancel older
+// report reads so they cannot put a pre-sync snapshot back on screen.
+for (const eventName of ['raps-class-sync-complete', 'raps-class-lifecycle-synced']) {
+  window.addEventListener(eventName, () => {
+    if (!isEnterpriseAdmin()) return;
+    loadGeneration++;
+    raw = null;
+    setLoading(false);
+    load(true);
+  });
+}
 
 window.addEventListener('online', () => {
   if (isEnterpriseAdmin()) load(true);

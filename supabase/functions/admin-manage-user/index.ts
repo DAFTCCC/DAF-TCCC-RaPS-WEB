@@ -15,6 +15,21 @@ function json(body: unknown, status = 200) {
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+async function managedActorUsable(admin: any, user: any, authorization: string) {
+  if (user?.app_metadata?.raps_managed_login !== true) return true;
+  try {
+    const token = authorization.replace(/^Bearer\s+/i, '');
+    const claims = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    if (claims.sub !== user.id || !Number.isSafeInteger(claims.iat) || claims.iat <= 0) return false;
+    const { data, error } = await admin.rpc('raps_managed_status', { p_user_id:user.id, p_iat:claims.iat, p_session_id:uuid.test(claims.session_id || '') ? claims.session_id : null });
+    return !error && data?.managed === true && data?.session_usable === true
+      && user.app_metadata.raps_managed_credential_version === data.credential_version
+      && claims.app_metadata?.raps_managed_login === true
+      && claims.app_metadata.raps_managed_credential_version === data.credential_version;
+  } catch { return false; }
+}
+
+
 function activeEnterprise(m: any) {
   if (m?.active !== true || m.role !== 'enterprise_admin' || m.base_id !== null || m.majcom_id !== null) return false;
   const starts = m.starts_at == null ? null : typeof m.starts_at === 'string' ? Date.parse(m.starts_at) : NaN;
@@ -75,6 +90,8 @@ Deno.serve(async (req) => {
       return json({ code:'ADMIN_AUTH', error:'Unauthorized' }, 401);
     }
 
+    if (!await managedActorUsable(adminClient, caller, authHeader)) return json({ code:'ADMIN_ACCESS', error:'Finish password setup and sign in again before administering accounts.' }, 403);
+
     const { data: callerMemberships, error: membershipError } = await adminClient
       .from('memberships')
       .select('id, role, base_id, majcom_id, active, starts_at, ends_at')
@@ -89,7 +106,7 @@ Deno.serve(async (req) => {
     }
     const stillEnterprise = async () => {
       const { data, error } = await userClient.auth.getUser();
-      if (error || data?.user?.id !== caller.id) return false;
+      if (error || data?.user?.id !== caller.id || !await managedActorUsable(adminClient, data.user, authHeader)) return false;
       const { data:memberships, error:readError } = await adminClient.from('memberships')
         .select('id, role, base_id, majcom_id, active, starts_at, ends_at')
         .eq('user_id', caller.id).eq('role', 'enterprise_admin').eq('active', true);

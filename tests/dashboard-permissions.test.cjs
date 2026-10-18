@@ -16,7 +16,7 @@ function fixture([file, role, predicate, loader, resultId], options = {}) {
   const nodes = new Map();
   const node = id => {
     if (!nodes.has(id)) nodes.set(id, {
-      innerHTML:'previous-account-report', textContent:'', value:'', children:[],
+      innerHTML:'previous-account-report', textContent:'', value:id.endsWith('Period') ? '0' : '', children:[],
       classList:{ toggle() {} }, addEventListener() {},
       querySelectorAll() { return []; }
     });
@@ -33,26 +33,71 @@ function fixture([file, role, predicate, loader, resultId], options = {}) {
     memberships:[member], primaryMembership:member, ...options.identity
   };
   let release;
-  const pending = new Promise(resolve => { release = resolve; });
+  const pending = options.immediate ? Promise.resolve() : new Promise(resolve => { release = resolve; });
   const reads = [];
+  const queries = [];
+  const errors = [];
+  const rpcCalls = [];
+  const tableErrors = new Map();
+  let tables = options.tables || null;
+  let heldRead = null;
   const client = {
     from(table) {
       reads.push(table);
+      const query = { table, filters:[] };
+      queries.push(query);
       const builder = new Proxy({}, {
         get(target, key) {
-          if (key === 'then') return (resolve, reject) => pending.then(() => ({
-            data:table === 'classes' ? [{ id:'old-class', base_id:'base' }]
+          if (key === 'then') return (resolve, reject) => {
+            let rows = tables ? (tables[table] || [])
+              : table === 'classes' ? [{ id:'old-class', base_id:'base' }]
               : table === 'bases' ? [{ id:'base', code:'BASE', majcom_id:'majcom', active:true }]
-              : [], error:null
-          })).then(resolve, reject);
+              : [];
+            for (const [op, column, value] of query.filters) {
+              rows = rows.filter(row => op === 'in' ? value.includes(row[column])
+                : op === 'neq' ? row[column] !== value : row[column] === value);
+            }
+            // A read returns the snapshot requested, even if a later sync changes it.
+            const data = JSON.parse(JSON.stringify(rows));
+            let gate = pending;
+            if (heldRead?.table === table) {
+              gate = heldRead.pending;
+              heldRead.started = true;
+              heldRead = null;
+            }
+            return gate.then(() => ({ data, error:tableErrors.get(table) || null })).then(resolve, reject);
+          };
+          if (['eq', 'neq', 'in'].includes(key)) return (column, value) => {
+            query.filters.push([key, column, value]);
+            return builder;
+          };
           return () => builder;
         }
       });
       return builder;
     }
   };
+  client.auth = { getSession:options.getSession || (async () => ({
+    data:{ session:{ user:{ id:'caller' }, access_token:'synthetic-caller-token' } }, error:null
+  })) };
+  client.rpc = (name, args) => {
+    const call = { name, args, headers:{} };
+    rpcCalls.push(call);
+    const request = {
+      setHeader(key, value) { call.headers[key] = value; return request; },
+      then(resolve, reject) {
+        return Promise.resolve(options.rpc ? options.rpc(call) : { data:null, error:null }).then(resolve, reject);
+      }
+    };
+    return request;
+  };
   const window = {
     RAPS_CLOUD:identity, RAPS_SUPABASE:client,
+    RAPS_CLASS_STORE:options.store || { getClass:() => null },
+    RAPS_CLASS_SYNC:options.classSync,
+    RAPS_GRADING_SYNC:options.gradingSync,
+    prompt:options.prompt || (() => 'Training completed'),
+    confirm:options.confirm || (() => true),
     addEventListener(type, handler) {
       if (!events.has(type)) events.set(type, []);
       events.get(type).push(handler);
@@ -61,17 +106,30 @@ function fixture([file, role, predicate, loader, resultId], options = {}) {
   const context = vm.createContext({
     window, navigator:{ onLine:options.online !== false },
     document:{ readyState:'loading', getElementById:node, addEventListener() {}, querySelector() { return null; } },
-    console:{ warn() {}, error() {} }, Date, setTimeout, clearTimeout
+    console:{ warn() {}, error(...args) { errors.push(args); } }, Date, setTimeout, clearTimeout
   });
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'permissions.js'), 'utf8'), context);
   let source = fs.readFileSync(path.join(ROOT, file), 'utf8');
   const end = source.lastIndexOf('})();');
   source = source.slice(0, end) + `window.__test = {
-    load:${loader}, allowed:${predicate}, raw:() => ${file.startsWith('program') ? 'lastLoadedBaseId' : 'raw'}
+    load:${loader}, allowed:${predicate}, raw:() => ${file.startsWith('program') ? 'lastLoadedBaseId' : 'raw'},
+    requestArchive:${file.startsWith('enterprise') ? 'requestReportingArchive' : 'null'},
+    cancelArchive:${file.startsWith('enterprise') ? 'cancelReportingArchive' : 'null'}
   };\n` + source.slice(end);
   vm.runInContext(source, context);
   return {
-    window, nodes, node, reads, member, identity,
+    window, nodes, node, reads, queries, errors, rpcCalls, member, identity,
+    failTable(table) { tableErrors.set(table, { code:'42P01', message:'relation does not exist' }); },
+    requestArchive:window.__test.requestArchive,
+    cancelArchive:window.__test.cancelArchive,
+    setTables(next) { tables = next; },
+    holdNextRead(table) {
+      let resume;
+      const held = { table, started:false, pending:new Promise(resolve => { resume = resolve; }) };
+      heldRead = held;
+      return { started:() => held.started, release:() => resume() };
+    },
+    emit(type) { for (const handler of events.get(type) || []) handler(); },
     allowed:window.__test.allowed,
     load:window.__test.load,
     raw:window.__test.raw,
@@ -127,3 +185,386 @@ for (const item of cases) {
     });
   }
 }
+
+function reportTables(classes) {
+  const tables = {
+    majcoms:[{ id:'majcom', code:'TEST', name:'Test Command', active:true }],
+    bases:[{ id:'base', code:'BASE', name:'Test Installation', majcom_id:'majcom', active:true }],
+    classes, class_reporting_archives:[], evaluation_events:[], evaluations:[], criterion_results:[], profiles:[], participants:[]
+  };
+  for (const c of classes) {
+    const trashed = c.status === 'archived' || !!c.app_data?.deletedAt;
+    tables.evaluation_events.push({ id:'event-' + c.id, class_id:c.id, base_id:c.base_id });
+    tables.evaluations.push({
+      id:'evaluation-' + c.id, event_id:'event-' + c.id,
+      participant_id:'participant-' + c.id, evaluator_id:'evaluator-' + c.id,
+      status:c.status === 'completed' ? 'finalized' : 'in_progress',
+      overall_result:c.status === 'completed' ? 'pass' : null,
+      completed_at:c.status === 'completed' ? '2026-10-17T01:00:00Z' : null
+    });
+    tables.profiles.push({ id:'evaluator-' + c.id, display_name:'Evaluator ' + c.name });
+    tables.participants.push({ id:'participant-' + c.id, display_name:'Participant ' + c.name });
+    if (trashed) tables.criterion_results.push({
+      evaluation_id:'evaluation-' + c.id, result:'fail', failure_mode:'trashed_failure',
+      primary_contributor:'trashed_contributor'
+    });
+  }
+  return tables;
+}
+
+function reportClass(id, name, status = 'draft', app_data = {}) {
+  return { id, name, status, app_data, base_id:'base', start_date:'2026-10-17', course_type:'ASM' };
+}
+
+function classTableId(file) {
+  return file.startsWith('enterprise') ? 'enterpriseClassTable'
+    : file.startsWith('majcom') ? 'majcomClassTable' : 'pmBaseClassTable';
+}
+
+function reportCount(f, label) {
+  const match = f.node(f.resultId).innerHTML.match(new RegExp('<small>' + label + '</small>\\s*<strong>([^<]+)</strong>'));
+  assert.ok(match, 'Rendered report contains the ' + label + ' KPI');
+  return match[1];
+}
+
+async function until(check) {
+  for (let turn = 0; turn < 30; turn++) {
+    if (check()) return;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.fail('Dashboard did not finish the expected asynchronous update');
+}
+
+for (const item of cases) {
+  const [file] = item;
+
+  test(`${file}: shared Trash and its assessments are excluded while closed and server-only classes remain`, async () => {
+    const kept = reportClass('retained', 'Server record after local removal', 'active');
+    const closed = reportClass('closed', 'Closed training history', 'completed');
+    const byStatus = reportClass('trash-status', 'Trashed by status', 'archived');
+    const byMarker = reportClass('trash-marker', 'Trashed by lifecycle marker', 'draft', { deletedAt:123 });
+    const f = fixture(item, { immediate:true, tables:reportTables([kept, closed, byStatus, byMarker]) });
+    await f.load(true);
+    assert.deepEqual(f.errors, []);
+    assert.equal(reportCount(f, 'Classes'), '2');
+    assert.equal(reportCount(f, 'Evaluations'), '2');
+    assert.equal(reportCount(f, 'Finalized'), '1');
+    assert.equal(reportCount(f, 'Incomplete'), '1');
+    const html = f.node(classTableId(file)).innerHTML;
+    assert.match(html, /Server record after local removal/);
+    assert.match(html, /Closed training history/);
+    assert.doesNotMatch(html, /Trashed by/);
+    const allReportHtml = [...f.nodes.values()].map(node => node.innerHTML).join('\n');
+    assert.doesNotMatch(allReportHtml, /trashed_failure|trashed_contributor/);
+    const childQueries = f.queries.filter(query => query.table === 'evaluation_events');
+    assert.equal(childQueries.length, 1);
+    assert.deepEqual(Array.from(childQueries[0].filters.find(([op, column]) => op === 'in' && column === 'class_id')[2]), ['retained', 'closed']);
+    for (const table of ['profiles', 'participants']) {
+      const ids = f.queries.filter(query => query.table === table).flatMap(query => query.filters.filter(([op]) => op === 'in').flatMap(filter => filter[2]));
+      assert.ok(ids.every(id => !id.includes('trash')), 'No deleted assessment identities are requested');
+    }
+    if (file.startsWith('enterprise')) {
+      assert.match(f.node('enterpriseMajcomTable').innerHTML, /<td>1\/1<\/td><td>2<\/td><td>2<\/td><td>1\/2<\/td>/);
+    }
+  });
+
+  test(`${file}: completed sync updates cached reporting after shared deletion and restoration`, async () => {
+    const live = reportClass('live', 'Lifecycle class', 'active');
+    const f = fixture(item, { immediate:true, tables:reportTables([live]) });
+    await f.load(true);
+    assert.equal(reportCount(f, 'Classes'), '1');
+    f.setTables(reportTables([{ ...live, status:'archived', app_data:{ deletedAt:123 } }]));
+    f.emit('raps-class-sync-complete');
+    await until(() => /<small>Classes<\/small>\s*<strong>0<\/strong>/.test(f.node(f.resultId).innerHTML));
+    assert.doesNotMatch(f.node(classTableId(file)).innerHTML, /Lifecycle class/);
+    f.setTables(reportTables([live]));
+    f.emit('raps-class-lifecycle-synced');
+    await until(() => /<small>Classes<\/small>\s*<strong>1<\/strong>/.test(f.node(f.resultId).innerHTML));
+    assert.match(f.node(classTableId(file)).innerHTML, /Lifecycle class/);
+    assert.deepEqual(f.errors, []);
+  });
+
+  test(`${file}: an older report cannot restore deleted classes after a sync refresh`, async () => {
+    const live = reportClass('live', 'Old snapshot class', 'active');
+    const f = fixture(item, { immediate:true, tables:reportTables([live]) });
+    const held = f.holdNextRead('classes');
+    const oldLoad = f.load(true);
+    await until(held.started);
+    f.setTables(reportTables([{ ...live, status:'archived', app_data:{ deletedAt:123 } }]));
+    f.emit('raps-class-lifecycle-synced');
+    await until(() => /<small>Classes<\/small>\s*<strong>0<\/strong>/.test(f.node(f.resultId).innerHTML));
+    held.release();
+    await oldLoad;
+    assert.equal(reportCount(f, 'Classes'), '0');
+    assert.doesNotMatch(f.node(classTableId(file)).innerHTML, /Old snapshot class/);
+    assert.equal(f.queries.filter(query => query.table === 'evaluation_events').length, 0);
+    assert.deepEqual(f.errors, []);
+  });
+
+  test(`${file}: sync notifications do not query with revoked reporting access`, async () => {
+    const f = fixture(item, { immediate:true, tables:reportTables([]) });
+    await f.load(true);
+    const before = f.reads.length;
+    f.member.active = false;
+    f.identityEvent();
+    f.emit('raps-class-sync-complete');
+    f.emit('raps-class-lifecycle-synced');
+    assert.equal(f.reads.length, before);
+    assert.equal(f.node(f.resultId).innerHTML, '');
+  });
+}
+
+for (const item of cases) {
+  const [file] = item;
+  test(`${file}: only verified CSV archives leave metrics; requested and failed exports stay counted`, async () => {
+    const rows = ['ordinary', 'verified', 'requested', 'failed'].map(id => reportClass(id, 'CSV ' + id, 'completed'));
+    const tables = reportTables(rows);
+    tables.class_reporting_archives = ['verified', 'requested', 'failed'].map(id => ({
+      class_id:id, request_id:'request-' + id, status:id === 'verified' ? 'archived' : id,
+      requested_at:'2026-10-18T01:00:00Z', archived_at:id === 'verified' ? '2026-10-18T01:01:00Z' : null
+    }));
+    tables.criterion_results.push({ evaluation_id:'evaluation-verified', result:'fail', failure_mode:'archived_only_failure' });
+    const f = fixture(item, { immediate:true, tables });
+    await f.load(true);
+    assert.deepEqual(f.errors, []);
+    assert.equal(reportCount(f, 'Classes'), '3');
+    assert.equal(reportCount(f, 'Evaluations'), '3');
+    const html = f.node(classTableId(file)).innerHTML;
+    assert.match(html, /CSV ordinary/);
+    assert.match(html, /CSV requested/);
+    assert.match(html, /CSV failed/);
+    assert.doesNotMatch(html, /CSV verified/);
+    const childIds = f.queries.find(query => query.table === 'evaluation_events').filters.find(([op]) => op === 'in')[2];
+    assert.deepEqual(Array.from(childIds), ['ordinary', 'requested', 'failed']);
+    const allHtml = [...f.nodes.values()].map(node => node.innerHTML).join('\n');
+    assert.doesNotMatch(allHtml, /archived_only_failure/);
+    if (file.startsWith('enterprise')) {
+      assert.match(f.node('enterpriseReportingArchives').innerHTML, /CSV verified/);
+      assert.match(f.node('enterpriseReportingArchives').innerHTML, /Archived — excluded from reports/);
+      assert.match(f.node('enterpriseReportingArchives').innerHTML, /Requested — still counted/);
+      assert.match(f.node('enterpriseReportingArchives').innerHTML, /Failed — still counted/);
+      assert.match(html, /data-enterprise-archive-class="ordinary"/);
+      assert.doesNotMatch(html, /data-enterprise-archive-class="(?:requested|failed)"/);
+    }
+  });
+
+  test(`${file}: unavailable CSV archive metadata clears stale totals and reports the setup error`, async () => {
+    const f = fixture(item, { immediate:true, tables:reportTables([reportClass('live', 'Cloud class')]) });
+    await f.load(true);
+    assert.equal(reportCount(f, 'Classes'), '1');
+    f.failTable('class_reporting_archives');
+    const before = f.queries.filter(query => query.table === 'evaluation_events').length;
+    await f.load(true);
+    assert.equal(f.node(f.resultId).innerHTML, '');
+    assert.equal(f.node(classTableId(file)).innerHTML, '');
+    const statusId = file.startsWith('enterprise') ? 'enterpriseDashboardMessage'
+      : file.startsWith('majcom') ? 'majcomDashboardMessage' : 'pmBaseStatus';
+    assert.match(f.node(statusId).textContent, /NUC CSV archive status is unavailable/);
+    assert.equal(f.queries.filter(query => query.table === 'evaluation_events').length, before);
+  });
+}
+
+test('Enterprise CSV archive confirms one selected class and binds its initiating bearer token', async () => {
+  const tables = reportTables([reportClass('selected', 'Selected class'), reportClass('other', 'Other class')]);
+  const f = fixture(cases[0], { immediate:true, tables, prompt:() => '  Class cleanup  ', rpc(call) {
+    tables.class_reporting_archives.push({ class_id:'selected', request_id:'request-selected', status:'requested' });
+    return { data:{ class_id:'selected', request_id:'request-selected', status:'requested' }, error:null };
+  } });
+  await f.load(true);
+  await f.requestArchive('selected');
+  assert.equal(f.rpcCalls.length, 1);
+  const call = f.rpcCalls[0];
+  assert.equal(call.name, 'request_class_reporting_archive');
+  assert.deepEqual(JSON.parse(JSON.stringify(call.args)), { p_class_id:'selected', p_reason:'Class cleanup' });
+  assert.equal(call.headers.Authorization, 'Bearer synthetic-caller-token');
+  assert.equal(reportCount(f, 'Classes'), '2', 'Requested archive remains counted until verified by the NUC');
+  assert.match(f.node('enterpriseReportingArchives').innerHTML, /Selected class/);
+  assert.match(f.node('enterpriseReportingArchives').innerHTML, /Class ID: selected/);
+  assert.match(f.node('enterpriseReportingArchives').innerHTML, /Requested — still counted/);
+});
+
+test('Enterprise CSV archive cancellation or lost membership never sends a mutation', async () => {
+  for (const options of [{ prompt:() => null }, { prompt:() => '' }, { confirm:() => false }]) {
+    const f = fixture(cases[0], { immediate:true, tables:reportTables([reportClass('selected', 'Selected')]), ...options });
+    await f.load(true);
+    await f.requestArchive('selected');
+    assert.equal(f.rpcCalls.length, 0);
+  }
+  const f = fixture(cases[0], { immediate:true, tables:reportTables([reportClass('selected', 'Selected')]) });
+  await f.load(true);
+  f.member.active = false;
+  await f.requestArchive('selected');
+  assert.equal(f.rpcCalls.length, 0);
+});
+
+test('Enterprise CSV archive stops if the account changes while its session is being verified', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = fixture(cases[0], { immediate:true, tables:reportTables([reportClass('selected', 'Selected')]), getSession:() => gate });
+  await f.load(true);
+  const request = f.requestArchive('selected');
+  f.window.RAPS_CLOUD = null;
+  f.identityEvent();
+  release({ data:{ session:{ user:{ id:'caller' }, access_token:'old-account-token' } }, error:null });
+  await request;
+  assert.equal(f.rpcCalls.length, 0);
+  assert.equal(f.node(f.resultId).innerHTML, '');
+});
+
+test('Enterprise CSV archive response cannot refresh or reveal a previous account report', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = fixture(cases[0], { immediate:true, tables:reportTables([reportClass('selected', 'Selected')]), rpc:() => gate });
+  await f.load(true);
+  const request = f.requestArchive('selected');
+  await until(() => f.rpcCalls.length === 1);
+  const before = f.reads.length;
+  f.window.RAPS_CLOUD = null;
+  f.identityEvent();
+  release({ data:{ class_id:'selected', status:'requested' }, error:null });
+  await request;
+  assert.equal(f.reads.length, before);
+  assert.equal(f.node(f.resultId).innerHTML, '');
+  assert.equal(f.node('enterpriseReportingArchives').innerHTML, '');
+});
+
+function verifiedLocalCopy() {
+  const c = {
+    id:'selected', metadataProof:'metadata', rosterProof:'roster',
+    cloudSync:{ enabled:true, status:'synced', baseMetadataSignature:'metadata' },
+    cloudRosterSync:{ status:'synced', syncedByUserId:'caller', syncedRosterSignature:'roster' },
+    students:[{ attempts:{ 1:{ finalizedAt:123, gradingProof:'grading', cloudGrading:{
+      status:'synced', syncedByUserId:'caller', baseGradingSignature:'grading'
+    } } } }]
+  };
+  return {
+    c,
+    store:{ getClass:() => c, localRosterSignature:value => value.rosterProof },
+    classSync:{ classMetadataSignature:value => value.metadataProof },
+    gradingSync:{ localGradingSignature:value => value.gradingProof }
+  };
+}
+
+test('Enterprise CSV archive accepts a fully verified local copy and rejects every kind of unsynced work', async () => {
+  const mutations = [
+    c => { c.cloudSync.status = 'pending'; },
+    c => { c.cloudSync.status = 'conflict'; },
+    c => { c.cloudSync.trashAction = { kind:'delete' }; },
+    c => { c.metadataProof = 'new metadata'; },
+    c => { c.cloudRosterSync.status = 'error'; },
+    c => { c.cloudRosterSync.syncedByUserId = 'other-user'; },
+    c => { c.rosterProof = 'new roster'; },
+    c => { c.students[0].attempts[1].cloudGrading.status = 'offline'; },
+    c => { c.students[0].attempts[1].gradingProof = 'new grading'; },
+    c => { Object.assign(c.students[0].attempts[1], { startedAt:1, finalizedAt:null }); }
+  ];
+  for (const mutate of [null, ...mutations]) {
+    const local = verifiedLocalCopy();
+    if (mutate) mutate(local.c);
+    const f = fixture(cases[0], { immediate:true, tables:reportTables([reportClass('selected', 'Selected')]), ...local,
+      rpc:() => ({ data:{ class_id:'selected', request_id:'request-1', status:'requested' }, error:null })
+    });
+    await f.load(true);
+    await f.requestArchive('selected');
+    assert.equal(f.rpcCalls.length, mutate ? 0 : 1);
+    if (mutate) assert.match(f.node('enterpriseDashboardMessage').textContent, /Sync|sync|Finalize/);
+  }
+});
+
+test('Enterprise CSV archive rechecks local work after asynchronous session verification', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const local = verifiedLocalCopy();
+  const f = fixture(cases[0], { immediate:true, tables:reportTables([reportClass('selected', 'Selected')]), ...local, getSession:() => gate });
+  await f.load(true);
+  const request = f.requestArchive('selected');
+  local.c.cloudSync.status = 'pending';
+  release({ data:{ session:{ user:{ id:'caller' }, access_token:'synthetic-caller-token' } }, error:null });
+  await request;
+  assert.equal(f.rpcCalls.length, 0);
+  assert.match(f.node('enterpriseDashboardMessage').textContent, /unconfirmed class changes/);
+});
+
+test('Enterprise CSV archive refuses a missing verification bridge but accepts a deliberately absent local copy', async () => {
+  const f = fixture(cases[0], { immediate:true, tables:reportTables([reportClass('selected', 'Selected')]),
+    rpc:() => ({ data:{ class_id:'selected', request_id:'request-1', status:'requested' }, error:null })
+  });
+  await f.load(true);
+  f.window.RAPS_CLASS_STORE = undefined;
+  await f.requestArchive('selected');
+  assert.equal(f.rpcCalls.length, 0);
+  assert.match(f.node('enterpriseDashboardMessage').textContent, /verification is unavailable/);
+  f.window.RAPS_CLASS_STORE = { getClass:() => null };
+  await f.requestArchive('selected');
+  assert.equal(f.rpcCalls.length, 1);
+});
+
+for (const archiveStatus of ['requested', 'failed']) {
+  test(`Enterprise can cancel only the exact unfinished ${archiveStatus} CSV archive generation`, async () => {
+    const tables = reportTables([reportClass('selected', 'Selected')]);
+    tables.class_reporting_archives = [{ class_id:'selected', request_id:'current-request', status:archiveStatus }];
+    const f = fixture(cases[0], { immediate:true, tables, rpc(call) {
+      tables.class_reporting_archives = [];
+      return { data:null, error:null };
+    } });
+    await f.load(true);
+    assert.match(f.node('enterpriseReportingArchives').innerHTML, /Cancel unfinished archive/);
+    await f.cancelArchive('selected', 'obsolete-request');
+    assert.equal(f.rpcCalls.length, 0, 'An obsolete generation from an old render cannot be cancelled');
+    await f.cancelArchive('selected', 'current-request');
+    assert.equal(f.rpcCalls.length, 1);
+    assert.equal(f.rpcCalls[0].name, 'cancel_class_reporting_archive');
+    assert.deepEqual(JSON.parse(JSON.stringify(f.rpcCalls[0].args)), { p_class_id:'selected', p_request_id:'current-request' });
+    assert.equal(f.rpcCalls[0].headers.Authorization, 'Bearer synthetic-caller-token');
+    assert.equal(reportCount(f, 'Classes'), '1');
+    assert.match(f.node('enterpriseClassTable').innerHTML, /data-enterprise-archive-class="selected"/);
+  });
+}
+
+test('Enterprise retry requests a new failed archive generation while preserving its training metrics', async () => {
+  const tables = reportTables([reportClass('selected', 'Selected')]);
+  tables.class_reporting_archives = [{ class_id:'selected', request_id:'failed-request', status:'failed' }];
+  const f = fixture(cases[0], { immediate:true, tables, rpc() {
+    tables.class_reporting_archives[0] = { class_id:'selected', request_id:'new-request', status:'requested' };
+    return { data:tables.class_reporting_archives[0], error:null };
+  } });
+  await f.load(true);
+  assert.match(f.node('enterpriseReportingArchives').innerHTML, /Retry CSV archive/);
+  await f.requestArchive('selected');
+  assert.equal(f.rpcCalls.length, 1);
+  assert.equal(f.rpcCalls[0].name, 'request_class_reporting_archive');
+  assert.equal(reportCount(f, 'Classes'), '1');
+  assert.match(f.node('enterpriseReportingArchives').innerHTML, /Requested — still counted/);
+  assert.doesNotMatch(f.node('enterpriseReportingArchives').innerHTML, /Retry CSV archive/);
+});
+
+test('Enterprise verified archive exposes neither retry nor cancellation actions', async () => {
+  const tables = reportTables([reportClass('selected', 'Selected')]);
+  tables.class_reporting_archives = [{ class_id:'selected', request_id:'verified-request', status:'archived' }];
+  const f = fixture(cases[0], { immediate:true, tables });
+  await f.load(true);
+  assert.equal(reportCount(f, 'Classes'), '0');
+  assert.doesNotMatch(f.node('enterpriseReportingArchives').innerHTML, /data-enterprise-(?:retry|cancel)-archive/);
+  await f.requestArchive('selected');
+  await f.cancelArchive('selected', 'verified-request');
+  assert.equal(f.rpcCalls.length, 0);
+});
+
+test('Enterprise archive cancellation suppresses a response after membership revocation', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const tables = reportTables([reportClass('selected', 'Selected')]);
+  tables.class_reporting_archives = [{ class_id:'selected', request_id:'current-request', status:'requested' }];
+  const f = fixture(cases[0], { immediate:true, tables, rpc:() => gate });
+  await f.load(true);
+  const request = f.cancelArchive('selected', 'current-request');
+  await until(() => f.rpcCalls.length === 1);
+  const before = f.reads.length;
+  f.member.active = false;
+  f.identityEvent();
+  release({ data:null, error:null });
+  await request;
+  assert.equal(f.reads.length, before);
+  assert.equal(f.node(f.resultId).innerHTML, '');
+  assert.equal(f.node('enterpriseReportingArchives').innerHTML, '');
+});

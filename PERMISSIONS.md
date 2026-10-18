@@ -15,6 +15,8 @@ grant their own scopes; a role at one installation does not grant it elsewhere.
 | Delete or restore shared class trash | No | No | No | Yes, subject to lifecycle and synchronization checks |
 | Remove a synced device copy | No | No | No | Yes, after exact class/roster/grading verification |
 | Invite users, assign roles, review requests | No | No | No | Yes |
+| Create username accounts or issue temporary passwords | No | No | No | Yes; another account only for recovery |
+| Request/cancel unfinished NUC CSV archives | No | No | No | Yes; active assessments must finish first |
 | Delete accounts | No | No | No | Other inactive accounts without retained operational history |
 | Set/reset own password | Authenticated account or verified recovery link | Same | Same | Same |
 | Modify standardized criteria/curriculum | No browser access | No browser access | No browser access | Trusted deployment/migration only |
@@ -49,6 +51,15 @@ keeps the local copy. A device exclusion prevents automatic synchronization from
 immediately downloading it again; an explicit reload restores the server copy.
 Another tab's unsent work is preserved.
 
+**Archive to NUC CSV** in Enterprise Class Operations is a separate, selected-class
+retention workflow. A request freezes linked class/evidence writes. Only the NUC
+worker can mark it archived after checking durable CSV files, checksums, and the
+current server snapshot. Pending or failed requests remain in reporting totals;
+verified archives and shared trash are excluded from Enterprise, MAJCOM, and
+installation reports. Database records and identifiers remain retained. An
+Enterprise Administrator can cancel an unfinished request or retry a failed
+generation; previous private export files are preserved. See [web.8 deployment](WEB8-DEPLOYMENT.md).
+
 Older unsent records without a verifiable creator remain on the device for
 recovery. Signing in as another user does not claim those records or publish
 them under that user's account. Enterprise recovery exports preserve the
@@ -73,10 +84,22 @@ Account approval verifies the recipient's ID and email against Auth before
 granting existing-account access. Public profile email is not an account identity
 proof. Password recovery and verified email links do not grant a RaPS role.
 
+Username accounts use administrator-assisted recovery. Temporary credentials
+expire after 24 hours and require a different password before training access.
+Pending setup and superseded sessions are denied by server permission guards;
+an existing role does not bypass password setup. Existing email accounts retain
+their email recovery workflow. The administrator sees each generated temporary
+password once; RaPS does not save its plaintext in browser storage or audit logs.
+
 ## Deployment and verification
 
 The website, Edge functions, and database permissions are separate deployments.
 Merging the website alone does not install the database guards.
+
+For an already verified web.7 installation, follow [the web.8 rollout](WEB8-DEPLOYMENT.md)
+before publishing this frontend. The steps below describe the original web.7
+permission deployment; do not repeat its once-only migrations or recreate Auth
+as part of the web.8 rollout.
 
 1. Back up the existing NUC database, functions, and Compose configuration.
 2. Capture the deployed policies with

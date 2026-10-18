@@ -34,6 +34,10 @@ let resetAvailableAt = 0;
 let resetCooldownTimer = null;
 let sessionBlocked = false;
 let identityExpiryTimer = null;
+let managedSetupRequired = false;
+let managedLoginName = '';
+let managedSignInAvailableAt = 0;
+let managedSignInNotice = '';
 
 const byId = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -142,8 +146,8 @@ function injectUi() {
           <p class="cloudAuthIntro">Sign in with your authorized RaPS account. The first sign-in requires network access. After a successful sign-in, this device can continue the local evaluator workflow during a temporary outage.</p>
           <form id="cloudAuthForm" class="cloudAuthForm">
             <label>
-              <span>Email</span>
-              <input id="cloudAuthEmail" type="email" autocomplete="username" inputmode="email" required>
+              <span>Email or username</span>
+              <input id="cloudAuthEmail" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="254" required>
             </label>
             <label>
               <span>Password</span>
@@ -298,7 +302,7 @@ function injectUi() {
           <h1 id="cloudChangePasswordTitle">Change Your Password</h1>
           <p class="cloudAuthIntro">Change the password for <b id="cloudChangePasswordEmail"></b>. Network access is required.</p>
           <form id="cloudChangePasswordForm" class="cloudAuthForm">
-            <label><span>Current password</span><input id="cloudChangePasswordCurrent" type="password" autocomplete="current-password" required></label>
+            <label><span id="cloudChangePasswordCurrentLabel">Current password</span><input id="cloudChangePasswordCurrent" type="password" autocomplete="current-password" required></label>
             <label><span>New password</span><input id="cloudChangePasswordPassword" type="password" autocomplete="new-password" minlength="12" required></label>
             <label><span>Confirm new password</span><input id="cloudChangePasswordConfirm" type="password" autocomplete="new-password" minlength="12" required></label>
             <div class="cloudPasswordRule">Use at least 12 characters and a different password from your current password.</div>
@@ -469,12 +473,124 @@ function adoptUser(user) {
   authenticatedUser = user || null;
 }
 
+function isManagedUser(user) {
+  return user?.app_metadata?.raps_managed_login === true || user?.managed_login === true || /@login\.raps\.invalid$/i.test(user?.email || '');
+}
+
+function rejectsCachedSession(error) {
+  return error?.allowOffline === false ||
+    (Number(error?.status) >= 400 && Number(error?.status) < 500);
+}
+
+function loginName(user) {
+  if (!isManagedUser(user)) return user?.email || '';
+  return user?.username || managedLoginName || String(user?.email || '').replace(/@login\.raps\.invalid$/i, '');
+}
+
+async function managedRequest(body, token) {
+  let response;
+  try {
+    response = await client.functions.invoke('managed-login', {
+      body,
+      ...(token ? {headers:{Authorization:`Bearer ${token}`}} : {})
+    });
+  } catch {
+    const failure = new Error('RaPS account verification is unavailable. Check your connection and try again.');
+    failure.allowOffline = true;
+    throw failure;
+  }
+  let payload = response.data;
+  if (response.error?.context?.json) {
+    try { payload = await response.error.context.json(); } catch {}
+  }
+  if (response.error || payload?.ok !== true) {
+    const code = payload?.code || '';
+    const messages = {
+      MANAGED_TEMP_EXPIRED:'Your temporary password has expired. Contact an Enterprise Administrator for a new one.',
+      MANAGED_AUTH:'The username or password is incorrect. Try again, or contact an Enterprise Administrator.',
+      MANAGED_RATE:'Too many requests. Wait before trying again.',
+      MANAGED_BUSY:'Password setup is already in progress. Wait before trying again, or contact an Enterprise Administrator if it remains blocked.',
+      MANAGED_PASSWORD:'Choose a different password with at least 12 characters and no more than 72 UTF-8 bytes. Do not reuse the temporary password.',
+      MANAGED_SETUP_REQUIRED:'Your password or sign-in session was reset. Sign in again with the password provided by your administrator.'
+    };
+    const failure = new Error(messages[code] || 'Unable to verify your RaPS account. Check your connection and try again.');
+    failure.code = code;
+    failure.allowOffline = !code && !payload && !response.error?.context;
+    throw failure;
+  }
+  return payload;
+}
+
+async function managedSessionSnapshot(owner, isCurrent) {
+  const {data, error} = await client.auth.getSession();
+  if (error) throw error;
+  const session = data?.session;
+  if (!session?.access_token || session.user?.id !== owner) {
+    const failure = new Error('Your account session changed. Sign in again.');
+    failure.allowOffline = false;
+    throw failure;
+  }
+  const user = await verifiedUser(owner, session.access_token);
+  if (!isCurrent()) return null;
+  if (user.app_metadata?.raps_managed_login !== true) {
+    const failure = new Error('Unable to verify this managed account. Sign in again.');
+    failure.allowOffline = false;
+    throw failure;
+  }
+  return {user, token:session.access_token};
+}
+
+function openManagedPassword(user, status) {
+  managedLoginName = status.username || loginName(user);
+  managedSetupRequired = true;
+  clearRuntimeIdentity();
+  changePasswordUserId = user.id;
+  clearPasswordFields('cloudChangePassword');
+  byId('cloudChangePasswordTitle').textContent = 'Choose Your RaPS Password';
+  byId('cloudChangePasswordCurrentLabel').textContent = 'Temporary password';
+  byId('cloudChangePasswordEmail').textContent = managedLoginName || 'your username';
+  byId('cloudChangePasswordVerification').hidden = true;
+  byId('cloudChangePasswordCancel').textContent = 'Sign Out';
+  setGate(false);
+  setActivationGate(false);
+  setStatus('checking', 'Password setup required');
+  const expired = status.temporary_expires_at && Date.parse(status.temporary_expires_at) <= Date.now();
+  setChangePasswordGate(true, expired
+    ? 'Your temporary password has expired. Contact an Enterprise Administrator for a new one.'
+    : 'Enter your temporary password and choose a different password before opening RaPS.', expired ? 'error' : '');
+}
+
+async function requireManagedSignIn(message, notBefore = 0) {
+  managedSignInNotice = message;
+  managedSignInAvailableAt = Math.max(managedSignInAvailableAt, Number(notBefore) * 1000 || 0);
+  sessionBlocked = true;
+  authenticatedUser = null;
+  managedSetupRequired = false;
+  changePasswordUserId = null;
+  activationUserId = null;
+  clearPendingActivation();
+  clearRuntimeIdentity();
+  clearPasswordFields('cloudChangePassword');
+  clearPasswordFields('cloudActivation');
+  if (byId('cloudAuthPassword')) byId('cloudAuthPassword').value = '';
+  if (managedLoginName && byId('cloudAuthEmail')) byId('cloudAuthEmail').value = managedLoginName;
+  setChangePasswordGate(false);
+  setActivationGate(false);
+  try {
+    const {error} = await client.auth.signOut({scope:'local'});
+    if (error) throw error;
+  }
+  catch { try { localStorage.removeItem(CFG.authStorageKey || 'raps-supabase-auth-v1'); } catch {} }
+  setStatus('denied', 'Sign in to continue');
+  setGate(true, message, '');
+}
+
 function exposeIdentity(value, mode) {
   const memberships = activeMemberships(value?.memberships || [], value?.user?.id);
   const membership = primaryMembership(memberships);
   identity = { ...value, memberships, primaryMembership: membership };
   const profile = value?.profile || {};
-  const displayName = profile.display_name || value?.user?.email || 'RaPS user';
+  const displayName = profile.display_name || loginName(value?.user) || 'RaPS user';
   const role = membership?.role || '';
   const roleLabel = ROLE_LABELS[role] || 'No active role';
   const scope = scopeLabel(membership);
@@ -557,16 +673,20 @@ async function loadIdentity(user) {
   });
   const primary = primaryMembership(active);
 
+  const managed = isManagedUser(user);
+  const email = managed ? '' : user.email || profile?.email || '';
   return {
     cachedAt: new Date().toISOString(),
+    ...(managed ? {managedLoginVerified:true} : {}),
     user: {
       id: user.id,
-      email: user.email || profile?.email || ''
+      email,
+      ...(managed ? {managed_login:true, username:managedLoginName || loginName(user)} : {})
     },
-    profile: profile || {
+    profile: profile ? {...profile, ...(managed ? {email:''} : {})} : {
       id: user.id,
-      display_name: user.email || 'RaPS user',
-      email: user.email || ''
+      display_name: loginName(user) || 'RaPS user',
+      email
     },
     memberships: active,
     primaryMembership: primary
@@ -574,9 +694,11 @@ async function loadIdentity(user) {
 }
 
 function useCachedIdentity(expectedUserId = null) {
+  if (managedSetupRequired || sessionBlocked) return false;
   const cached = readCachedIdentity();
   if (!cached?.user?.id) return false;
   if (expectedUserId && cached.user.id !== expectedUserId) return false;
+  if (isManagedUser(cached.user) && cached.managedLoginVerified !== true) return false;
   cached.memberships = activeMemberships(cached.memberships || [], cached.user.id);
   cached.primaryMembership = primaryMembership(cached.memberships);
   if (!cached.primaryMembership) return false;
@@ -587,11 +709,41 @@ function useCachedIdentity(expectedUserId = null) {
 }
 
 async function establishIdentity(user) {
+  // Hide private screens while an online managed session is being checked. A
+  // reset or password-setup session must not briefly inherit the old identity.
+  if (isManagedUser(user)) {
+    clearRuntimeIdentity(false);
+    setGate(true, 'Checking your RaPS account…', 'working');
+  }
   const generation = identityGeneration;
   const lookupId = ++identityLookupId;
   const isCurrent = () => lookupId === identityLookupId && generation === identityGeneration && authenticatedUser?.id === user?.id && !sessionBlocked;
   try {
-    const loaded = await loadIdentity(user);
+    let verified = user;
+    if (isManagedUser(user)) {
+      const snapshot = await managedSessionSnapshot(user.id, isCurrent);
+      if (!snapshot || !isCurrent()) return false;
+      const status = await managedRequest({action:'status'}, snapshot.token);
+      if (!isCurrent()) return false;
+      if (status.managed !== true || typeof status.password_change_required !== 'boolean' || typeof status.session_usable !== 'boolean') {
+        const failure = new Error('Unable to verify this managed account. Sign in again.');
+        failure.allowOffline = false;
+        throw failure;
+      }
+      managedLoginName = status.username || loginName(snapshot.user);
+      if (status.password_change_required) {
+        openManagedPassword(snapshot.user, status);
+        return false;
+      }
+      if (!status.session_usable) {
+        await requireManagedSignIn('Your session was reset. Sign in again with your current password.');
+        return false;
+      }
+      managedSetupRequired = false;
+      verified = snapshot.user;
+      authenticatedUser = verified;
+    }
+    const loaded = await loadIdentity(verified);
     if (!isCurrent()) return false;
 
     if (!loaded.primaryMembership) {
@@ -607,15 +759,18 @@ async function establishIdentity(user) {
     return true;
   } catch (error) {
     if (!isCurrent()) return false;
-    console.warn('RaPS cloud identity lookup failed', error);
+    if (!isManagedUser(user)) console.warn('RaPS cloud identity lookup failed', error);
 
-    if (useCachedIdentity(user?.id)) {
+    const rejectedSession = rejectsCachedSession(error);
+    if (!rejectedSession && useCachedIdentity(user?.id)) {
       return true;
     }
 
-    clearRuntimeIdentity(false);
+    // A rejected session must also lose its offline cache. Otherwise a later
+    // browser offline event could reopen the identity that was just denied.
+    clearRuntimeIdentity(rejectedSession);
     setStatus('offline', 'Cloud unavailable · Sign-in required before offline use');
-    setGate(true, 'RaPS could not verify your role. Check the network connection and try again. First-time use on a device requires an online sign-in.', 'error');
+    setGate(true, rejectedSession ? error.message || 'Your sign-in session has expired. Sign in again.' : 'RaPS could not verify your role. Check the network connection and try again. First-time use on a device requires an online sign-in.', 'error');
     return false;
   }
 }
@@ -624,12 +779,16 @@ async function handleSignIn(event) {
   event.preventDefault();
   if (!client || authBusy) return;
 
-  const email = byId('cloudAuthEmail')?.value.trim();
+  const login = byId('cloudAuthEmail')?.value.trim();
   const password = byId('cloudAuthPassword')?.value || '';
   const submit = byId('cloudAuthSubmit');
 
-  if (!email || !password) {
-    setGate(true, 'Enter both email and password.', 'error');
+  if (!login || !password) {
+    setGate(true, 'Enter your email or username and password.', 'error');
+    return;
+  }
+  if (Date.now() < managedSignInAvailableAt) {
+    setGate(true, 'Your password was changed. Wait a moment, then sign in with your new password.', '');
     return;
   }
 
@@ -642,17 +801,34 @@ async function handleSignIn(event) {
   authBusy = true;
 
   try {
-    const { data, error } = await client.auth.signInWithPassword({ email, password });
-    if (error) throw error;
-    if (!data?.user) throw new Error('Supabase did not return an authenticated user.');
+    const managed = !login.includes('@') || /@login\.raps\.invalid$/i.test(login);
+    let user;
+    if (managed) {
+      clearRuntimeIdentity(false);
+      const username = login.replace(/@login\.raps\.invalid$/i, '').toLowerCase();
+      if (!/^[a-z0-9][a-z0-9._-]{2,31}$/.test(username)) throw new Error('Use the username provided by your administrator (3–32 letters, numbers, periods, underscores, or hyphens).');
+      const result = await managedRequest({action:'sign_in', username, password});
+      if (!result.user?.id || !result.session?.access_token || !result.session?.refresh_token) throw new Error('Unable to confirm your sign-in. Try again.');
+      const {data, error} = await client.auth.setSession(result.session);
+      if (error) throw new Error('Unable to establish your sign-in. Try again.');
+      if (data?.session?.user?.id !== result.user.id) throw new Error('The sign-in session changed. Sign in again.');
+      user = await verifiedUser(result.user.id, result.session.access_token);
+      if (user.app_metadata?.raps_managed_login !== true) throw new Error('Unable to verify this username account. Contact your administrator.');
+      managedLoginName = result.user.username || username;
+    } else {
+      const {data, error} = await client.auth.signInWithPassword({email:login, password});
+      if (error) throw error;
+      if (!data?.user) throw new Error('Supabase did not return an authenticated user.');
+      user = data.user;
+    }
 
     sessionBlocked = false;
+    managedSignInNotice = '';
     clearPendingActivation();
-    adoptUser(data.user);
-    await establishIdentity(data.user);
+    adoptUser(user);
+    await establishIdentity(user);
     if (byId('cloudAuthPassword')) byId('cloudAuthPassword').value = '';
   } catch (error) {
-    console.error('RaPS sign-in failed', error);
     setStatus('denied', 'Not signed in');
     setGate(true, error?.message || 'Unable to sign in.', 'error');
   } finally {
@@ -756,7 +932,7 @@ async function loadRequestAccessCatalog() {
 async function openRequestAccess() {
   const signInEmail = byId('cloudAuthEmail')?.value.trim() || '';
 
-  if (byId('cloudRequestAccessEmail') && signInEmail) {
+  if (byId('cloudRequestAccessEmail') && signInEmail.includes('@') && !/@login\.raps\.invalid$/i.test(signInEmail)) {
     byId('cloudRequestAccessEmail').value = signInEmail;
   }
 
@@ -887,7 +1063,11 @@ async function handleForgotPassword() {
   const email = byId('cloudAuthEmail')?.value.trim() || '';
   const button = byId('cloudForgotPasswordBtn');
 
-  if (!email || !byId('cloudAuthEmail')?.checkValidity()) {
+  if (email && (!email.includes('@') || /@login\.raps\.invalid$/i.test(email))) {
+    setGate(true, 'Username accounts use administrator-assisted recovery. Contact an Enterprise Administrator for a new temporary password.', '');
+    return;
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     setGate(true, 'Enter a valid email address first, then select Forgot password.', 'error');
     byId('cloudAuthEmail')?.focus();
     return;
@@ -969,7 +1149,11 @@ function leaveActivation() {
 async function verifiedUser(expectedId, accessToken) {
   const { data, error } = await client.auth.getUser(accessToken);
   if (error) throw error;
-  if (!data?.user?.id || data.user.id !== expectedId) throw new Error('Your sign-in session changed or expired. Sign in again before changing your password.');
+  if (!data?.user?.id || data.user.id !== expectedId) {
+    const failure = new Error('Your sign-in session changed or expired. Sign in again before changing your password.');
+    failure.allowOffline = false;
+    throw failure;
+  }
   return data.user;
 }
 
@@ -1080,8 +1264,11 @@ function openChangePassword() {
     return;
   }
   changePasswordUserId = authenticatedUser.id;
+  managedSetupRequired = false;
   clearPasswordFields('cloudChangePassword');
-  byId('cloudChangePasswordEmail').textContent = authenticatedUser.email || 'your signed-in account';
+  byId('cloudChangePasswordTitle').textContent = 'Change Your Password';
+  byId('cloudChangePasswordCurrentLabel').textContent = 'Current password';
+  byId('cloudChangePasswordEmail').textContent = loginName(authenticatedUser) || 'your signed-in account';
   byId('cloudChangePasswordVerification').hidden = true;
   byId('cloudChangePasswordCancel').textContent = 'Cancel';
   setGate(false);
@@ -1090,6 +1277,10 @@ function openChangePassword() {
 
 function closeChangePassword() {
   if (authBusy) return;
+  if (managedSetupRequired) {
+    requireManagedSignIn('Sign in with the temporary password supplied by your administrator to finish password setup.');
+    return;
+  }
   changePasswordUserId = null;
   clearPasswordFields('cloudChangePassword');
   setChangePasswordGate(false);
@@ -1111,14 +1302,28 @@ async function handleChangePassword(event) {
   const password = byId('cloudChangePasswordPassword').value;
   const confirmation = byId('cloudChangePasswordConfirm').value;
   if (!owner || authenticatedUser?.id !== owner) return closeChangePassword();
-  if (!currentPassword || password.length < 12 || password !== confirmation || password === currentPassword) {
-    setChangePasswordGate(true, !currentPassword ? 'Enter your current password.' : password.length < 12 ? 'Use a password with at least 12 characters.' : password !== confirmation ? 'The passwords do not match.' : 'Choose a different password from your current password.', 'error');
+  const passwordLength = isManagedUser(authenticatedUser) ? Array.from(password).length : password.length;
+  if (!currentPassword || passwordLength < 12 || password !== confirmation || password === currentPassword) {
+    setChangePasswordGate(true, !currentPassword ? 'Enter your current password.' : passwordLength < 12 ? 'Use a password with at least 12 characters.' : password !== confirmation ? 'The passwords do not match.' : 'Choose a different password from your current password.', 'error');
+    return;
+  }
+  if (isManagedUser(authenticatedUser) && new TextEncoder().encode(password).length > 72) {
+    setChangePasswordGate(true, 'Use a password of at least 12 characters and no more than 72 bytes. Some symbols use more than one byte.', 'error');
     return;
   }
   const isCurrent = () => generation === identityGeneration && changePasswordUserId === owner && authenticatedUser?.id === owner && !sessionBlocked;
   setPasswordChangeBusy(true);
   setChangePasswordGate(true, 'Verifying your current password…', 'working');
   try {
+    if (isManagedUser(authenticatedUser)) {
+      const snapshot = await managedSessionSnapshot(owner, isCurrent);
+      if (!snapshot || !isCurrent()) return;
+      const result = await managedRequest({action:'complete_password', current_password:currentPassword, new_password:password}, snapshot.token);
+      if (!isCurrent()) return;
+      if (result.sign_in_required !== true || !Number.isFinite(result.not_before)) throw new Error('Unable to confirm the password change. Sign out and contact your administrator.');
+      await requireManagedSignIn('Your password has been changed. Sign in again with your username and new password.', result.not_before);
+      return;
+    }
     const user = await verifiedUser(owner);
     if (!isCurrent()) return;
     if (!user.email) throw new Error('This account has no verified email address. Contact your administrator.');
@@ -1145,6 +1350,7 @@ async function handleChangePassword(event) {
 
 async function handleReauthenticationCode() {
   if (!client || authBusy || !changePasswordUserId) return;
+  if (isManagedUser(authenticatedUser)) return;
   const owner = changePasswordUserId;
   const generation = identityGeneration;
   const isCurrent = () => generation === identityGeneration && changePasswordUserId === owner && authenticatedUser?.id === owner;
@@ -1175,6 +1381,9 @@ async function handleSignOut() {
     try { localStorage.removeItem(CFG.authStorageKey || 'raps-supabase-auth-v1'); } catch {}
   }
   authenticatedUser = null;
+  managedSetupRequired = false;
+  managedLoginName = '';
+  managedSignInNotice = '';
   activationUserId = null;
   clearPendingActivation();
   changePasswordUserId = null;
@@ -1208,6 +1417,10 @@ async function verifyActivationLink() {
     const user = await verifiedUser(session.user.id, session.access_token);
     sessionBlocked = false;
     adoptUser(user);
+    if (isManagedUser(user)) {
+      await establishIdentity(user);
+      return;
+    }
     activationUserId = user.id;
     rememberActivation(user.id);
     clearCachedIdentity();
@@ -1233,6 +1446,7 @@ async function verifyActivationLink() {
 function handleAuthStateChange(event, nextSession) {
   if (event === 'SIGNED_OUT') {
     authenticatedUser = null;
+    managedSetupRequired = false;
     activationUserId = null;
     clearPendingActivation();
     changePasswordUserId = null;
@@ -1242,7 +1456,7 @@ function handleAuthStateChange(event, nextSession) {
     setActivationGate(false);
     setChangePasswordGate(false);
     setStatus('denied', 'Not signed in');
-    setGate(true, 'Signed out. Sign in to continue.', '');
+    setGate(true, managedSignInNotice || 'Signed out. Sign in to continue.', '');
     return;
   }
   const passwordOwner = activationUserId || changePasswordUserId;
@@ -1250,6 +1464,8 @@ function handleAuthStateChange(event, nextSession) {
     // Another tab changed accounts while a password form was open.
     sessionBlocked = true;
     authenticatedUser = null;
+    managedSetupRequired = false;
+    managedLoginName = '';
     activationUserId = null;
     clearPendingActivation();
     changePasswordUserId = null;
@@ -1312,11 +1528,12 @@ async function initCloudAuth() {
     if (incomingLink.requested) {
       await verifyActivationLink();
     } else if (error) {
-      if (pendingActivation() || !useCachedIdentity()) setGate(true, 'Unable to verify a RaPS session. Reconnect to finish password setup or sign in.', 'error');
+      if (rejectsCachedSession(error)) clearCachedIdentity();
+      if (pendingActivation() || rejectsCachedSession(error) || !useCachedIdentity()) setGate(true, 'Unable to verify a RaPS session. Reconnect to finish password setup or sign in.', 'error');
     } else if (sessionData?.session?.user) {
       const session = sessionData.session;
       const pending = pendingActivation();
-      if (pending && pending.userId === session.user.id) {
+      if (pending && pending.userId === session.user.id && !isManagedUser(session.user)) {
         if (!session.access_token) throw new Error('Password setup requires a verified session.');
         const user = await verifiedUser(pending.userId, session.access_token);
         adoptUser(user);
@@ -1333,8 +1550,8 @@ async function initCloudAuth() {
       setStatus('denied', 'Not signed in');
       setGate(true, 'Sign in with your authorized RaPS account.', '');
     }
-  } catch {
-    if (incomingLink.requested || pendingActivation()) {
+  } catch (error) {
+    if (incomingLink.requested || pendingActivation() || rejectsCachedSession(error)) {
       sessionBlocked = true;
       authenticatedUser = null;
       clearRuntimeIdentity();
@@ -1349,7 +1566,7 @@ async function initCloudAuth() {
   });
 
   window.addEventListener('offline', () => {
-    if (activationUserId || sessionBlocked) return;
+    if (activationUserId || managedSetupRequired || sessionBlocked) return;
     if (!useCachedIdentity(authenticatedUser?.id)) {
       setStatus('offline', 'Offline · No verified identity cached');
     }

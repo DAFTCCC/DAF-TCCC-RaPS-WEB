@@ -503,6 +503,7 @@ async function pushTrashAction(c,existing,remote,action,options) {
   const saved=remoteToLocal(data,await loadRefs(false,context));
   context.check();
   acknowledgeTrashAction(c,saved,action);
+  window.dispatchEvent(new CustomEvent('raps-class-lifecycle-synced',{detail:{classId:c.id,action:action.kind}}));
   return true;
 }
 
@@ -1411,7 +1412,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.12-web.7';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.12-web.8';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,

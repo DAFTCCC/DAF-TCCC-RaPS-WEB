@@ -17,6 +17,12 @@ function membership() { return window.RAPS_PERMISSIONS?.membership('program_mana
 function isProgramManager() {
   return window.RAPS_PERMISSIONS?.hasRole('program_manager') === true;
 }
+// Shared Enterprise Trash retains its server records for recovery, but is not
+// training activity. Closed/completed retention records remain reportable.
+function isReportableClass(c) {
+  return !!c && c.status !== 'archived' && !c.app_data?.deletedAt;
+}
+
 function dashboardRequest() {
   const permissions = window.RAPS_PERMISSIONS;
   const token = permissions?.snapshot();
@@ -71,6 +77,13 @@ function setStatus(message, kind='') {
   el.textContent = message;
   el.className = `pmBaseStatus ${kind}`.trim();
 }
+function clearRenderedReport() {
+  for (const id of ['pmBaseClassTable', 'pmBaseContributors', 'pmBaseEvaluatorTable', 'pmBaseFailureModes', 'pmBaseIncompleteTable', 'pmBaseKpis']) {
+    const element = $(id);
+    if (element) element.innerHTML = '';
+  }
+}
+
 function setBusy(on) {
   busy = !!on;
   const btn = $('pmBaseRefresh');
@@ -92,6 +105,7 @@ function inject() {
         <span id="pmBaseScope">Program Manager</span>
       </div>
       <p class="helper">Cloud-scoped operational view for your assigned installation. Data is filtered by your Supabase role and Row Level Security; this dashboard does not expand your access.</p>
+      <p class="helper">Removing a local copy keeps the server record in these reports. Shared Enterprise Trash and verified NUC CSV archives are excluded. Pending or failed CSV archives remain counted; closed classes remain as training history.</p>
       <div class="pmBaseToolbar">
         <label>
           <span>Reporting window</span>
@@ -140,7 +154,7 @@ function inject() {
   $('pmBaseRefresh')?.addEventListener('click', () => loadDashboard(true));
   $('pmBasePeriod')?.addEventListener('change', () => loadDashboard(true));
   document.querySelector('[data-home-area="program"]')?.addEventListener('click', () => {
-    if (isProgramManager()) window.setTimeout(() => loadDashboard(false), 0);
+    if (isProgramManager()) window.setTimeout(() => loadDashboard(true), 0);
   });
   mounted = true;
 }
@@ -429,14 +443,30 @@ async function loadDashboard(force=false) {
     const days = daysValue();
     const cutoff = cutoffIso(days);
 
-    const classes = await readPages((from,to) => {
+    const allClasses = (await readPages((from,to) => {
       let q = supabase.from('classes')
         .select('id,base_id,name,course_type,start_date,end_date,status,created_by,app_data,updated_at')
         .eq('base_id', baseId)
+        .neq('status', 'archived')
         .order('start_date', { ascending:false, nullsFirst:false });
       if (cutoff) q = q.or(`start_date.gte.${cutoff},status.eq.active,status.eq.draft`);
       return q.range(from,to);
-    });
+    })).filter(isReportableClass);
+
+    let reportingArchives;
+    try {
+      reportingArchives = await readPages((from, to) =>
+        supabase.from('class_reporting_archives')
+          .select('class_id,request_id,status,requested_at,archived_at,worker_error')
+          .order('class_id')
+          .range(from, to)
+      );
+    } catch (error) {
+      access.assert();
+      throw new Error('NUC CSV archive status is unavailable. Check the server archive setup, then refresh this report.');
+    }
+    const archivedIds = new Set(reportingArchives.filter(row => row.status === 'archived').map(row => row.class_id));
+    const classes = allClasses.filter(c => !archivedIds.has(c.id));
 
     const classIds = classes.map(x => x.id);
     let events = [];
@@ -512,6 +542,8 @@ async function loadDashboard(force=false) {
     setStatus(`${label} · ${windowLabel} · refreshed ${new Date().toLocaleTimeString()}`, 'success');
   } catch (error) {
     if (!access.current()) return;
+    lastLoadedBaseId = null;
+    clearRenderedReport();
     console.error('Program Manager My Base dashboard failed', error);
     setStatus(`Dashboard load failed: ${error?.message || error}`, 'error');
   } finally {
@@ -523,16 +555,25 @@ window.addEventListener('raps-cloud-identity', () => {
   inject();
   loadGeneration++;
   setBusy(false);
-  for (const id of ['pmBaseClassTable', 'pmBaseContributors', 'pmBaseEvaluatorTable', 'pmBaseFailureModes', 'pmBaseIncompleteTable', 'pmBaseKpis']) {
-    const element = $(id);
-    if (element) element.innerHTML = '';
-  }
+  clearRenderedReport();
   setStatus('');
   const scope = $('pmBaseScope');
   if (scope) scope.textContent = '';
   lastLoadedBaseId = null;
   loadDashboard(true);
 });
+
+// A completed sync may have moved classes to/from shared Trash. Cancel older
+// report reads so they cannot put a pre-sync snapshot back on screen.
+for (const eventName of ['raps-class-sync-complete', 'raps-class-lifecycle-synced']) {
+  window.addEventListener(eventName, () => {
+    if (!isProgramManager()) return;
+    loadGeneration++;
+    lastLoadedBaseId = null;
+    setBusy(false);
+    loadDashboard(true);
+  });
+}
 
 window.addEventListener('online', () => {
   if (isProgramManager()) loadDashboard(true);
