@@ -58,6 +58,16 @@ configuration changes only signup and password-minimum settings. It backs up
 the configuration privately and recreates only Auth. It does not rerun database
 migrations or replace administrative handlers.
 
+If this helper stops during post-recreation verification, preserve its private
+`raps-auth-apply-*` directory. Auth may already be healthy with the new settings.
+Run `inspect-auth-hardening-on-nuc.sh /home/nuc/raps-auth-apply-XXXXXXXX`
+with the reported directory before retrying the installer. This read-only
+diagnostic compares the current container with the saved before/after evidence,
+checks the two settings and process health, and resolves the current Compose
+model. Its console output names differing fields and value types; private
+diagnostic files retain configuration values and must not be shared. It does
+not relax comparisons, recreate services, or roll back configuration.
+
 This verified base-only path uses the base file and a persistent
 `docker-compose.raps-web7-auth.yml` override. Future Auth recreations must retain
 both files and keep orphan removal disabled:
