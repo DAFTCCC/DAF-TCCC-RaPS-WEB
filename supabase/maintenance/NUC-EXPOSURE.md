@@ -65,7 +65,7 @@ The supplied inventories from `raps-nuc-exposure-83tab6si` and
 | Evidence | Interpretation |
 | --- | --- |
 | Router table shows TCP 80 and 443 forwarded to NUC `192.168.50.202`; DMZ off | Both web ports are configured for the gateway. Verify the HTTP-to-HTTPS redirect and outside-network reachability before changing either rule. |
-| Router table shows TCP 8443 redirected to router `192.168.50.1:8443` | This is a router entry point, separate from RaPS. ASUS commonly uses 8443 for WAN HTTPS administration; confirm the actual service and WAN-access setting. |
+| Initial router table showed TCP 8443 redirected to router `192.168.50.1:8443` | Owner confirmed WAN web administration was enabled. After disabling it, the 8443 mapping disappeared and local router access continued working. Outside-network verification remains pending. |
 | Router UPnP enabled; all pasted mappings labeled `VSERVER` | No UPnP-labeled mapping appears in the supplied table. Enabled UPnP can permit later automatic mappings. |
 | Router IPv6 connection type reported Disabled | No router IPv6 connection is configured according to the owner; the NUC summary also shows no global IPv6 address. |
 | Database/pooler host ports use `127.0.0.1`; database containers publish no ports | No direct non-loopback database publication is shown. This does not assess database access through authorized APIs. |
@@ -81,12 +81,23 @@ Two unauthenticated HTTPS metadata/health requests from the cloud assessment
 environment failed before an origin HTTP response was obtained. They do not
 verify external reachability or establish that the NUC is unavailable.
 
+## Router remediation
+
+The owner confirmed **Enable Web Access from WAN** was selected Yes while
+managing the router locally at `192.168.50.1`. They disabled it through the ASUS
+interface, accepted the warning about remote ASUS app/Alexa/IFTTT control, and
+confirmed both that the 8443 mapping disappeared and that local router access
+still worked. NUC ports 80/443 were to remain unchanged.
+
+This verifies the configuration change and local administration path. It does
+not substitute for an independent outside-network test or verify application
+health after the change.
+
 Outstanding assessment steps:
 
-1. Inspect **Administration → System → Remote Access Config → Enable Web Access
-   from WAN**, including its HTTPS port, to identify the router's 8443 rule.
-   Before disabling WAN administration, confirm a working local router login
-   and whether remote administration is required. Preserve LAN administration.
+1. Verify that router administration on public port 8443 no longer responds
+   from outside the LAN, while the intended HTTPS API still works without
+   bypassing TLS verification. Do not supply router credentials in this test.
 2. Verify the web gateway from an independent network, including HTTP-to-HTTPS
    redirection and unauthenticated administration-route blocking. A local
    loopback or same-Wi-Fi test is insufficient. Preserve NUC ports 80/443 while
@@ -96,5 +107,8 @@ Outstanding assessment steps:
    disabling password login. Preserve a private recovery path.
 4. Reduce confirmed unnecessary exposure with narrowly scoped rules, account
    for Docker forwarding separately, and verify both RaPS and FieldReady health.
+5. Review whether enabled UPnP is needed; it can permit future automatic
+   mappings even though none were labeled UPnP in the supplied snapshot.
 
-No remediation or application change has been applied by this assessment.
+The owner applied the router WAN-administration change. No NUC service,
+firewall, account, or application change has been applied by this assessment.
