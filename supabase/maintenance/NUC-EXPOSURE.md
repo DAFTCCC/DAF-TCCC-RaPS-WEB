@@ -64,7 +64,7 @@ The supplied inventories from `raps-nuc-exposure-83tab6si` and
 
 | Evidence | Interpretation |
 | --- | --- |
-| Router table shows TCP 80 and 443 forwarded to NUC `192.168.50.202`; DMZ off | Both web ports are configured for the gateway. Verify the HTTP-to-HTTPS redirect and outside-network reachability before changing either rule. |
+| Router table shows TCP 80 and 443 forwarded to NUC `192.168.50.202`; DMZ off | Both web ports are configured for the gateway. Owner-reported external HTTPS checks passed, and the local HTTP gateway returned the expected HTTPS redirect. |
 | Initial router table showed TCP 8443 redirected to router `192.168.50.1:8443` | Owner disabled WAN web administration; the mapping disappeared, local router access continued, and the owner reported the public 8443 connection test failed as expected. |
 | Router UPnP enabled; all pasted mappings labeled `VSERVER` | No UPnP-labeled mapping appears in the supplied table. Enabled UPnP can permit later automatic mappings. |
 | Router IPv6 connection type reported Disabled | No router IPv6 connection is configured according to the owner; the NUC summary also shows no global IPv6 address. |
@@ -101,17 +101,26 @@ These are owner-reported checks from outside the LAN. They verify the tested
 gateway behavior after the router change, not an exhaustive port scan or a
 complete authenticated RaPS/FieldReady workflow.
 
-Outstanding assessment steps:
+The subsequent credential-free HTTP check, resolved to the local gateway for
+the same hostname, returned HTTP **308** with a redirect to the expected HTTPS
+host on its default/443 port. The checker rejected credentials in the redirect
+URL and printed no response body or complete redirect URL. This verifies local
+gateway HTTP behavior; the outside-network tests above used HTTPS.
 
-1. Verify the gateway's HTTP-to-HTTPS redirect, since TCP 80 is also forwarded.
-   The completed outside-network checks used HTTPS. Preserve NUC ports 80/443
-   while reviewing redirect and certificate-renewal dependencies.
-2. Confirm whether Samba is needed and how administrators access the NUC before
+The targeted gateway assessment is complete: the identified router WAN
+administration entry was removed, local router access was preserved, the
+intended public HTTPS catalog works, the tested administration route rejects
+unauthenticated access, and HTTP redirects to HTTPS. This is not an exhaustive
+port scan or a penetration test.
+
+Remaining host/network hardening work:
+
+1. Confirm whether Samba is needed and how administrators access the NUC before
    preparing host restrictions. Test a separate SSH key-only connection before
    disabling password login. Preserve a private recovery path.
-3. Reduce confirmed unnecessary exposure with narrowly scoped rules, account
+2. Reduce confirmed unnecessary exposure with narrowly scoped rules, account
    for Docker forwarding separately, and verify both RaPS and FieldReady health.
-4. Review whether enabled UPnP is needed; it can permit future automatic
+3. Review whether enabled UPnP is needed; it can permit future automatic
    mappings even though none were labeled UPnP in the supplied snapshot.
 
 The owner applied the router WAN-administration change. No NUC service,
