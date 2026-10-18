@@ -65,7 +65,7 @@ The supplied inventories from `raps-nuc-exposure-83tab6si` and
 | Evidence | Interpretation |
 | --- | --- |
 | Router table shows TCP 80 and 443 forwarded to NUC `192.168.50.202`; DMZ off | Both web ports are configured for the gateway. Verify the HTTP-to-HTTPS redirect and outside-network reachability before changing either rule. |
-| Initial router table showed TCP 8443 redirected to router `192.168.50.1:8443` | Owner confirmed WAN web administration was enabled. After disabling it, the 8443 mapping disappeared and local router access continued working. Outside-network verification remains pending. |
+| Initial router table showed TCP 8443 redirected to router `192.168.50.1:8443` | Owner disabled WAN web administration; the mapping disappeared, local router access continued, and the owner reported the public 8443 connection test failed as expected. |
 | Router UPnP enabled; all pasted mappings labeled `VSERVER` | No UPnP-labeled mapping appears in the supplied table. Enabled UPnP can permit later automatic mappings. |
 | Router IPv6 connection type reported Disabled | No router IPv6 connection is configured according to the owner; the NUC summary also shows no global IPv6 address. |
 | Database/pooler host ports use `127.0.0.1`; database containers publish no ports | No direct non-loopback database publication is shown. This does not assess database access through authorized APIs. |
@@ -89,25 +89,29 @@ interface, accepted the warning about remote ASUS app/Alexa/IFTTT control, and
 confirmed both that the 8443 mapping disappeared and that local router access
 still worked. NUC ports 80/443 were to remain unchanged.
 
-This verifies the configuration change and local administration path. It does
-not substitute for an independent outside-network test or verify application
-health after the change.
+The owner then reported all three requested mobile-data/private-browser checks
+matched the expected results:
+
+- `https://raps-supabase.asuscomm.com:8443` failed to connect.
+- `/functions/v1/request-access` returned the public bases/MAJCOMs catalog.
+- `/pg/version` required credentials or returned Unauthorized; the test did not
+  require a router or application login.
+
+These are owner-reported checks from outside the LAN. They verify the tested
+gateway behavior after the router change, not an exhaustive port scan or a
+complete authenticated RaPS/FieldReady workflow.
 
 Outstanding assessment steps:
 
-1. Verify that router administration on public port 8443 no longer responds
-   from outside the LAN, while the intended HTTPS API still works without
-   bypassing TLS verification. Do not supply router credentials in this test.
-2. Verify the web gateway from an independent network, including HTTP-to-HTTPS
-   redirection and unauthenticated administration-route blocking. A local
-   loopback or same-Wi-Fi test is insufficient. Preserve NUC ports 80/443 while
-   reviewing redirect and certificate-renewal dependencies.
-3. Confirm whether Samba is needed and how administrators access the NUC before
+1. Verify the gateway's HTTP-to-HTTPS redirect, since TCP 80 is also forwarded.
+   The completed outside-network checks used HTTPS. Preserve NUC ports 80/443
+   while reviewing redirect and certificate-renewal dependencies.
+2. Confirm whether Samba is needed and how administrators access the NUC before
    preparing host restrictions. Test a separate SSH key-only connection before
    disabling password login. Preserve a private recovery path.
-4. Reduce confirmed unnecessary exposure with narrowly scoped rules, account
+3. Reduce confirmed unnecessary exposure with narrowly scoped rules, account
    for Docker forwarding separately, and verify both RaPS and FieldReady health.
-5. Review whether enabled UPnP is needed; it can permit future automatic
+4. Review whether enabled UPnP is needed; it can permit future automatic
    mappings even though none were labeled UPnP in the supplied snapshot.
 
 The owner applied the router WAN-administration change. No NUC service,
