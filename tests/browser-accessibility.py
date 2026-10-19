@@ -77,14 +77,16 @@ def main():
         assert page.evaluate('window.__rapsTest.state().ratings')[criterion] == 'pass'
         checks.append('keyboard grading retains focus on the replacement criterion control')
 
-        phase = page.locator('[data-section]').nth(1)
+        phase = page.locator('#tabs [data-section]').nth(1)
         section = phase.get_attribute('data-section')
         phase.focus()
         phase.press('Enter')
-        expect(page.locator(f'[data-section="{section}"]')).to_be_focused()
-        expect(page.locator(f'[data-section="{section}"]')).to_have_attribute('aria-pressed', 'true')
-        assert page.locator('[data-section][aria-pressed="true"]').count() == 1
-        checks.append('phase selection exposes its state and preserves keyboard focus')
+        expect(page.locator(f'#tabs [data-section="{section}"]')).to_be_focused()
+        expect(page.locator(f'#tabs [data-section="{section}"]')).to_have_attribute('aria-pressed', 'true')
+        expect(page.locator(f'#bottomTabs [data-section="{section}"]')).to_have_attribute('aria-pressed', 'true')
+        assert page.locator('#tabs [data-section][aria-pressed="true"]').count() == 1
+        assert page.locator('#bottomTabs [data-section][aria-pressed="true"]').count() == 1
+        checks.append('both phase selectors expose their state and top selection preserves keyboard focus')
 
         page.locator('#reviewModeBtn').click()
         for name, target in [('Evaluator name', 'trainerSign'), ('Evaluator ID', 'attemptEvaluatorId'),

@@ -18,6 +18,7 @@ bash tests/test-majcom-permissions.sh
 bash tests/class-create-permissions.sh
 python3 tests/test_reporting_archive_worker.py
 python3 tests/browser-workflow.py
+python3 tests/browser-phase-navigation.py
 python3 tests/browser-responsive.py
 python3 tests/browser-accessibility.py
 python3 tests/browser-auth-layout.py
@@ -33,6 +34,13 @@ The responsive suite measures phone, tablet, desktop, and short landscape layout
 The accessibility suite exercises real application dialogs and their interaction with the actual authentication gate: persistent labels, descriptive control names, keyboard focus after rerendering, Tab containment, Escape behavior, and background isolation. The authentication layout suite renders the actual account screens with a synthetic SDK/catalog. The authentication flow suite exercises recovery, verified invitation links, signed-in password changes, and error paths against an isolated fake Auth service. All requests are intercepted; no account is created and no email or production request is sent. Browser checks save their reports and screenshots under `/tmp/raps-*`.
 
 Automated browser checks use Chromium and synthetic data. They verify responsive layout, not physical iOS/Android font rendering, virtual-keyboard behavior, or field usability with gloves. Include those checks in the device pilot described below.
+
+The phase-navigation check exercises the complete section list in all four
+courses, including COM/DOC/EVAC, from the fixed bottom bar. It verifies jump
+positions with pinned timers, horizontal scrolling/focus, finalized read-only
+navigation, footer space, and a usable STOP control on short landscape screens.
+Navigation selects a section of the existing class curriculum; it does not
+switch an active assessment to another course.
 
 The policy tests compare against the pre-change commit `be124a1d36af411ea4676eba283eb1b3b762cd14`. They protect the exact tier definitions and existing grading, timing, and authoritative lifecycle functions. Keep this reference fixed when testing this change. Any future standards update requires a separately reviewed baseline.
 
