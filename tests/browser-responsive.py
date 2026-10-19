@@ -107,10 +107,10 @@ MEASURE = r"""() => {
 }"""
 
 STICKY_SPACE = r"""() => {
-  const header=document.querySelector('#evalHeader'),timer=document.querySelector('#activeTimersCard');
+  const header=document.querySelector('#evalHeader'),timer=document.querySelector('#activeTimersCard'),nav=document.querySelector('#evalPhaseNav');
   const hb=header.getBoundingClientRect(),tb=timer.getBoundingClientRect();
   const pinnedBottom=e=>{const r=e.getBoundingClientRect(),p=getComputedStyle(e).position;return ['sticky','fixed'].includes(p)&&r.bottom>0&&r.top<innerHeight?r.bottom:0;};
-  return {headerPosition:getComputedStyle(header).position,headerBottom:hb.bottom,timerPosition:getComputedStyle(timer).position,timerTop:tb.top,timerBottom:tb.bottom,assessmentSpace:innerHeight-Math.max(pinnedBottom(header),pinnedBottom(timer),0)};
+  return {headerPosition:getComputedStyle(header).position,headerBottom:hb.bottom,timerPosition:getComputedStyle(timer).position,timerTop:tb.top,timerBottom:tb.bottom,navTop:nav.getBoundingClientRect().top,assessmentSpace:Math.min(innerHeight,nav.getBoundingClientRect().top)-Math.max(pinnedBottom(header),pinnedBottom(timer),0)};
 }"""
 
 
@@ -185,7 +185,8 @@ def main():
                     page.locator('#nextUnresolvedBtn').evaluate('e=>e.click()')
                     page.wait_for_timeout(750)
                     result['navigationTarget']=page.evaluate("""() => {
-                      const target=document.querySelector('.unresolvedFocus'),first=target?.querySelector('.choice:not(:disabled)');
+                      // The highlight is transient; keyboard focus remains on the actual target.
+                      const target=document.querySelector('.unresolvedFocus')||document.activeElement?.closest('#items .item'),first=target?.querySelector('.choice:not(:disabled)');
                       const header=document.querySelector('#evalHeader').getBoundingClientRect(),timer=document.querySelector('#activeTimersCard').getBoundingClientRect();
                       return {targetTop:target?.getBoundingClientRect().top,gradeTop:first?.getBoundingClientRect().top,obstructionBottom:Math.max(header.bottom,timer.bottom),gradeFocused:document.activeElement===first};
                     }""")
@@ -228,7 +229,7 @@ def main():
         minimum_fonts={'.itemText':16,'.rowTitle':14,'#studentLabel':12,'.formGrid label':12,'.choice':14,'.modeSegment':12,'.helper':12}
         assert all(size is None or size>=minimum_fonts[selector]*r['textScale'] for r in records for selector,size in r['fonts'].items()), 'Operational text falls below its readable minimum size'
         assert all(r.get('stickySpace',{}).get('assessmentSpace',160)>=min(160,r['viewport'][1]*.4) for r in records), 'Sticky controls leave too little room for assessment; see report.json'
-        assert all(r['navigationTarget']['targetTop']>=r['navigationTarget']['obstructionBottom']-1 and r['navigationTarget']['gradeFocused'] for r in records if 'navigationTarget' in r), 'Next Unresolved hides the target behind pinned controls or fails to focus its grade'
+        assert all(r['navigationTarget']['targetTop'] is not None and r['navigationTarget']['targetTop']>=r['navigationTarget']['obstructionBottom']-1 and r['navigationTarget']['gradeFocused'] for r in records if 'navigationTarget' in r), 'Next Unresolved hides the target behind pinned controls or fails to focus its grade'
         assert all(r['rosterShortcut']['focused'] and r['rosterShortcut']['searchTop']>=r['rosterShortcut']['headerBottom'] for r in records if 'rosterShortcut' in r), 'Roster shortcut fails to focus search below the sticky class header'
         assert all(r.get('escapeCloses',True) for r in records), 'Escape did not close modal'
 

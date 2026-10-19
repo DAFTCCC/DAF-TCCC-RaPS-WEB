@@ -1596,7 +1596,34 @@ function sectionTabLabel(code){
 }
 function renderTabs(){
   const t=tier(),st=evalState();
-  $('tabs').innerHTML=t.sections.map(s=>`<button type="button" class="tab ${s.code===st.section?'active':''} ${sectionStatus(s)}" data-section="${esc(s.code)}" aria-pressed="${s.code===st.section}" aria-label="${esc(s.code)} — ${esc(s.title)}">${esc(sectionTabLabel(s.code))}</button>`).join('');
+  const markup=t.sections.map(s=>`<button type="button" class="tab ${s.code===st.section?'active':''} ${sectionStatus(s)}" data-section="${esc(s.code)}" aria-pressed="${s.code===st.section}" aria-label="${esc(s.code)} — ${esc(s.title)}">${esc(sectionTabLabel(s.code))}</button>`).join('');
+  for(const id of ['tabs','bottomTabs']){
+    const bar=$(id);if(!bar)continue;
+    const offset=bar.scrollLeft;
+    bar.innerHTML=markup;bar.scrollLeft=offset;
+    const active=bar.querySelector('.active');
+    if(active){
+      const bounds=bar.getBoundingClientRect(),button=active.getBoundingClientRect();
+      if(button.left<bounds.left)bar.scrollLeft+=button.left-bounds.left-8;
+      else if(button.right>bounds.right)bar.scrollLeft+=button.right-bounds.right+8;
+    }
+  }
+  if($('evalPhaseCourse')){$('evalPhaseCourse').textContent=t.shortName;$('evalPhaseCourse').title=`Tier ${t.id} — ${t.name}`;}
+}
+function navigateEvaluationSection(code,{jump=false}={}){
+  const st=evalState();if(!st||!tier()?.sections.some(s=>s.code===code))return;
+  st.section=code;if(canEditCurrentEvaluation())saveDb();renderEval();
+  if(jump)requestAnimationFrame(()=>{
+    const target=document.querySelector('#items .item:not(.hiddenNt)')||$('sectionTitle');
+    if(!target||!evalVisible())return;
+    updateEvalHeaderCollapse();
+    // The jump can pin a timer dock that is still in normal flow now. Reserve
+    // its full sticky height so the new phase cannot land underneath it.
+    const sticky=evaluationStickyMetrics();
+    const top=window.scrollY+target.getBoundingClientRect().top-Math.max(sticky.height,sticky.unobstructedTop)-12;
+    window.scrollTo({top:Math.max(0,top),behavior:'instant'});
+    updateEvalHeaderCollapse();
+  });
 }
 function renderSection(){
   const t=tier(),st=evalState(),sec=t.sections.find(s=>s.code===st.section)||t.sections[0]; st.section=sec.code;
@@ -2459,7 +2486,7 @@ function setupNativeBackButton(){
 
 // ---------- Bindings ----------
 function bindEvalDynamic(){
-  document.querySelectorAll('[data-section]').forEach(b=>b.onclick=()=>{const st=evalState();st.section=b.dataset.section;if(canEditCurrentEvaluation())saveDb();renderEval();});
+  document.querySelectorAll('[data-section]').forEach(b=>b.onclick=()=>navigateEvaluationSection(b.dataset.section,{jump:!!b.closest('#bottomTabs')}));
   document.querySelectorAll('[data-item]').forEach(b=>b.onclick=guardEvaluationEdit(()=>setRating(b.dataset.item,b.dataset.rating,'explicit')));
   document.querySelectorAll('[data-note]').forEach(n=>n.oninput=guardEvaluationEdit(()=>{const st=evalState();st.notes[n.dataset.note]=n.value;saveDb();}));
   document.querySelectorAll('[data-note-toggle]').forEach(b=>b.onclick=guardEvaluationEdit(()=>{const st=evalState();st.noteOpen=st.noteOpen||{};st.noteOpen[b.dataset.noteToggle]=!st.noteOpen[b.dataset.noteToggle];saveDb();renderSection();bindEvalDynamic();setReadOnly(!canEditCurrentEvaluation());setTimeout(()=>[...document.querySelectorAll('[data-note]')].find(n=>n.dataset.note===b.dataset.noteToggle)?.focus(),0);}));
@@ -2538,6 +2565,8 @@ function updateEvalHeaderCollapse(){
     if(document.documentElement.style.getPropertyValue('--eval-header-height')!==height)document.documentElement.style.setProperty('--eval-header-height',height);
     const stickyHeight=`${Math.ceil(evaluationStickyMetrics().height)}px`;
     if(document.documentElement.style.getPropertyValue('--eval-sticky-height')!==stickyHeight)document.documentElement.style.setProperty('--eval-sticky-height',stickyHeight);
+    const navHeight=`${Math.ceil($('evalPhaseNav')?.getBoundingClientRect().height||0)}px`;
+    if(document.documentElement.style.getPropertyValue('--eval-nav-height')!==navHeight)document.documentElement.style.setProperty('--eval-nav-height',navHeight);
   }
 }
 window.addEventListener('scroll',updateEvalHeaderCollapse,{passive:true});
@@ -2683,7 +2712,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.9';
+  const UPDATE_BUILD = '3.4.12-web.10';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 

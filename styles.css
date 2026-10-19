@@ -911,3 +911,24 @@ textarea#overallNotes{width:calc(100% - 24px);font-size:var(--font-body);line-he
 .adminCredentialDialog label{display:grid;gap:6px;margin:14px 0;font-size:14px;font-weight:800}
 .adminCredentialDialog input{width:100%;min-width:0;min-height:44px;padding:10px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:7px;font-family:ui-monospace,monospace}
 .adminCredentialDialog .adminActions{display:flex;gap:10px;flex-wrap:wrap;padding:8px 0 0}
+
+/* Every course keeps its full phase list within reach during observation. */
+.evalPhaseNav{
+  position:fixed;bottom:0;left:50%;transform:translateX(-50%);z-index:25;
+  display:flex;align-items:center;gap:8px;width:min(100%,930px);
+  padding:6px max(10px,env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));
+  background:var(--card);color:var(--text);border:1px solid var(--line);
+  border-radius:12px 12px 0 0;box-shadow:0 -4px 16px #0004;
+}
+.evalPhaseCourse{flex:0 0 auto;font-size:var(--font-label);font-weight:900}
+#bottomTabs{flex:1;min-width:0;padding:2px;gap:6px;overscroll-behavior-inline:contain}
+#bottomTabs .tab{min-height:44px;min-width:44px;padding:8px 12px;touch-action:manipulation}
+#evalView .evalMain{padding-bottom:calc(var(--eval-nav-height,72px) + 24px)}
+#evalView .item{scroll-margin-bottom:calc(var(--eval-nav-height,72px) + 12px)}
+@media(max-height:560px) and (min-width:480px){
+  #activeTimersCard .cardHead{display:none}
+  #activeTimers{padding:2px 8px}
+  #activeTimers .activeTimerRow{min-height:48px;padding:2px;gap:8px}
+  #activeTimers .activeTimerStop{min-height:44px;padding:8px 12px}
+  #activeTimersCard:not(.hidden){max-height:max(56px,calc(100dvh - var(--eval-header-height,195px) - var(--eval-nav-height,72px) - 168px))}
+}

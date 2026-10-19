@@ -1,4 +1,11 @@
-# DAF-TCCC-WEB — v3.4.12-web.9
+# DAF-TCCC-WEB — v3.4.12-web.10
+
+Web.10 adds a persistent bottom phase bar in every ASM, CLS, CMC, and CPP
+assessment. It repeats the course's full section list, including COM, DOC and
+EVAC, highlights the current phase, and opens the selected checklist below the
+sticky timers. Swipe the bar horizontally on small screens. The class's course,
+grading and timer rules remain unchanged. Publish through the normal GitHub
+Pages frontend update; no NUC changes are required.
 
 Web.9 fixes first class upload/assessment startup when the database's restrictive
 read policy cannot see the new row during `INSERT ... RETURNING`. The browser
