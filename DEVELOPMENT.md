@@ -84,7 +84,7 @@ for the separate NUC rollout and real-account checks.
 
 - OBSERVE records an explicit PASS or FAIL immediately. Mark moment saves a diagnostic flag without selecting a grade or changing the denominator.
 - Undo corrects the latest observation with an audit event. It cannot restore a result that conflicts with a subsequently triggered timing rule, an initiated linked timer, or a finalized record.
-- REVIEW provides assistance markers, evidence, learner explanation, contributor hypotheses and confidence, related-episode labels, targeted practice, and coaching follow-up dates/outcomes.
+- REVIEW provides assistance markers, evidence, learner explanation, contributor hypotheses and confidence, related-episode labels, targeted practice, and coaching follow-up outcomes. The coaching form does not request reassessment or retention date/time values; previously saved date metadata is preserved.
 - Partial diagnostic notes can be saved. Existing critical-failure classification and official finalization requirements remain in force.
 - Official criterion text, critical designations, scoring thresholds, NT behavior, timing standards, and server claim/finalize/void rules are unchanged.
 - Coaching outcomes are supplemental; recording independent practice does not change an official result. A new formal assessment follows the existing attempt rules.
