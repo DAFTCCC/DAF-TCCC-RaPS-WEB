@@ -80,19 +80,9 @@ function selectedMajcomId() {
   return byId('enterpriseMajcomFilter')?.value || '';
 }
 
-function isTestMajcom(majcom) {
-  return String(majcom?.code || '').toUpperCase() === 'TEST';
-}
-
-// TEST has its own installations and reports. The default enterprise view
-// describes live activity; selecting TEST uses the same reporting path.
 function majcomInScope(majcomId) {
   const selected = selectedMajcomId();
-  return selected ? majcomId === selected
-    : !raw?.majcoms.some(majcom => majcom.id === majcomId && isTestMajcom(majcom))
-      // An inactive TEST command is absent from the active command catalog.
-      // Its reserved installation codes still identify retained practice data.
-      && !raw?.bases.some(base => base.majcom_id === majcomId && String(base.code || '').toUpperCase().startsWith('TEST-'));
+  return !selected || majcomId === selected;
 }
 
 function selectedBaseId() {
@@ -145,7 +135,7 @@ function inject() {
       '<span>Enterprise Operations</span>',
       '<span>Enterprise Admin · Global RaPS View</span>',
     '</div>',
-    '<p class="helper">Enterprise-wide cloud view across all cataloged MAJCOMs and installations. All live MAJCOMs excludes TEST practice data; select TEST to view its practice installations and reports. Filters change the analytical view only; Supabase Row Level Security remains the authorization boundary.</p>',
+    '<p class="helper">Enterprise-wide cloud view across all cataloged MAJCOMs and installations. Filters change the analytical view only; Supabase Row Level Security remains the authorization boundary.</p>',
     '<p class="helper">Removing a local copy keeps the server record in these reports. Shared Enterprise Trash and verified NUC CSV archives are excluded. Pending or failed CSV archives remain counted; closed classes remain as training history.</p>',
 
     '<div class="enterpriseToolbar">',
@@ -155,7 +145,7 @@ function inject() {
         '<option value="365">Last 12 months</option>',
         '<option value="0">All available</option>',
       '</select></label>',
-      '<label><span>MAJCOM</span><select id="enterpriseMajcomFilter"><option value="">All live MAJCOMs</option></select></label>',
+      '<label><span>MAJCOM</span><select id="enterpriseMajcomFilter"><option value="">All MAJCOMs</option></select></label>',
       '<label><span>Installation</span><select id="enterpriseBaseFilter"><option value="">All installations</option></select></label>',
       '<label><span>Course</span><select id="enterpriseCourseFilter">',
         '<option value="">All courses</option>',
@@ -352,7 +342,7 @@ function refreshFilterOptions() {
 
   if (majcomSelect) {
     majcomSelect.innerHTML =
-      '<option value="">All live MAJCOMs</option>' +
+      '<option value="">All MAJCOMs</option>' +
       raw.majcoms.map((m) =>
         '<option value="' + esc(m.id) + '">' +
         esc(m.code || m.name) + ' · ' + esc(m.name) +
@@ -1121,8 +1111,7 @@ function render() {
       : 'last ' + selectedDays() + ' days';
 
   const scope = [
-    majcom ? (majcom.code || majcom.name) : 'All live MAJCOMs',
-    isTestMajcom(majcom) ? 'Practice data' : null,
+    majcom ? (majcom.code || majcom.name) : 'All MAJCOMs',
     base ? (base.code || base.name) : null,
     selectedCourse() || null,
     windowText

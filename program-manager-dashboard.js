@@ -36,9 +36,7 @@ function dashboardRequest() {
 
 function baseLabel() {
   const m = membership();
-  const label = m?.bases?.code || m?.bases?.name || 'Assigned base';
-  return String(m?.bases?.code || '').toUpperCase().startsWith('TEST-')
-    ? label + ' · TEST practice data' : label;
+  return m?.bases?.code || m?.bases?.name || 'Assigned base';
 }
 function humanize(value) {
   if (!value) return 'Unclassified';

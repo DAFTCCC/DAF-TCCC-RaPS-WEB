@@ -1,0 +1,12 @@
+check_id,check,owner_role,status,evidence,checked_at,follow_up
+R01,Matching source merged,Pilot owner,Verified in Git,Main merge 104aaae9031cbe4c361022ebd380ff169bfca2c9,,Confirm release on devices separately
+R02,Web.8 NUC backend,NUC owner,Verified from supplied rollout log,Backend 8a9d138; legacy duplicate TEST catalog retained,,Web.9 does not migrate deployed records
+R03,Actual device/PWA version web.9,Site PM,Not yet verified,,,Check every participating device
+R04,Real username setup/reset/old-session scope,Enterprise owner,Not yet verified,,,Use a real pilot account on a second device
+R05,Known case two-device sync/final result/reports,SME + Site PM,Not yet verified,,,Allow time for existing requirements
+R06,Physical-device outage/timer recovery,Site PM,Pilot evidence required,,,Capture device and local/cloud state
+R07,Existing automatic closed-class retention,NUC owner,Not yet verified,,,Inspect an actual closed TEST class archive
+R08,Selected-class reporting CSV archive,NUC owner,Not yet verified,,,Verify selected TEST files and completion proof
+R09,Off-NUC backup and isolated restore,NUC owner,Not yet verified,,,Before meaningful record retention or expansion
+R10,Support route / nominees / dates,Pilot owner,To assign,,,Complete before briefing the cohort
+R11,Reported assessment-start failure,Pilot owner,Local fix; deployed retest pending,Shared regular/TEST INSERT RETURNING failure reproduced; protected insert/read fix,,Publish web.9 and retry the reported class before cohort launch

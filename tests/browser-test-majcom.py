@@ -30,16 +30,25 @@ window.__testMajcom = {
     newClassForm(c);
   },
   csv(id){return classLocationExportValues(db.classes.find(c=>c.id===id));},
+  legacy(){
+    const c=deep(db.classes[0]);c.id='legacy-test-class';c.majcom='TEST';
+    c.homeInstallationId='TEST-BEALE';c.homeInstallationName='';
+    c.trainingLocationType='SAME_AS_HOME';c.trainingInstallationId='TEST-BEALE';c.trainingLocationName='';
+    ensureLocationFields(c);db.classes.push(c);return c.id;
+  },
   permissions(id){
     const c=db.classes.find(row=>row.id===id),userId=currentCloudUserId();
+    c.cloudScope={baseId:'physical-base',baseCode:'BEALE',majcomId:'host-command'};
     window.RAPS_CLOUD={user:{id:userId},connected:true,offlineCached:false,
-      memberships:[{id:'test-pm',user_id:userId,role:'program_manager',active:true,
-        base_id:'synthetic-test-base',majcom_id:null,bases:{id:'synthetic-test-base',code:'TEST-BEALE',
-          majcom_id:'synthetic-test-command',active:true,majcoms:{active:true}}}]};
-    window.RAPS_PERMISSIONS.registerBases([{id:'synthetic-test-base',code:'TEST-BEALE',majcom_id:'synthetic-test-command',active:true},
-      {id:'synthetic-live-base',code:'BEALE',majcom_id:'synthetic-live-command',active:true}]);
+      memberships:[{id:'ordinary-pm',user_id:userId,role:'program_manager',active:true,
+        base_id:'physical-base',majcom_id:null,bases:{id:'physical-base',code:'BEALE',
+          majcom_id:'host-command',active:true,majcoms:{active:true}}}]};
+    window.RAPS_PERMISSIONS.registerBases([{id:'physical-base',code:'BEALE',majcom_id:'host-command',active:true},
+      {id:'other-base',code:'EDWARDS',majcom_id:'other-command',active:true}]);
     return {own:window.RAPS_PERMISSIONS.canClass('manageClass',c),
-      live:window.RAPS_PERMISSIONS.canClass('manageClass',{...c,homeInstallationId:'BEALE',cloudScope:undefined})};
+      other:window.RAPS_PERMISSIONS.canClass('manageClass',{...c,homeInstallationId:'EDWARDS',
+        cloudScope:{baseId:'other-base',baseCode:'EDWARDS',majcomId:'other-command'},
+        cloudSync:{createdBy:'someone-else'}})};
   },
   infer:inferInstallationId
 };
@@ -103,24 +112,23 @@ def main():
         checks.append('live Show all keeps every real installation and excludes TEST copies')
 
         command.select_option('TEST')
-        expect(show_all).to_be_disabled()
-        assert home.locator('option').count() == 74  # 73 TEST, empty
-        assert home.locator('option[value^="TEST-"]').count() == 73
-        assert home.locator('option[value="__OTHER__"]').count() == 0
-        assert training.locator('option[value^="TEST-"]').count() == 73
-        assert training.locator('option[value="BEALE"]').count() == 0
-        home.select_option('TEST-BEALE')
-        expect(home.locator('option:checked')).to_contain_text('Beale AFB (TEST)')
-        checks.append('TEST switches both location lists to all 73 separate TEST installations')
+        expect(show_all).to_be_enabled()
+        assert home.locator('option').count() == 75
+        assert home.locator('option[value^="TEST-"]').count() == 0
+        assert home.locator('option[value="__OTHER__"]').count() == 1
+        assert training.locator('option[value^="TEST-"]').count() == 0
+        assert training.locator('option[value="BEALE"]').count() == 1
+        home.select_option('BEALE')
+        expect(home.locator('option:checked')).to_contain_text('Beale AFB')
+        checks.append('TEST uses the same 73 physical installations and custom-location choices')
 
         command.select_option('ACC')
         expect(show_all).to_be_enabled()
-        expect(home).to_have_value('')
-        assert home.locator('option[value^="TEST-"]').count() == 0
-        checks.append('switching from TEST clears the TEST choice before a live class can be saved')
-
+        expect(home).to_have_value('BEALE')
         command.select_option('TEST')
-        home.select_option('TEST-BEALE')
+        expect(home).to_have_value('BEALE')
+        checks.append('switching supported command preserves an ordinary installation')
+
         page.locator('#classForm [name="name"]').fill('Synthetic TEST Class')
         page.locator('#classForm button[type="submit"]').click()
         expect(page.locator('#formModal')).not_to_have_class('modal open')
@@ -128,36 +136,44 @@ def main():
         assert len(records) == 1
         course = records[0]
         assert course['majcom'] == 'TEST'
-        assert course['homeInstallationId'] == 'TEST-BEALE'
-        assert course['homeInstallationName'] == 'Beale AFB (TEST)'
-        assert course['trainingInstallationId'] == 'TEST-BEALE'
+        assert course['homeInstallationId'] == 'BEALE'
+        assert course['homeInstallationName'] == 'Beale AFB'
+        assert course['trainingInstallationId'] == 'BEALE'
         assert page.evaluate('(id)=>window.__testMajcom.csv(id)', course['id'])[:5] == [
-            'ACTIVE_DUTY', 'TEST', 'TEST-BEALE', 'Beale AFB (TEST)', 'TEST']
-        checks.append('saving and CSV export retain distinct TEST IDs and visible TEST labels')
+            'ACTIVE_DUTY', 'TEST', 'BEALE', 'Beale AFB', 'ACC']
+        checks.append('TEST creation and export preserve ordinary installation IDs and host command')
 
         page.evaluate('(id)=>window.__testMajcom.edit(id,true)', course['id'])
         expect(home).to_be_disabled()
-        assert command.locator('option[value="ACC"]').evaluate('(option)=>option.disabled')
-        assert not command.locator('option[value="TEST"]').evaluate('(option)=>option.disabled')
-        page.evaluate('''()=>{
-          const f=document.getElementById('classForm');
-          f.elements.majcom.value='ACC';
-          f.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
-        }''')
-        assert alerts and 'TEST installations require the TEST MAJCOM' in alerts[-1]
-        assert page.evaluate('window.__testMajcom.records()')[0]['majcom'] == 'TEST'
-        checks.append('published TEST scope remains locked and rejects a tampered live command')
+        assert not command.locator('option[value="ACC"]').evaluate('(option)=>option.disabled')
+        command.select_option('ACC')
+        page.locator('#classForm button[type="submit"]').click()
+        edited = page.evaluate('window.__testMajcom.records()')[0]
+        assert edited['majcom'] == 'ACC' and edited['homeInstallationId'] == 'BEALE'
+        checks.append('published home stays locked while supported MAJCOM follows normal editing')
+
+        legacy_id = page.evaluate('window.__testMajcom.legacy()')
+        page.evaluate('(id)=>window.__testMajcom.edit(id,true)', legacy_id)
+        expect(home).to_be_disabled()
+        expect(home).to_have_value('TEST-BEALE')
+        assert home.locator('option[value^="TEST-"]').count() == 1
+        page.locator('#classForm [name="name"]').fill('Retained legacy record')
+        page.locator('#classForm button[type="submit"]').click()
+        legacy_record = next(row for row in page.evaluate('window.__testMajcom.records()') if row['id'] == legacy_id)
+        assert legacy_record['homeInstallationId'] == 'TEST-BEALE'
+        assert legacy_record['name'] == 'Retained legacy record'
+        checks.append('legacy records stay editable without silently changing scope')
 
         result = page.evaluate('(id)=>window.__testMajcom.permissions(id)', course['id'])
-        assert result == {'own': True, 'live': False}
+        assert result == {'own': True, 'other': False}
         assert page.evaluate('window.__testMajcom.infer("Beale AFB")') == 'BEALE'
         assert page.evaluate('window.__testMajcom.infer("Beale AFB (TEST)")') == 'TEST-BEALE'
-        checks.append('ordinary TEST Program Manager manages its TEST installation without a live scope grant')
+        checks.append('supported TEST label grants no access beyond assigned installation')
 
         page.set_viewport_size({'width': 320, 'height': 640})
         page.evaluate('window.__testMajcom.openNew()')
         command.select_option('TEST')
-        longest = home.locator('option[value^="TEST-"]').evaluate_all(
+        longest = home.locator('option[value]:not([value=""]):not([value="__OTHER__"])').evaluate_all(
             '(options)=>options.sort((a,b)=>b.textContent.length-a.textContent.length)[0].value')
         home.select_option(longest)
         for selector in ['#formModal .sheet', '#classForm', '#classForm [name="majcom"]', '#classForm [name="homeInstallationId"]']:

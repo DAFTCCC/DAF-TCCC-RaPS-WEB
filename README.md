@@ -1,4 +1,13 @@
-# DAF-TCCC-WEB — v3.4.12-web.8
+# DAF-TCCC-WEB — v3.4.12-web.9
+
+Web.9 fixes first class upload/assessment startup when the database's restrictive
+read policy cannot see the new row during `INSERT ... RETURNING`. The browser
+inserts and verifies the saved revision in separate authenticated requests;
+existing permission rules remain in force. See [web.9 publication and retest](WEB9-DEPLOYMENT.md).
+
+Use the [instructor break-it beta kit](briefing/field-beta/README.md) for the
+leadership presentation, hands-on challenges and feedback forms. Complete the
+owner's deployed start/sync check before inviting the instructor cohort.
 
 Evaluator workflow updates add immediate failure capture with audited Undo, deferred observation review, evidence-based coaching plans, persistent learner identity, stable timer controls, and daylight display. JTS criterion definitions and existing grading/timing policies are unchanged.
 
@@ -8,10 +17,11 @@ Enterprise Administrators can create **username logins with temporary passwords*
 
 Enterprise Class Operations can request a **NUC CSV archive** for selected classes. The worker saves and verifies private CSV files before excluding the class from Enterprise, MAJCOM, and installation dashboards. Removing a local copy keeps shared server records; shared trash is now excluded from reporting totals.
 
-**TEST** is a peer MAJCOM with practice copies of all 73 installations. Select TEST
-for practice classes and separate TEST reporting; default Enterprise live totals
-exclude those records. Existing installation relationships and role permissions
-remain in use.
+**TEST** is an additional supported-MAJCOM choice using the same 73 physical
+installations and ordinary training workflow. All MAJCOMs includes TEST.
+Assigned installation roles still control access. Previously deployed duplicate
+TEST-base records remain readable for compatibility; new classes use existing
+installations. See [web.9](WEB9-DEPLOYMENT.md) for the correction and retained data.
 
 Web.7 adds a separate Enterprise **Remove Local Copy** action under **Manage
 Training**, with exact synchronization checks and explicit reload. It also

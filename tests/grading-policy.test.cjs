@@ -85,12 +85,22 @@ test('approved criterion wording, criticality, timing definitions, and tier rule
     '297d83f691d03ac3995abb2a323b0a119f9018696f847b77994164003f25bc0a');
 });
 
-for (const name of ['authoritativeEvaluationClient', 'claimEvaluationOnServer', 'openEvaluation',
+for (const name of ['authoritativeEvaluationClient', 'openEvaluation',
   'finalizeEvaluation', 'voidCurrentAttempt']) {
   test(`server lifecycle remains unchanged: ${name}`, () => {
     assert.equal(functionSource(current, name), functionSource(original, name));
   });
 }
+
+test('claim protocol is unchanged apart from requiring confirmed roster synchronization', () => {
+  const guard = "  const managesRoster=canAccessClass('manageRoster',c);\n" +
+    "  const rosterSynced=await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c);\n" +
+    "  if((managesRoster&&rosterSynced!==true)||String(c?.cloudSync?.status||'')==='conflict')throw new Error('The server has not confirmed this class and roster. Use Sync Classes and resolve any errors or conflicts before starting an assessment.');";
+  const claim = functionSource(current, 'claimEvaluationOnServer');
+  assert.ok(claim.includes(guard));
+  assert.equal(claim.replace(guard, '  await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c);'),
+    functionSource(original, 'claimEvaluationOnServer'));
+});
 
 for (const t of Object.values(tiers)) {
   const items = t.sections.flatMap(section => section.items);

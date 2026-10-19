@@ -817,11 +817,13 @@ async function pushClassUnlocked(c, options={}) {
     }
     data=result.data;
   } else {
+    // INSERT ... RETURNING evaluates the SELECT policies in the insertion
+    // statement's snapshot. The restrictive class-visibility helper cannot
+    // see that new class yet. Write without a representation, then verify the
+    // committed row through the normal authenticated SELECT in a new request.
     const result=await client
       .from('classes')
-      .insert(payload)
-      .select('id, base_id, name, course_type, curriculum_version_id, start_date, end_date, status, created_by, created_at, updated_at, app_data, client_modified_at, source_device_id')
-      .single();
+      .insert(payload);
     context.check();
 
     if (result.error) {
@@ -853,7 +855,27 @@ async function pushClassUnlocked(c, options={}) {
       });
       throw result.error;
     }
-    data=result.data;
+    try {
+      data=await fetchRemoteById(c.id,context);
+      context.check();
+    } catch (error) {
+      context.check();
+      patchState(c.id,{
+        enabled:true,status:navigator.onLine?'error':'offline',error:shortError(error)
+      });
+      throw error;
+    }
+    if (data) {
+      const insertedRemote=remoteToLocal(payload,loadedRefs);
+      const verifiedRemote=remoteToLocal(data,loadedRefs);
+      if (data.base_id!==payload.base_id || data.created_by!==payload.created_by ||
+          data.curriculum_version_id!==payload.curriculum_version_id || data.status!==payload.status ||
+          classMetadataSignature(verifiedRemote)!==classMetadataSignature(insertedRemote)) {
+        markClassConflict(c,classMetadataState(c,verifiedRemote,msFromIso(data.client_modified_at||data.updated_at)),
+          'The server class changed after creation. No local metadata was overwritten; use Sync Classes and review the conflict before continuing.');
+        return false;
+      }
+    }
   }
 
   if (!data) {
@@ -1412,7 +1434,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.12-web.8';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.12-web.9';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,

@@ -44,9 +44,7 @@ function isMajcomManager() {
 
 function majcomName() {
   const m = membership();
-  const label = m?.majcoms?.code || m?.majcoms?.name || 'Assigned MAJCOM';
-  return String(m?.majcoms?.code || '').toUpperCase() === 'TEST'
-    ? label + ' · Practice data' : label;
+  return m?.majcoms?.code || m?.majcoms?.name || 'Assigned MAJCOM';
 }
 
 function pretty(value) {
