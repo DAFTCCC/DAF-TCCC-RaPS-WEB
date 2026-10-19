@@ -903,3 +903,11 @@ textarea#overallNotes{width:calc(100% - 24px);font-size:var(--font-body);line-he
 #cloudChangePasswordVerification p{margin:0;font-size:var(--font-label);line-height:1.5}
 @media(max-width:560px){.cloudAccountBtn,.cloudLogoutBtn{width:100%}}
 
+/* One-time username credentials use a browser-managed modal and no persistent form. */
+.adminCredentialDialog{width:min(560px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:22px}
+.adminCredentialDialog::backdrop{background:rgba(0,0,0,.8)}
+.adminCredentialDialog h2{margin:0 0 12px;font-size:22px}
+.adminCredentialDialog p{font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.adminCredentialDialog label{display:grid;gap:6px;margin:14px 0;font-size:14px;font-weight:800}
+.adminCredentialDialog input{width:100%;min-width:0;min-height:44px;padding:10px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:7px;font-family:ui-monospace,monospace}
+.adminCredentialDialog .adminActions{display:flex;gap:10px;flex-wrap:wrap;padding:8px 0 0}

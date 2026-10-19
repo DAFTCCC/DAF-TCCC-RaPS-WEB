@@ -11,6 +11,12 @@ const cloud = () => window.RAPS_CLOUD || null;
 const supabase = () => window.RAPS_SUPABASE || null;
 const membership = () => window.RAPS_PERMISSIONS?.membership('majcom_manager') || null;
 
+// Shared Enterprise Trash retains its server records for recovery, but is not
+// training activity. Closed/completed retention records remain reportable.
+function isReportableClass(c) {
+  return !!c && c.status !== 'archived' && !c.app_data?.deletedAt;
+}
+
 function dashboardRequest() {
   const permissions = window.RAPS_PERMISSIONS;
   const token = permissions?.snapshot();
@@ -38,7 +44,9 @@ function isMajcomManager() {
 
 function majcomName() {
   const m = membership();
-  return m?.majcoms?.code || m?.majcoms?.name || 'Assigned MAJCOM';
+  const label = m?.majcoms?.code || m?.majcoms?.name || 'Assigned MAJCOM';
+  return String(m?.majcoms?.code || '').toUpperCase() === 'TEST'
+    ? label + ' · Practice data' : label;
 }
 
 function pretty(value) {
@@ -85,6 +93,13 @@ function setMessage(text, kind = '') {
   el.className = ('majcomDashboardMessage ' + kind).trim();
 }
 
+function clearRenderedReport() {
+  for (const id of ['majcomBaseFilter', 'majcomBaseTable', 'majcomClassTable', 'majcomContributors', 'majcomCourseTable', 'majcomDataQuality', 'majcomEvaluatorTable', 'majcomFailureModes', 'majcomIncompleteTable', 'majcomKpis']) {
+    const element = byId(id);
+    if (element) element.innerHTML = '';
+  }
+}
+
 function setLoading(value) {
   loading = !!value;
   const btn = byId('majcomRefreshBtn');
@@ -109,6 +124,7 @@ function inject() {
       '<span id="majcomDashboardScope">MAJCOM Manager</span>',
     '</div>',
     '<p class="helper">Cloud-scoped view of every active installation assigned to your MAJCOM. Supabase Row Level Security remains the security boundary; this dashboard does not broaden your account access.</p>',
+    '<p class="helper">Removing a local copy keeps the server record in these reports. Shared Enterprise Trash and verified NUC CSV archives are excluded. Pending or failed CSV archives remain counted; closed classes remain as training history.</p>',
 
     '<div class="majcomToolbar">',
       '<label><span>Reporting window</span><select id="majcomPeriod">',
@@ -165,7 +181,7 @@ function inject() {
   byId('majcomBaseFilter')?.addEventListener('change', render);
 
   document.querySelector('[data-home-area="program"]')?.addEventListener('click', () => {
-    if (isMajcomManager()) window.setTimeout(() => load(false), 0);
+    if (isMajcomManager()) window.setTimeout(() => load(true), 0);
   });
 
   mounted = true;
@@ -615,12 +631,28 @@ async function load(force = false) {
 
     const baseIds = bases.map((base) => base.id);
 
-    const classes = await readChunks(
+    const allClasses = (await readChunks(
       'classes',
       'id,base_id,name,course_type,start_date,end_date,status,created_by,app_data,updated_at',
       'base_id',
-      baseIds
-    );
+      baseIds,
+      (q) => q.neq('status', 'archived')
+    )).filter(isReportableClass);
+
+    let reportingArchives;
+    try {
+      reportingArchives = await readPages((from, to) =>
+        client.from('class_reporting_archives')
+          .select('class_id,request_id,status,requested_at,archived_at,worker_error')
+          .order('class_id')
+          .range(from, to)
+      );
+    } catch (error) {
+      access.assert();
+      throw new Error('NUC CSV archive status is unavailable. Check the server archive setup, then refresh this report.');
+    }
+    const archivedIds = new Set(reportingArchives.filter(row => row.status === 'archived').map(row => row.class_id));
+    const classes = allClasses.filter(c => !archivedIds.has(c.id));
 
     const events = await readChunks(
       'evaluation_events',
@@ -668,6 +700,7 @@ async function load(force = false) {
     access.assert();
     raw = {
       bases,
+      reportingArchives,
       classes,
       events,
       evaluations,
@@ -696,6 +729,8 @@ async function load(force = false) {
     render();
   } catch (error) {
     if (!access.current()) return;
+    raw = null;
+    clearRenderedReport();
     console.error('MAJCOM Manager dashboard failed', error);
     setMessage('Dashboard load failed: ' + (error?.message || error), 'error');
   } finally {
@@ -707,14 +742,23 @@ window.addEventListener('raps-cloud-identity', () => {
   inject();
   loadGeneration++;
   setLoading(false);
-  for (const id of ['majcomBaseFilter', 'majcomBaseTable', 'majcomClassTable', 'majcomContributors', 'majcomCourseTable', 'majcomDataQuality', 'majcomEvaluatorTable', 'majcomFailureModes', 'majcomIncompleteTable', 'majcomKpis']) {
-    const element = byId(id);
-    if (element) element.innerHTML = '';
-  }
+  clearRenderedReport();
   setMessage('');
   raw = null;
   load(true);
 });
+
+// A completed sync may have moved classes to/from shared Trash. Cancel older
+// report reads so they cannot put a pre-sync snapshot back on screen.
+for (const eventName of ['raps-class-sync-complete', 'raps-class-lifecycle-synced']) {
+  window.addEventListener(eventName, () => {
+    if (!isMajcomManager()) return;
+    loadGeneration++;
+    raw = null;
+    setLoading(false);
+    load(true);
+  });
+}
 
 window.addEventListener('online', () => {
   if (isMajcomManager()) load(true);

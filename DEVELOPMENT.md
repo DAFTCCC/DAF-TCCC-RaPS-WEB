@@ -9,14 +9,20 @@ python3 -m http.server 8000 --bind 127.0.0.1 --directory .
 There is no package installation or build step. Node.js is used for the regression checks; Python Playwright and Chromium are used for browser checks:
 
 ```sh
-node --test tests/*.test.cjs
+for suite in tests/*.test.cjs; do node "$suite" || exit 1; done
 bash tests/account-permissions.sh
 bash tests/operational-permissions.sh
+bash tests/managed-login-permissions.sh
+bash tests/reporting-archive-permissions.sh
+bash tests/test-majcom-permissions.sh
+python3 tests/test_reporting_archive_worker.py
 python3 tests/browser-workflow.py
 python3 tests/browser-responsive.py
 python3 tests/browser-accessibility.py
 python3 tests/browser-auth-layout.py
 python3 tests/browser-auth-flows.py
+python3 tests/browser-admin-accounts.py
+python3 tests/browser-test-majcom.py
 ```
 
 The evaluator workflow check serves the real frontend through in-memory request fulfillment with synthetic learners. It omits authentication/cloud scripts from the test page, blocks external requests, and injects its fixture adapter into the served script only. It does not change the application, authenticate to Supabase, or write production records.
@@ -43,6 +49,12 @@ Access remains administrator-approved. The public request endpoint records a req
 Test expired/reused links with an unrelated session already stored, sign-out during an in-flight identity lookup, password-update callbacks, and network/provider errors. A URL marker or cached identity must not authorize a password mutation. Error and cancellation paths must clear password/code fields and avoid false account-ready or email-delivered messages.
 
 See [deployment and email configuration](DEPLOYMENT.md) for canonical URLs, SMTP/templates, server password policy, the access-request RPC migration, and function deployment. Synthetic tests cannot validate actual email delivery or deployed Auth policies; complete the authorized recipient checks there before treating production account onboarding as verified.
+
+Web.8 also tests username provisioning, administrator-issued temporary passwords,
+mandatory first-login changes, stale-session rejection, and one-time credential
+display. The managed-login SQL suite checks direct browser-role requests and
+definer-function paths against isolated PostgreSQL. See [web.8 deployment](WEB8-DEPLOYMENT.md)
+for the separate NUC rollout and real-account checks.
 
 ## Evaluator workflow
 
@@ -71,7 +83,14 @@ Pending delete/restore requests also have independent, user-scoped keys under `R
 
 If a class was removed from both the original device's class list and its Trash before a shared deletion was recorded, that device has no deletion request to upload. Delete the remaining cloud copy once from a device where it is still visible and confirm the Trash row reaches **SYNCED**. The app does not infer deletion from a missing local or remote row, which could also represent access scope or an incomplete response.
 
-Closed classes retain the existing audited archive-deletion workflow. The client checks for unfinished assessments before sharing a deletion; atomic exclusion of a simultaneous new assessment claim depends on the deployed server lifecycle functions. This release does not change those functions or deploy a database migration. Isolated two-browser sync tests exercise the real client modules with a shared fake server, and the browser workflow checks the actual Delete, Home Restore, and remote-tombstone views without production access.
+Closed classes retain the existing audited archive-deletion workflow. The client checks for unfinished assessments before sharing a deletion; atomic exclusion of a simultaneous new assessment claim depends on the deployed server lifecycle functions. Isolated two-browser sync tests exercise the real client modules with a shared fake server, and the browser workflow checks the actual Delete, Home Restore, and remote-tombstone views without production access.
+
+The separate NUC reporting archive retains full-row CSV/JSON snapshots for selected
+classes. Its SQL and worker suites exercise explicit selection, active-work and
+role guards, concurrent writes/revocation, lossless CSV values, private file modes,
+checksums, durable writes, retry/cancellation, and completion only after proof
+verification. Failed exports remain counted. Live classes are never selected or
+archived by these tests.
 
 Unfinalized exports are labeled PROVISIONAL. Finalized results use the stored server result. New CSV diagnostic columns are appended to existing columns and identify `TCCC_DIAGNOSTICS_1.0`; downstream consumers should select columns by header. Student PDFs include paginated coaching details.
 

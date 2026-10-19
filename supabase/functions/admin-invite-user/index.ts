@@ -67,6 +67,21 @@ function activationRedirect() {
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+async function managedActorUsable(admin: any, user: any, authorization: string) {
+  if (user?.app_metadata?.raps_managed_login !== true) return true;
+  try {
+    const token = authorization.replace(/^Bearer\s+/i, '');
+    const claims = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    if (claims.sub !== user.id || !Number.isSafeInteger(claims.iat) || claims.iat <= 0) return false;
+    const { data, error } = await admin.rpc('raps_managed_status', { p_user_id:user.id, p_iat:claims.iat, p_session_id:uuid.test(claims.session_id || '') ? claims.session_id : null });
+    return !error && data?.managed === true && data?.session_usable === true
+      && user.app_metadata.raps_managed_credential_version === data.credential_version
+      && claims.app_metadata?.raps_managed_login === true
+      && claims.app_metadata.raps_managed_credential_version === data.credential_version;
+  } catch { return false; }
+}
+
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers:corsHeaders });
   if (req.method !== 'POST') return json({ error:'POST required' }, 405);
@@ -82,12 +97,13 @@ Deno.serve(async (req) => {
     const { data:authData, error:authError } = await userClient.auth.getUser();
     const caller = authData?.user;
     if (authError || !caller) return json({ code:'INVITE_AUTH', error:'Unauthorized' }, 401);
+    if (!await managedActorUsable(adminClient, caller, req.headers.get('Authorization') || '')) return json({ code:'INVITE_ADMIN', error:'Finish password setup and sign in again before administering accounts.' }, 403);
     const { data:callerMemberships, error:membershipError } = await adminClient.from('memberships')
       .select('id, role, base_id, majcom_id, active, starts_at, ends_at').eq('user_id', caller.id).eq('role', 'enterprise_admin').eq('active', true);
     if (membershipError || !(callerMemberships || []).some((m: any) => m.role === 'enterprise_admin' && activeNow(m) && validScope(m))) return json({ code:'INVITE_ADMIN', error:'Enterprise Admin access required' }, 403);
     const stillEnterprise = async () => {
       const { data, error } = await userClient.auth.getUser();
-      if (error || data?.user?.id !== caller.id) return false;
+      if (error || data?.user?.id !== caller.id || !await managedActorUsable(adminClient, data.user, req.headers.get('Authorization') || '')) return false;
       const { data:memberships, error:readError } = await adminClient.from('memberships')
         .select('id, role, base_id, majcom_id, active, starts_at, ends_at').eq('user_id', caller.id).eq('role', 'enterprise_admin').eq('active', true);
       return !readError && (memberships || []).some((m: any) => m.role === 'enterprise_admin' && activeNow(m) && validScope(m));

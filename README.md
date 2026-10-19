@@ -1,10 +1,17 @@
-# DAF-TCCC-WEB — v3.4.12-web.7
+# DAF-TCCC-WEB — v3.4.12-web.8
 
 Evaluator workflow updates add immediate failure capture with audited Undo, deferred observation review, evidence-based coaching plans, persistent learner identity, stable timer controls, and daylight display. JTS criterion definitions and existing grading/timing policies are unchanged.
 
 See [development and assessment checks](DEVELOPMENT.md) for local startup, regression tests, diagnostic data compatibility, and a calibration/field-evaluation plan. Existing authenticated Supabase synchronization remains in use; lifecycle actions require the server.
 
-Accounts use administrator-approved invitations. Use **Forgot password?** on Sign In or **Change Password** on Home to manage your own password. See [account deployment](DEPLOYMENT.md) for the required Supabase function, migration, redirect, and email configuration before publishing web.7.
+Enterprise Administrators can create **username logins with temporary passwords**. A username user must choose a new password before accessing RaPS; recovery uses an administrator-issued temporary password. Existing email accounts retain invitations and email recovery. See [web.8 deployment](WEB8-DEPLOYMENT.md) for the required NUC database and function updates before using these features.
+
+Enterprise Class Operations can request a **NUC CSV archive** for selected classes. The worker saves and verifies private CSV files before excluding the class from Enterprise, MAJCOM, and installation dashboards. Removing a local copy keeps shared server records; shared trash is now excluded from reporting totals.
+
+**TEST** is a peer MAJCOM with practice copies of all 73 installations. Select TEST
+for practice classes and separate TEST reporting; default Enterprise live totals
+exclude those records. Existing installation relationships and role permissions
+remain in use.
 
 Web.7 adds a separate Enterprise **Remove Local Copy** action under **Manage
 Training**, with exact synchronization checks and explicit reload. It also

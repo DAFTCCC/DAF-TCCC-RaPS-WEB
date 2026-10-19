@@ -1,7 +1,8 @@
 // TCCC Evaluation Suite installation catalog.
 // Offline/static by design. Update this file when command relationships or installation names change.
 // Stable IDs are used in CSV exports so display-name changes do not fragment analytics.
-window.TCCC_INSTALLATION_DATA = Object.freeze({
+(() => {
+const catalog = {
   "catalogVersion": "2026.09.08",
   "lastVerified": "2026-09-08",
   "component": {
@@ -1309,4 +1310,25 @@ window.TCCC_INSTALLATION_DATA = Object.freeze({
       "notes": ""
     }
   ]
+};
+
+// TEST uses independent installation IDs. The real catalog and its command
+// relationships stay intact; selecting TEST cannot target a live base row.
+const testInstallations = catalog.installations.map(installation => Object.freeze({
+  ...installation,
+  id: `TEST-${installation.id}`,
+  name: `${installation.name} (TEST)`,
+  shortName: `${installation.shortName || installation.name} (TEST)`,
+  hostCommand: 'TEST',
+  commands: Object.freeze(['TEST']),
+  sourceInstallationId: installation.id,
+  aliases: Object.freeze((installation.aliases || []).map(alias => `${alias} (TEST)`)),
+  notes: `Isolated TEST installation for ${installation.id}.`
+}));
+window.TCCC_INSTALLATION_DATA = Object.freeze({
+  ...catalog,
+  catalogVersion: '2026.10.18-test',
+  commands: Object.freeze([...catalog.commands, Object.freeze({id: 'TEST', name: 'TEST — Practice MAJCOM'})]),
+  installations: Object.freeze([...catalog.installations, ...testInstallations])
 });
+})();

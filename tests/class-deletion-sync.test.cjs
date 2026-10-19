@@ -113,7 +113,7 @@ function sharedServer({ rowCap = Infinity, endRangeErrorCode = null } = {}) {
 
 function browser(server, deviceId) {
   const classes = [], statePatches = [];
-  const accessRefreshes=[];
+  const accessRefreshes=[], lifecycleSyncs=[];
   const hidden = new Set(), clientSettings = [];
   const tier = { id: '1', source: 'JTS-standard', sections: [{ code: 'M', items: [] }], timers: [] };
   const getClass = id => classes.find(c => c.id === id) || null;
@@ -152,7 +152,7 @@ function browser(server, deviceId) {
     supabase:{createClient:(_url,_key,settings) => {clientSettings.push(settings);return server.client(deviceId);}},
     TCCC_TIERS: { 1: tier },
     addEventListener(type, callback) { listeners.set(type, callback); },
-    dispatchEvent(event) { if(event.type==='raps-class-access-refresh')accessRefreshes.push(event);listeners.get(event.type)?.(event); },
+    dispatchEvent(event) { if(event.type==='raps-class-access-refresh')accessRefreshes.push(event);if(event.type==='raps-class-lifecycle-synced')lifecycleSyncs.push(event);listeners.get(event.type)?.(event); },
     setTimeout(callback) { scheduled.push(callback); }
   };
   const context = vm.createContext({ window, navigator: { onLine: true }, console,
@@ -168,7 +168,7 @@ function browser(server, deviceId) {
     return c;
   }
   return {
-    api, classes, window, getClass, change, statePatches, hidden, clientSettings, context, accessRefreshes,
+    api, classes, window, getClass, change, statePatches, hidden, clientSettings, context, accessRefreshes, lifecycleSyncs,
     createClass() {
       const now = server.tick();
       const c = { id: 'class-1', name: 'TCCC skills assessment', tierId: '1', roster: 'A', date: '2026-10-15',
@@ -1158,4 +1158,32 @@ test('fresh catalogs revoke scoped and assigned cached access when the installat
       assert.equal(phone.window.RAPS_PERMISSIONS.canClass('deleteClass',local),true);
     }
   }
+});
+
+test('only acknowledged shared-trash lifecycle writes notify reporting dashboards', async () => {
+  const { server, desktop } = await twoBrowsers();
+  assert.equal(desktop.lifecycleSyncs.length, 0, 'Ordinary class publishing is not a trash lifecycle change');
+  requestTrashAction(server, desktop, 'delete');
+  assert.equal(desktop.lifecycleSyncs.length, 0, 'Unpublished local intent must not refresh cloud reporting');
+  assert.equal(await desktop.api.pushClass(desktop.getClass('class-1')), true);
+  assert.equal(server.tables.classes[0].status, 'archived');
+  assert.deepEqual(copy(desktop.lifecycleSyncs.map(event => event.detail)), [{ classId:'class-1', action:'delete' }]);
+  requestTrashAction(server, desktop, 'restore');
+  assert.equal(await desktop.api.pushClass(desktop.getClass('class-1')), true);
+  assert.equal(server.tables.classes[0].status, 'draft');
+  assert.deepEqual(copy(desktop.lifecycleSyncs.map(event => event.detail)), [
+    { classId:'class-1', action:'delete' }, { classId:'class-1', action:'restore' }
+  ]);
+  await desktop.api.pushClass(desktop.getClass('class-1'));
+  assert.equal(desktop.lifecycleSyncs.length, 2, 'Re-reading acknowledged state does not emit another lifecycle write');
+});
+
+test('a rejected shared deletion cannot claim cloud reporting was updated', async () => {
+  const { server, desktop } = await twoBrowsers();
+  server.tables.evaluation_events.push({ id:'class-1', class_id:'class-1' });
+  server.tables.evaluations.push({ id:'active-evaluation', event_id:'class-1', status:'in_progress', started_at:new Date().toISOString() });
+  requestTrashAction(server, desktop, 'delete');
+  assert.equal(await desktop.api.pushClass(desktop.getClass('class-1')), false);
+  assert.equal(server.tables.classes[0].status, 'draft');
+  assert.equal(desktop.lifecycleSyncs.length, 0);
 });

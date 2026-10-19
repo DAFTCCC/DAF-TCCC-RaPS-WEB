@@ -19,6 +19,9 @@ let mounted = false;
 let adminLoadId = 0;
 let adminClientId = 0;
 const pendingAdminActions = new Set();
+let managedUsers = [];
+let managedReady = false;
+let temporaryCredentialTimer = null;
 
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -104,12 +107,15 @@ function adminRequest() {
 
 function clearAdminData() {
   adminLoadId++;
+  clearTemporaryCredentials();
+  managedUsers = [];
+  managedReady = false;
   catalog = { profiles:[], memberships:[], bases:[], majcoms:[], accessRequests:[] };
   for (const id of ['adminMembershipTable', 'adminAccessRequestTable', 'adminExistingUser', 'adminInviteScope', 'adminExistingScope']) {
     const element = $(id);
     if (element) element.innerHTML = '';
   }
-  for (const id of ['adminInviteEmail', 'adminInviteName']) {
+  for (const id of ['adminInviteEmail', 'adminInviteName', 'adminManagedUsername', 'adminManagedName']) {
     const element = $(id);
     if (element) element.value = '';
   }
@@ -117,6 +123,7 @@ function clearAdminData() {
     const element = $(id);
     if (element) element.textContent = '';
   }
+  renderManagedUsers();
 }
 
 function setMessage(text = '', kind = '') {
@@ -134,9 +141,32 @@ function inject() {
   area.insertAdjacentHTML('beforeend', `
     <section id="enterpriseAdminCard" class="card managementCard enterpriseAdminCard hidden">
       <div class="cardHead"><span>Enterprise User Administration</span><span>Role + organizational scope</span></div>
-      <p class="helper">Create RaPS accounts by invitation, assign scoped access, deactivate or reactivate memberships, and permanently delete unused accounts. Authentication stays in Supabase; RaPS never stores administrator passwords or service-role credentials in the browser.</p>
+      <p class="helper">Create username accounts with a temporary password, invite email accounts, and manage scoped access. Username accounts use administrator-assisted recovery. Temporary passwords are shown once and must be changed before accessing training data.</p>
 
       <div id="adminMessage" class="adminMessage" aria-live="polite"></div>
+
+      <details class="analyticsDetails" open>
+        <summary>Create Username Login</summary>
+        <div class="adminFormGrid">
+          <label><span>Username</span><input id="adminManagedUsername" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" minlength="3" maxlength="32" placeholder="first.last"></label>
+          <label><span>Display name</span><input id="adminManagedName" type="text" autocomplete="off" maxlength="120" placeholder="Name"></label>
+          <label><span>Role</span><select id="adminManagedRole">
+            <option value="evaluator">Evaluator</option><option value="program_manager">Program Manager</option>
+            <option value="majcom_manager">MAJCOM Manager</option><option value="enterprise_admin">Enterprise Admin</option>
+          </select></label>
+          <label id="adminManagedScopeWrap"><span id="adminManagedScopeLabel">Installation</span><select id="adminManagedScope"></select></label>
+        </div>
+        <div class="adminActions"><button id="adminManagedCreateBtn" class="action primary" type="button">Create User &amp; Temporary Password</button></div>
+        <p class="helper">Use 3–32 letters, numbers, periods, underscores, or hyphens. Usernames are case-insensitive. Give the generated password privately to the intended person; it expires after 24 hours.</p>
+      </details>
+
+      <details class="analyticsDetails">
+        <summary>Username Account Recovery</summary>
+        <div class="adminFormGrid"><label><span>Username account</span><select id="adminManagedUser"></select></label></div>
+        <div class="adminActions"><button id="adminManagedResetBtn" class="action" type="button">Issue New Temporary Password</button></div>
+        <p id="adminManagedStatus" class="helper" aria-live="polite"></p>
+        <p class="helper">Verify the person's identity before issuing a replacement. Resetting access invalidates earlier server sessions and requires a new password. You cannot reset your own account here.</p>
+      </details>
 
       <details class="analyticsDetails" open>
         <summary>Pending Access Requests <span id="adminRequestCount"></span></summary>
@@ -195,8 +225,24 @@ function inject() {
         <div id="adminMembershipTable"></div>
       </details>
     </section>
+    <dialog id="adminTemporaryCredentials" class="adminCredentialDialog" aria-labelledby="adminTemporaryCredentialsTitle">
+      <h2 id="adminTemporaryCredentialsTitle">Temporary login credentials</h2>
+      <p>Give these credentials privately to the intended person. This password is shown once and clears when this dialog closes.</p>
+      <label><span>Username</span><input id="adminTemporaryUsername" type="text" readonly autocomplete="off"></label>
+      <label><span>Temporary password</span><input id="adminTemporaryPassword" type="text" readonly autocomplete="off" spellcheck="false"></label>
+      <p id="adminTemporaryExpiry"></p><p id="adminTemporaryCopyStatus" aria-live="polite"></p>
+      <div class="adminActions"><button id="adminTemporaryCopyBtn" class="action" type="button">Copy Credentials</button><button id="adminTemporaryCloseBtn" class="ghost" type="button">Done</button></div>
+    </dialog>
   `);
 
+  $('adminManagedRole')?.addEventListener('change', () => renderScope('Managed'));
+  $('adminManagedCreateBtn')?.addEventListener('click', createManagedUser);
+  $('adminManagedResetBtn')?.addEventListener('click', resetManagedPassword);
+  $('adminManagedUser')?.addEventListener('change', renderManagedResetState);
+  $('adminTemporaryCloseBtn')?.addEventListener('click', clearTemporaryCredentials);
+  $('adminTemporaryCredentials')?.addEventListener('close', clearTemporaryCredentials);
+  $('adminTemporaryCredentials')?.addEventListener('cancel', clearTemporaryCredentials);
+  $('adminTemporaryCopyBtn')?.addEventListener('click', copyTemporaryCredentials);
   $('adminInviteRole')?.addEventListener('change', () => renderScope('Invite'));
   $('adminExistingRole')?.addEventListener('change', () => renderScope('Existing'));
   $('adminRefreshBtn')?.addEventListener('click', () => loadAdminData());
@@ -388,10 +434,10 @@ function renderTable() {
             const userHasAnyActive = catalog.memberships.some(x => x.user_id === m.user_id && activeNow(x));
             const showDelete = !userHasAnyActive && m.user_id !== currentUser && !deleteRendered.has(m.user_id);
             if (showDelete) deleteRendered.add(m.user_id);
-            const showSetup = activeNow(m) && !setupRendered.has(m.user_id);
+            const showSetup = activeNow(m) && !isManagedProfile(p) && !setupRendered.has(m.user_id);
             if (showSetup) setupRendered.add(m.user_id);
             return `<tr>
-              <td><b>${esc(p.display_name || p.email || m.user_id)}</b><div><small>${esc(p.email || '')}</small></div></td>
+              <td><b>${esc(p.display_name || loginLabel(p) || m.user_id)}</b><div><small>${esc(loginLabel(p))}</small></div></td>
               <td>${esc(ROLE_LABELS[m.role] || m.role)}</td>
               <td>${esc(membershipScope(m))}</td>
               <td><span class="statusPill ${activeNow(m) ? 'pass' : 'trash'}">${activeNow(m) ? 'ACTIVE' : 'INACTIVE'}</span></td>
@@ -451,6 +497,9 @@ async function loadAdminData() {
   const access = adminRequest();
   const client = access.client;
   const loadId = ++adminLoadId;
+  managedReady = false;
+  managedUsers = [];
+  renderManagedUsers();
   setMessage('Loading enterprise users…', 'working');
 
   let results;
@@ -465,7 +514,8 @@ async function loadAdminData() {
       .from('access_requests')
       .select('id,email,display_name,requested_role,base_id,majcom_id,justification,status,created_at,reviewed_at,reviewed_by,review_note,bases(id,code,name),majcoms(id,code,name)')
       .eq('status','pending')
-      .order('created_at',{ascending:true}).order('id'))
+      .order('created_at',{ascending:true}).order('id')),
+    readManagedUsers(access).catch(() => ({ unavailable:true, users:[] }))
     ]);
   } catch (error) {
     if (access.current() && loadId === adminLoadId) setMessage(error?.message || 'Unable to load enterprise users.', 'error');
@@ -473,7 +523,7 @@ async function loadAdminData() {
   }
 
   if (!access.current() || loadId !== adminLoadId) return;
-  const [profiles, memberships, bases, majcoms, accessRequests] = results;
+  const [profiles, memberships, bases, majcoms, accessRequests, managed] = results;
 
   const firstError =
     profiles.error ||
@@ -493,19 +543,180 @@ async function loadAdminData() {
     majcoms: majcoms.data || [],
     accessRequests: accessRequests.data || []
   };
+  managedReady = managed?.unavailable !== true;
+  managedUsers = managedReady ? managed.users : [];
 
   const userSelect = $('adminExistingUser');
   if (userSelect) {
     userSelect.innerHTML = catalog.profiles.map(p =>
-      `<option value="${esc(p.id)}">${esc(p.display_name || p.email || p.id)}${p.email ? ` · ${esc(p.email)}` : ''}</option>`
+      `<option value="${esc(p.id)}">${esc(p.display_name || loginLabel(p) || p.id)}${loginLabel(p) ? ` · ${esc(loginLabel(p))}` : ''}</option>`
     ).join('');
   }
 
   renderScope('Invite');
   renderScope('Existing');
+  renderScope('Managed');
+  renderManagedUsers();
   renderAccessRequests();
   renderTable();
   setMessage('Enterprise access data loaded.', 'success');
+}
+
+function isManagedProfile(profile) {
+  return managedUsers.some(user => user.id === profile?.id) || /@login\.raps\.invalid$/i.test(profile?.email || '');
+}
+
+function loginLabel(profile) {
+  const managed = managedUsers.find(user => user.id === profile?.id);
+  if (managed) return managed.username;
+  const email = String(profile?.email || '');
+  return /@login\.raps\.invalid$/i.test(email) ? email.split('@')[0] : email;
+}
+
+async function readManagedUsers(access) {
+  const users = [], seen = new Set();
+  let offset = 0;
+  for (;;) {
+    access.assert();
+    const { data, error } = await access.client.functions.invoke('managed-login', { body:{ action:'list_users', offset, limit:500 } });
+    access.assert();
+    if (error || data?.ok !== true || !Array.isArray(data.users)) throw new Error('Username account service unavailable.');
+    for (const user of data.users) {
+      if (!user?.id || !/^[a-z0-9][a-z0-9._-]{2,31}$/.test(user.username || '') || seen.has(user.id)) throw new Error('Username account list is inconsistent.');
+      seen.add(user.id);
+      users.push(user);
+    }
+    if (data.next_offset === null) return { users };
+    if (!Number.isSafeInteger(data.next_offset) || data.next_offset !== offset + data.users.length || !data.users.length) throw new Error('Username account pagination is inconsistent.');
+    offset = data.next_offset;
+  }
+}
+
+function renderManagedUsers() {
+  const select = $('adminManagedUser');
+  if (select) {
+    const previous = select.value;
+    select.innerHTML = '<option value="">Select a username account…</option>'+managedUsers.map(user =>
+      `<option value="${esc(user.id)}">${esc(user.username)}${user.password_change_required ? ' · Password setup required' : ''}</option>`).join('');
+    if (managedUsers.some(user => user.id === previous)) select.value = previous;
+  }
+  const create = $('adminManagedCreateBtn');
+  if (create) create.disabled = !managedReady || !isEnterprise() || pendingAdminActions.has('managed-create');
+  const status = $('adminManagedStatus');
+  if (status) status.textContent = managedReady ? `${managedUsers.length} username account${managedUsers.length === 1 ? '' : 's'}.` : 'Username account service unavailable. Refresh after the server update is installed.';
+  renderManagedResetState();
+}
+
+function renderManagedResetState() {
+  const id = $('adminManagedUser')?.value;
+  const button = $('adminManagedResetBtn');
+  if (button) button.disabled = !managedReady || !isEnterprise() || !managedUsers.some(user => user.id === id)
+    || id === window.RAPS_CLOUD?.user?.id || pendingAdminActions.has(`managed-reset:${id}`);
+}
+
+function clearTemporaryCredentials() {
+  if (temporaryCredentialTimer !== null) window.clearTimeout?.(temporaryCredentialTimer);
+  temporaryCredentialTimer = null;
+  for (const id of ['adminTemporaryUsername','adminTemporaryPassword']) if ($(id)) $(id).value = '';
+  for (const id of ['adminTemporaryExpiry','adminTemporaryCopyStatus']) if ($(id)) $(id).textContent = '';
+  const dialog = $('adminTemporaryCredentials');
+  if (dialog?.open) dialog.close();
+}
+
+function showTemporaryCredentials(data, username, access) {
+  access.assert();
+  if (data?.ok !== true || !matchingAccountId(data.user?.id,data.user?.id) || data.user?.username !== username
+      || typeof data.temporary_password !== 'string' || data.temporary_password.length < 12
+      || data.temporary_password.length > 200 || /[\u0000-\u001f\u007f]/.test(data.temporary_password)
+      || !Number.isFinite(Date.parse(data.temporary_expires_at)) || Date.parse(data.temporary_expires_at) <= Date.now()) {
+    throw new Error('The account service did not confirm usable credentials. Refresh the account list before issuing a replacement.');
+  }
+  const dialog = $('adminTemporaryCredentials');
+  if (!dialog?.showModal) throw new Error('This browser cannot show the secure credential dialog. Update the browser, then issue a replacement password.');
+  clearTemporaryCredentials();
+  $('adminTemporaryUsername').value = data.user.username;
+  $('adminTemporaryPassword').value = data.temporary_password;
+  $('adminTemporaryExpiry').textContent = 'Expires '+new Date(data.temporary_expires_at).toLocaleString()+'. The user must choose a new password before opening training data.';
+  try {
+    dialog.showModal();
+    temporaryCredentialTimer = window.setTimeout?.(clearTemporaryCredentials,5*60*1000) ?? null;
+  } catch (error) {
+    clearTemporaryCredentials();
+    throw error;
+  }
+}
+
+async function copyTemporaryCredentials() {
+  const username = $('adminTemporaryUsername')?.value;
+  const password = $('adminTemporaryPassword')?.value;
+  if (!isEnterprise() || !$('adminTemporaryCredentials')?.open || !username || !password) return;
+  const current = () => isEnterprise() && $('adminTemporaryCredentials')?.open
+    && $('adminTemporaryUsername')?.value === username && $('adminTemporaryPassword')?.value === password;
+  try {
+    await navigator.clipboard.writeText(`RaPS username: ${username}\nTemporary password: ${password}`);
+    if (current()) $('adminTemporaryCopyStatus').textContent = 'Copied. Send privately to the intended person.';
+  } catch {
+    if (current()) $('adminTemporaryCopyStatus').textContent = 'Copy unavailable. Select the fields and copy them manually.';
+  }
+}
+
+async function createManagedUser() {
+  if (!isEnterprise() || !managedReady || pendingAdminActions.has('managed-create')) return;
+  const access = adminRequest();
+  const username = String($('adminManagedUsername')?.value || '').trim().toLowerCase();
+  const display_name = String($('adminManagedName')?.value || '').trim();
+  if (!/^[a-z0-9][a-z0-9._-]{2,31}$/.test(username) || !display_name || display_name.length>120 || /[\u0000-\u001f\u007f]/.test(display_name)) {
+    setMessage('Enter a valid username and display name (120 characters or fewer).','error'); return;
+  }
+  const body = { action:'create_user', username, display_name, ...scopePayload('Managed') };
+  pendingAdminActions.add('managed-create');
+  renderManagedUsers();
+  clearTemporaryCredentials();
+  setMessage('Creating username account…','working');
+  try {
+    await access.ready();
+    const { data,error } = await access.client.functions.invoke('managed-login',{ body });
+    if (error) throw error;
+    showTemporaryCredentials(data,username,access);
+    $('adminManagedUsername').value = '';
+    $('adminManagedName').value = '';
+    setMessage('Username account created. Deliver the temporary credentials privately.','success');
+    await loadAdminData();
+  } catch (error) {
+    const detail = await edgeFunctionError(error);
+    if (access.current()) setMessage('Account creation incomplete: '+detail,'error');
+  } finally {
+    pendingAdminActions.delete('managed-create');
+    renderManagedUsers();
+  }
+}
+
+async function resetManagedPassword() {
+  const userId = $('adminManagedUser')?.value;
+  const target = managedUsers.find(user => user.id === userId);
+  if (!isEnterprise() || !managedReady || !target || userId === window.RAPS_CLOUD?.user?.id || pendingAdminActions.has(`managed-reset:${userId}`)) return;
+  const access = adminRequest();
+  if (!confirm(`Issue a new temporary password for ${target.username}?\n\nVerify the person's identity first. Earlier server sessions will be invalidated and a password change will be required.`)) return;
+  pendingAdminActions.add(`managed-reset:${userId}`);
+  renderManagedResetState();
+  clearTemporaryCredentials();
+  setMessage('Issuing replacement credentials…','working');
+  try {
+    await access.ready();
+    const { data,error } = await access.client.functions.invoke('managed-login',{ body:{ action:'reset_password',user_id:userId } });
+    if (error) throw error;
+    access.assert();
+    if (!matchingAccountId(data?.user?.id,userId)) throw new Error('The account service returned a different account. Refresh before continuing.');
+    showTemporaryCredentials(data,target.username,access);
+    setMessage('Replacement issued. Deliver the temporary credentials privately.','success');
+    await loadAdminData();
+  } catch (error) {
+    const detail = await edgeFunctionError(error);
+    if (access.current()) setMessage('Password reset incomplete: '+detail,'error');
+  } finally {
+    pendingAdminActions.delete(`managed-reset:${userId}`);
+    renderManagedResetState();
+  }
 }
 
 function scopePayload(prefix) {

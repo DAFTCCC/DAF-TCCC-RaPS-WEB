@@ -26,6 +26,14 @@ SESSION = {'user': USER, 'access_token': 'synthetic-access-token',
 OTHER_SESSION = {'user': {'id': 'different-user', 'email': 'other@example.test'},
                  'access_token': 'synthetic-other-access-token',
                  'refresh_token': 'synthetic-other-refresh-token'}
+MANAGED_USER = dict(USER, email='field.evaluator@login.raps.invalid',
+                    app_metadata={'raps_managed_login': True})
+MANAGED_SESSION = dict(SESSION, user=MANAGED_USER)
+MANAGED_PENDING = {'ok': True, 'managed': True, 'username': 'field.evaluator',
+                   'password_change_required': True, 'session_usable': False,
+                   'temporary_expires_at': '2099-01-01T00:00:00Z'}
+MANAGED_COMPLETE = dict(MANAGED_PENDING, password_change_required=False,
+                        session_usable=True, temporary_expires_at=None)
 MEMBERSHIP = {'id': 'synthetic-membership', 'active': True, 'role': 'evaluator',
               'base_id': 'test-base', 'bases': {'id': 'test-base', 'code': 'TEST',
                   'active': True, 'majcom_id': 'test-command',
@@ -39,7 +47,8 @@ const config=window.__authFixture;
 const copy=value=>JSON.parse(JSON.stringify(value));
 const state=window.__authTest={calls:[],callbacks:[],session:config.session||null,
   errors:config.errors||{},verifiedUser:config.verifiedUser||null,
-  paused:{},pending:{},membershipsOverride:null};
+  paused:{},pending:{},membershipsOverride:null,
+  managedStatus:config.managedStatus||null,managedFailure:null};
 state.wait=async method=>{
   if(!state.paused[method])return;
   await new Promise(resolve=>(state.pending[method]||=[]).push(resolve));
@@ -148,6 +157,7 @@ const rows=table=>{
 const query=table=>({
   select(){return this;},eq(){return this;},
   async maybeSingle(){
+    record('query.'+table);
     const result={data:rows(table)[0]||null,error:null};
     await state.wait('query.'+table);return result;
   },
@@ -162,7 +172,27 @@ window.supabase={createClient:()=>({auth:new Proxy(fakeAuth,{
   get:(target,key)=>key in target?target[key]:(...args)=>{
     record('unexpected.'+String(key),args);throw new Error('Unexpected auth method: '+String(key));
   }
-}),from:query})};
+}),from:query,functions:{async invoke(name,args){
+  if(name!=='managed-login')throw new Error('Unexpected function: '+name);
+  const action=args.body.action;
+  record('managed.'+action,args);
+  await state.wait('managed.'+action);
+  if(state.managedThrow)throw new Error('Synthetic unavailable network');
+  const failure=state.managedFailure||config.managedError;
+  if(failure)return {data:null,error:{context:{json:async()=>copy(failure)}}};
+  if(action==='status')return {data:copy(state.managedStatus),error:null};
+  if(action==='sign_in'){
+    const session=config.verifiedSession||config.session;
+    return {data:copy(config.managedSignInResult||{ok:true,
+      session:{access_token:session.access_token,refresh_token:session.refresh_token},
+      user:{id:session.user.id,username:'field.evaluator'},
+      password_change_required:state.managedStatus?.password_change_required,
+      temporary_expires_at:state.managedStatus?.temporary_expires_at}),error:null};
+  }
+  if(action==='complete_password')return {data:{ok:true,sign_in_required:true,
+    not_before:Math.floor(Date.now()/1000)+2},error:null};
+  throw new Error('Unexpected managed login action: '+action);
+}}})};
 if(config.withoutSdk)delete window.supabase;
 if(config.cachedIdentity)localStorage.setItem('RAPS_CLOUD_IDENTITY_V1',JSON.stringify(config.cachedIdentity));
 if(config.pendingActivation)sessionStorage.setItem('RAPS_PENDING_PASSWORD_SETUP_V1',
@@ -289,11 +319,248 @@ def change_inputs(page, current=CURRENT_PASSWORD, password=PASSWORD, confirmatio
     page.locator('#cloudChangePasswordConfirm').fill(confirmation)
 
 
+def managed_groups(h):
+    page = h.open(verifiedSession=MANAGED_SESSION, managedStatus=MANAGED_PENDING)
+    expect(page.locator('#cloudAuthEmail')).to_have_attribute('type', 'text')
+    page.locator('#cloudAuthEmail').fill('FIELD.EVALUATOR')
+    page.locator('#cloudAuthPassword').fill(CURRENT_PASSWORD)
+    page.locator('#cloudAuthSubmit').click()
+    expect(page.locator('#cloudChangePasswordTitle')).to_have_text('Choose Your RaPS Password')
+    expect(page.locator('#cloudChangePasswordCurrentLabel')).to_have_text('Temporary password')
+    expect(page.locator('#cloudChangePasswordCancel')).to_have_text('Sign Out')
+    assert calls(page, 'managed.sign_in')[0]['args']['body'] == {
+        'action': 'sign_in', 'username': 'field.evaluator', 'password': CURRENT_PASSWORD}
+    assert not calls(page, 'signInWithPassword') and not calls(page, 'query.memberships')
+    assert not calls(page, 'query.profiles')
+    assert not page.evaluate('window.RAPS_CLOUD?.user')
+    assert page.evaluate('localStorage.getItem("RAPS_CLOUD_IDENTITY_V1")') is None
+    expect(page.locator('#cloudChangePasswordEmail')).to_have_text('field.evaluator')
+    page.evaluate('window.dispatchEvent(new Event("offline"))')
+    expect(page.locator('#cloudChangePasswordGate')).to_be_visible()
+    assert not page.evaluate('window.RAPS_CLOUD?.user')
+    h.done(page, 'Username login verifies trusted managed status and blocks private and offline access until setup')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_PENDING,
+                  cachedIdentity=CACHED_IDENTITY)
+    expect(page.locator('#cloudChangePasswordGate')).to_be_visible()
+    assert calls(page, 'managed.status')[0]['args']['headers']['Authorization'] == \
+        'Bearer ' + MANAGED_SESSION['access_token']
+    page.reload(wait_until='networkidle')
+    expect(page.locator('#cloudChangePasswordGate')).to_be_visible()
+    assert len(calls(page, 'managed.status')) == 1
+    assert not calls(page, 'query.memberships')
+    assert not calls(page, 'query.profiles')
+    h.done(page, 'Reload cannot dismiss mandatory managed password setup or restore an old cached identity')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_PENDING)
+    change_inputs(page, password=CURRENT_PASSWORD, confirmation=CURRENT_PASSWORD)
+    page.locator('#cloudChangePasswordSubmit').click()
+    expect(page.locator('#cloudChangePasswordMessage')).to_contain_text('different password')
+    change_inputs(page, password='short', confirmation='short')
+    page.locator('#cloudChangePasswordForm').dispatch_event('submit')
+    expect(page.locator('#cloudChangePasswordMessage')).to_contain_text('12 characters')
+    change_inputs(page, confirmation='Another synthetic password!')
+    page.locator('#cloudChangePasswordSubmit').click()
+    expect(page.locator('#cloudChangePasswordMessage')).to_contain_text('do not match')
+    assert not calls(page, 'managed.complete_password')
+    h.done(page, 'Managed password setup validates length, confirmation, and a different password before mutation')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_PENDING)
+    oversized = '🔐' * 19
+    change_inputs(page, password=oversized, confirmation=oversized)
+    page.locator('#cloudChangePasswordSubmit').click()
+    expect(page.locator('#cloudChangePasswordMessage')).to_contain_text('72 bytes')
+    assert not calls(page, 'managed.complete_password')
+    h.done(page, 'Managed password setup checks the bcrypt limit in UTF-8 bytes for multibyte characters')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_PENDING)
+    short_unicode = '🔐' * 11
+    change_inputs(page, password=short_unicode, confirmation=short_unicode)
+    page.locator('#cloudChangePasswordSubmit').click()
+    expect(page.locator('#cloudChangePasswordMessage')).to_contain_text('12 characters')
+    assert not calls(page, 'managed.complete_password')
+    accepted_unicode = '🔐' * 12
+    change_inputs(page, password=accepted_unicode, confirmation=accepted_unicode)
+    page.locator('#cloudChangePasswordSubmit').click()
+    expect(page.locator('#cloudAuthMessage')).to_contain_text('Sign in again with your username and new password')
+    assert calls(page, 'managed.complete_password')[0]['args']['body']['new_password'] == accepted_unicode
+    h.done(page, 'Managed minimum length counts Unicode characters: eleven emoji are rejected and twelve accepted')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_PENDING)
+    page.clock.install()
+    change_inputs(page)
+    page.locator('#cloudChangePasswordSubmit').click()
+    expect(page.locator('#cloudAuthMessage')).to_contain_text('Sign in again with your username and new password')
+    request = calls(page, 'managed.complete_password')[0]['args']
+    assert request['headers']['Authorization'] == 'Bearer ' + MANAGED_SESSION['access_token']
+    assert request['body'] == {'action': 'complete_password',
+                               'current_password': CURRENT_PASSWORD, 'new_password': PASSWORD}
+    assert not calls(page, 'signInWithPassword') and not password_updates(page)
+    assert len(calls(page, 'signOut')) == 1
+    assert not page.evaluate('window.RAPS_CLOUD?.user')
+    assert page.locator('#cloudChangePasswordCurrent').input_value() == ''
+    assert page.locator('#cloudChangePasswordPassword').input_value() == ''
+    for secret in (CURRENT_PASSWORD, PASSWORD):
+        assert not page.evaluate('secret=>Object.values(localStorage).some(value=>value.includes(secret))', secret)
+        assert not page.evaluate('secret=>Object.values(sessionStorage).some(value=>value.includes(secret))', secret)
+    page.locator('#cloudAuthPassword').fill(PASSWORD)
+    page.locator('#cloudAuthSubmit').click()
+    expect(page.locator('#cloudAuthMessage')).to_contain_text('Wait a moment')
+    assert not calls(page, 'managed.sign_in')
+    h.done(page, 'Managed completion uses a fixed JWT, clears secrets, and forces a fresh login after the server cutoff')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_PENDING)
+    page.keyboard.press('Escape')
+    expect(page.locator('#cloudAuthGate')).to_be_visible()
+    expect(page.locator('#cloudChangePasswordGate')).not_to_be_visible()
+    assert len(calls(page, 'signOut')) == 1 and not page.evaluate('window.RAPS_CLOUD?.user')
+    h.done(page, 'Leaving mandatory setup signs out rather than opening private screens')
+
+    page = h.open(verifiedSession=MANAGED_SESSION,
+                  managedError={'code': 'MANAGED_TEMP_EXPIRED', 'error': 'Expired'})
+    page.locator('#cloudAuthEmail').fill('field.evaluator')
+    page.locator('#cloudAuthPassword').fill(CURRENT_PASSWORD)
+    page.locator('#cloudAuthSubmit').click()
+    expect(page.locator('#cloudAuthMessage')).to_contain_text('Contact an Enterprise Administrator')
+    assert not calls(page, 'setSession') and not page.evaluate('window.RAPS_CLOUD?.user')
+    h.done(page, 'Expired temporary credentials direct the user to administrator-assisted recovery')
+
+    for login in ('field.evaluator', 'field.evaluator@login.raps.invalid'):
+        page = h.open()
+        page.locator('#cloudAuthEmail').fill(login)
+        page.locator('#cloudForgotPasswordBtn').click()
+        expect(page.locator('#cloudAuthMessage')).to_contain_text('administrator-assisted recovery')
+        assert not calls(page, 'resetPasswordForEmail')
+        h.done(page, 'Username recovery never sends email to ' + ('an internal alias' if '@' in login else 'a username'))
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_COMPLETE)
+    expect(page.locator('#cloudAuthGate')).not_to_be_visible()
+    assert page.evaluate('window.RAPS_CLOUD.connected')
+    assert page.evaluate('window.RAPS_CLOUD.user.username') == 'field.evaluator'
+    assert page.evaluate('window.RAPS_CLOUD.user.email') == ''
+    assert page.evaluate('window.RAPS_CLOUD.profile.email') == ''
+    cache = page.evaluate('JSON.parse(localStorage.getItem("RAPS_CLOUD_IDENTITY_V1"))')
+    assert cache['managedLoginVerified'] is True
+    page.evaluate('status=>{window.__authTest.managedStatus=status;'
+                  'window.__authTest.emit("TOKEN_REFRESHED")}', MANAGED_PENDING)
+    expect(page.locator('#cloudChangePasswordGate')).to_be_visible()
+    assert not page.evaluate('window.RAPS_CLOUD?.user')
+    assert page.evaluate('localStorage.getItem("RAPS_CLOUD_IDENTITY_V1")') is None
+    h.done(page, 'A server-side managed reset closes private screens and clears a previously completed cache')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_COMPLETE)
+    page.locator('#cloudChangePasswordBtn').click()
+    change_inputs(page)
+    page.locator('#cloudChangePasswordSubmit').click()
+    expect(page.locator('#cloudAuthGate')).to_be_visible()
+    assert len(calls(page, 'managed.complete_password')) == 1
+    assert not calls(page, 'signInWithPassword') and not password_updates(page)
+    h.done(page, 'An established managed user changes their password through the managed endpoint and signs in again')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_PENDING)
+    page.evaluate('window.__authTest.paused["managed.complete_password"]=true')
+    change_inputs(page)
+    page.locator('#cloudChangePasswordSubmit').click()
+    page.wait_for_function('window.__authTest.pending["managed.complete_password"]?.length')
+    page.evaluate('next=>window.__authTest.emit("SIGNED_IN",next)', OTHER_SESSION)
+    expect(page.locator('#cloudAuthMessage')).to_contain_text('changed in another tab')
+    page.evaluate('window.__authTest.release("managed.complete_password")')
+    expect(page.locator('#cloudChangePasswordGate')).not_to_be_visible()
+    assert not calls(page, 'signOut'), 'A stale completion must not sign out the newly selected account'
+    assert not page.evaluate('window.RAPS_CLOUD?.user')
+    h.done(page, 'A managed completion cannot adopt or sign out another tab’s account after a session switch')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_COMPLETE)
+    page.evaluate('()=>{window.__authTest.managedFailure={code:"MANAGED_SETUP_REQUIRED"};'
+                  'window.__authTest.emit("TOKEN_REFRESHED")}')
+    expect(page.locator('#cloudAuthGate')).to_be_visible()
+    assert not page.evaluate('window.RAPS_CLOUD?.user')
+    assert page.evaluate('localStorage.getItem("RAPS_CLOUD_IDENTITY_V1")') is None
+    h.done(page, 'A rejected old managed session cannot fall back to its completed identity cache')
+
+    for failure in ({'message': 'Synthetic expired JWT', 'status': 401},
+                    {'message': 'Synthetic revoked JWT', 'status': 403},
+                    {'message': 'Synthetic invalid JWT', 'status': 400}):
+        page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_COMPLETE)
+        page.evaluate('failure=>{window.__authTest.errors.getUser=failure;'
+                      'window.__authTest.emit("TOKEN_REFRESHED")}', failure)
+        expect(page.locator('#cloudAuthGate')).to_be_visible()
+        assert page.evaluate('localStorage.getItem("RAPS_CLOUD_IDENTITY_V1")') is None
+        page.evaluate('window.dispatchEvent(new Event("offline"))')
+        assert not page.evaluate('window.RAPS_CLOUD?.user')
+        h.done(page, 'A rejected Auth JWT cannot revive completed managed cache through an offline event: ' +
+               str(failure['status']))
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_COMPLETE)
+    page.evaluate('user=>{window.__authTest.verifiedUser=user;'
+                  'window.__authTest.emit("TOKEN_REFRESHED")}', OTHER_SESSION['user'])
+    expect(page.locator('#cloudAuthGate')).to_be_visible()
+    assert page.evaluate('localStorage.getItem("RAPS_CLOUD_IDENTITY_V1")') is None
+    page.evaluate('window.dispatchEvent(new Event("offline"))')
+    assert not page.evaluate('window.RAPS_CLOUD?.user')
+    h.done(page, 'A verified JWT owner mismatch clears managed cache before any offline fallback')
+
+    for status in (dict(MANAGED_COMPLETE, managed=False),
+                   dict(MANAGED_COMPLETE, session_usable='true'),
+                   dict(MANAGED_COMPLETE, password_change_required=None)):
+        page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_COMPLETE)
+        page.evaluate('status=>{window.__authTest.managedStatus=status;'
+                      'window.__authTest.emit("TOKEN_REFRESHED")}', status)
+        expect(page.locator('#cloudAuthGate')).to_be_visible()
+        assert not page.evaluate('window.RAPS_CLOUD?.user')
+        assert page.evaluate('localStorage.getItem("RAPS_CLOUD_IDENTITY_V1")') is None
+        h.done(page, 'A malformed managed status cannot reuse prior verified account access')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_COMPLETE)
+    page.evaluate('()=>{window.__authTest.paused["managed.status"]=true;'
+                  'window.__authTest.managedStatus.password_change_required=true;'
+                  'window.__authTest.emit("TOKEN_REFRESHED")}')
+    page.wait_for_function('window.__authTest.pending["managed.status"]?.length')
+    expect(page.locator('#cloudAuthGate')).to_be_visible()
+    assert not page.evaluate('window.RAPS_CLOUD?.user')
+    page.evaluate('window.__authTest.emit("SIGNED_OUT",null)')
+    expect(page.locator('#cloudAuthGate')).to_be_visible()
+    page.evaluate('window.__authTest.release("managed.status")')
+    expect(page.locator('#cloudChangePasswordGate')).not_to_be_visible()
+    assert not page.evaluate('window.RAPS_CLOUD?.user')
+    h.done(page, 'A managed status response arriving after sign-out cannot reopen setup or private screens')
+
+    page = h.open(session=MANAGED_SESSION, managedStatus=MANAGED_COMPLETE)
+    page.evaluate('()=>{window.__authTest.managedThrow=true;'
+                  'window.__authTest.emit("TOKEN_REFRESHED")}')
+    page.wait_for_function('window.RAPS_CLOUD?.offlineCached===true')
+    expect(page.locator('#cloudAuthGate')).not_to_be_visible()
+    h.done(page, 'A network outage preserves previously verified completed managed offline work')
+
+    completed_cache = dict(CACHED_IDENTITY, user={'id': USER['id'], 'email': '',
+                          'username': 'field.evaluator', 'managed_login': True},
+                           managedLoginVerified=True)
+    for status in (400, 401, 403):
+        page = h.open(cachedIdentity=completed_cache,
+                      errors={'getSession': {'message': 'Synthetic revoked refresh session', 'status': status}})
+        expect(page.locator('#cloudAuthGate')).to_be_visible()
+        assert not page.evaluate('window.RAPS_CLOUD?.user')
+        assert page.evaluate('localStorage.getItem("RAPS_CLOUD_IDENTITY_V1")') is None
+        page.evaluate('window.dispatchEvent(new Event("offline"))')
+        assert not page.evaluate('window.RAPS_CLOUD?.user')
+        h.done(page, 'A rejected persisted refresh session cannot reopen managed cache during startup: ' + str(status))
+
+    for verified in (False, True):
+        cache = dict(CACHED_IDENTITY, user={'id': USER['id'], 'email': '',
+                    'username': 'field.evaluator', 'managed_login': True},
+                     managedLoginVerified=verified)
+        page = h.open(withoutSdk=True, cachedIdentity=cache)
+        assert bool(page.evaluate('window.RAPS_CLOUD?.offlineCached')) is verified
+        h.done(page, 'Managed offline cache is ' + ('available after verified completion' if verified else 'blocked before verified completion'))
+
+
 def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             executable_path=os.environ.get('CHROMIUM_EXECUTABLE', '/usr/bin/chromium'), headless=True)
         h = Harness(browser)
+
+        managed_groups(h)
 
         page = h.open()
         page.locator('#cloudForgotPasswordBtn').click()
