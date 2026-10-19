@@ -500,7 +500,11 @@ function ensureAttempt(){
   }
   return s.attempts[k];
 }
-function sessionElapsed(st=evalState()){ return st?.startedAt ? now()-st.startedAt : 0; }
+function sessionElapsed(st=evalState()){
+  if(!st?.startedAt)return 0;
+  const end=st.finalizedAt||st.voidedAt||now();
+  return Math.max(0,end-st.startedAt);
+}
 function event(label,detail=''){
   const st=evalState(); if(!st) return;
   st.events.push({at:now(),elapsed:sessionElapsed(st),label,detail}); saveDb(); renderTimeline();
@@ -720,8 +724,8 @@ function renderHome(){
   document.querySelectorAll('[data-open-class]').forEach(b=>b.onclick=()=>openClass(b.dataset.openClass));
   if(enterprise){
     document.querySelectorAll('[data-restore-class]').forEach(b=>b.onclick=()=>restoreDeletedClass(b.dataset.restoreClass));
-    document.querySelectorAll('[data-purge-class]').forEach(b=>b.onclick=()=>purgeDeletedClass(b.dataset.purgeClass));
-    document.querySelectorAll('[data-remove-local-class]').forEach(b=>b.onclick=()=>removeLocalClassCopy(b.dataset.removeLocalClass));
+    document.querySelectorAll('[data-purge-class]').forEach(b=>b.onclick=()=>purgeDeletedClass(b.dataset.purgeClass,b));
+    document.querySelectorAll('[data-remove-local-class]').forEach(b=>b.onclick=()=>removeLocalClassCopy(b.dataset.removeLocalClass,b));
   }
   renderLocalRecoveryNotice();renderExcludedLocalCopies();
   renderManagementDashboard();
@@ -734,10 +738,15 @@ function restoreDeletedClass(id){
   if(isClassClosed(c)){alert('Closed classes are retention records and are not restored through Local Trash. Open the closed class and use the audited archive controls instead.');return;}
   if(queueTrashAction(c,'restore'))renderHome();
 }
-function purgeDeletedClass(id){
-  return removeLocalClassCopy(id);
+function purgeDeletedClass(id,button){
+  return removeLocalClassCopy(id,button);
 }
-function localCopyRemovalIssue(c){
+function localGradingCopyConfirmed(a,proof){
+  const grading=proof||a.cloudGrading||{},signature=window.RAPS_GRADING_SYNC?.localGradingSignature;
+  return grading.status==='synced'&&grading.syncedByUserId===currentCloudUserId()
+    &&!!grading.baseGradingSignature&&!!signature&&signature(a)===grading.baseGradingSignature;
+}
+function localCopyRemovalIssue(c,{checkGrading=true,gradingProofs}={}){
   const state=c?.cloudSync||{};
   if(!c?.id||state.enabled!==true)return 'This class has not been saved to the server. Sync the class before removing its local copy.';
   if(readTrashOutbox(c.id)||state.trashAction)return 'Sync the pending shared deletion or restoration before removing this local copy.';
@@ -747,21 +756,47 @@ function localCopyRemovalIssue(c){
     for(const a of Object.values(s.attempts||{}).filter(Boolean)){
       if(a.startedAt&&!a.finalizedAt&&!a.voidedAt)return 'An assessment is still in progress. Finalize or void it before removing this local copy.';
       if(a.cloudShellOnly)continue;
-      const grading=a.cloudGrading||{},signature=window.RAPS_GRADING_SYNC?.localGradingSignature;
-      if(grading.status!=='synced'||grading.syncedByUserId!==currentCloudUserId()||!grading.baseGradingSignature||!signature||signature(a)!==grading.baseGradingSignature)return 'Grading records have not been fully confirmed on the server for your account. Use Sync Classes and resolve any grading errors or conflicts first.';
+      if(checkGrading&&!localGradingCopyConfirmed(a,gradingProofs?.get(a)))return 'Grading records have not been fully confirmed on the server for your account. Use Sync Classes and resolve any grading errors or conflicts first.';
     }
   }
   return '';
 }
-function removeLocalClassCopy(id){
+async function removeLocalClassCopy(id,button){
   if(!hasEnterpriseAccess()){alert('Enterprise Administrator access is required to remove local class copies.');return;}
   const c=db.classes.find(x=>x.id===id);if(!c)return;
   if(!requireClassAccess('readClass',c))return;
-  const issue=localCopyRemovalIssue(c);if(issue){alert(issue);return;}
+  const gradingProofs=new Map();
+  let issue=localCopyRemovalIssue(c);
+  const verify=window.RAPS_GRADING_SYNC?.verifyEvaluationForLocalRemoval;
+  if(issue&&!localCopyRemovalIssue(c,{checkGrading:false})&&verify){
+    const label=button?.textContent;
+    if(button){button.disabled=true;button.textContent='Checking server…';}
+    try{
+      const context=classPermissionContext(c,'readClass',{view:false});
+      for(const s of c.students||[]){
+        for(const a of Object.values(s.attempts||{}).filter(Boolean)){
+          if(a.cloudShellOnly||localGradingCopyConfirmed(a))continue;
+          const proof=await verify(c,s,a);
+          if(!proof){
+            const recovery=c.deletedAt?'To review it, use Restore across devices; this also makes the shared class visible again on other devices.':'Open the class to review grading conflicts or export a backup before retrying.';
+            alert('This local assessment could not be matched to the finalized server record. The local copy was kept. '+recovery);return;
+          }
+          gradingProofs.set(a,proof);
+          context.check();
+        }
+      }
+      issue=localCopyRemovalIssue(c,{gradingProofs});
+    }catch(error){
+      alert('The server could not verify this local copy, so it was kept. '+(error?.message||error));return;
+    }finally{
+      if(button?.isConnected){button.disabled=false;button.textContent=label;}
+    }
+  }
+  if(issue){alert(issue);return;}
   const token=prompt(`Remove the local copy of "${c.name}" from this browser/device?\n\nShared classes, assessment records, and server archives will remain on the NUC and other devices. Automatic sync will leave this copy removed. Use Load Local Copy under Manage Training to load it again.\n\nType REMOVE LOCAL to continue.`);
   if(token!=='REMOVE LOCAL')return;
   if(!hasEnterpriseAccess()||!requireClassAccess('readClass',c))return;
-  const latestIssue=localCopyRemovalIssue(c);if(latestIssue){alert(latestIssue);return;}
+  const latestIssue=localCopyRemovalIssue(c,{gradingProofs});if(latestIssue){alert(latestIssue);return;}
   let previous=null;
   try{
     const saved=JSON.parse(localStorage.getItem(DB_KEY));
@@ -2399,7 +2434,7 @@ function buildIndividualSummaryPdf(){
   opRect(ops,316,boxY,266,105,'#FFF7ED','#FED7AA');opText(ops,328,boxY+86,'IMPROVEMENT PRIORITIES',10,true,'#B45309');if(bw.weak.length)bw.weak.forEach((x,i)=>opWrap(ops,328,boxY+64-i*27,`${i+1}. ${x.code} - ${x.title}: ${x.fail} miss${x.fail===1?'':'es'}`,43,8,i===0,'#9A3412',10,2));else opText(ops,328,boxY+62,'No failed applicable criteria.',8,false,'#64748B');
   opText(ops,30,407,'KEY MISSES / COACHING POINTS',10,true,'#334155');const failed=allItems(t).filter(i=>st.ratings[i.id]==='fail').sort((a,b)=>(Number(b.critical)-Number(a.critical))||(Number(!!st.timerForced[b.id])-Number(!!st.timerForced[a.id]))).slice(0,5);let yy=387;if(!failed.length){opText(ops,42,yy,'No failed criteria recorded.',8,false,'#157347');yy-=18;}else failed.forEach((i,n)=>{const prefix=`${n+1}. ${i.section} ${i.id}${i.critical?' [CRITICAL]':''}${st.timerForced[i.id]?' [TIMING]':''}`;opText(ops,42,yy,prefix,8,true,i.critical?'#B42318':'#334155');yy=opWrap(ops,54,yy-12,i.text,82,7,false,'#475569',9,2)-4;});
   opLine(ops,30,205,582,205,'#CBD5E1');opText(ops,30,189,'EVALUATOR SUMMARY',9,true,'#334155');const note=st.overallNotes||'No overall evaluator comments entered.';opWrap(ops,30,174,note,105,8,false,'#475569',10,4);
-  opText(ops,30,120,`PASS ${p.score.pass} | FAIL ${p.score.fail} | NT ${p.score.nt} | Unresolved ${p.score.ungraded} | Applicable ${p.score.denom}`,8,true,'#334155');opText(ops,30,104,`Elapsed ${fmt((st.finalizedAt||now())-st.startedAt)} | Evaluator ${st.trainerSign||c.leadEvaluator||'-'} | DAF Supplemental included in scoring when applicable`,7,false,'#64748B');
+  opText(ops,30,120,`PASS ${p.score.pass} | FAIL ${p.score.fail} | NT ${p.score.nt} | Unresolved ${p.score.ungraded} | Applicable ${p.score.denom}`,8,true,'#334155');opText(ops,30,104,`Elapsed ${fmt(sessionElapsed(st))} | Evaluator ${st.trainerSign||c.leadEvaluator||'-'} | DAF Supplemental included in scoring when applicable`,7,false,'#64748B');
   opRect(ops,30,48,552,38,'#EFF6FF','#BFDBFE');opText(ops,42,70,st.finalizedAt?'Student coaching summary. Full observation and coaching details follow.':'PROVISIONAL: assessment is not finalized. Full coaching details follow.',8,true,'#1D4ED8');opText(ops,42,56,'The Full Individual CSV also retains criterion, timer, pause/reset, notes, and event details.',7,false,'#334155');opText(ops,30,30,`Generated ${new Date().toLocaleString()} | TCCC Evaluation Suite v${APP_VERSION} | ${t.source}`,6,false,'#64748B');
   return buildOpsPdf([ops,...buildCoachingDetailPages(t,st,`${s.rank?s.rank+' ':''}${s.name}`)]);
 }
@@ -2804,7 +2839,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.12';
+  const UPDATE_BUILD = '3.4.12-web.13';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 

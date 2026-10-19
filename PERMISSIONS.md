@@ -59,6 +59,12 @@ keeps the local copy. A device exclusion prevents automatic synchronization from
 immediately downloading it again; an explicit reload restores the server copy.
 Another tab's unsent work is preserved.
 
+For finalized assessments, removal can obtain a fresh, account-bound read-only
+comparison with the server when the old grading fingerprint predates finalization.
+The temporary verification does not overwrite local evidence or persist a sync
+status. Different assessment content, changed permissions, or concurrent local
+edits keep the copy on the device.
+
 **Archive to NUC CSV** in Enterprise Class Operations is a separate, selected-class
 retention workflow. A request freezes linked class/evidence writes. Only the NUC
 worker can mark it archived after checking durable CSV files, checksums, and the

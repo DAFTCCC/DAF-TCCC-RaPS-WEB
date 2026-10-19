@@ -1,4 +1,15 @@
-# DAF-TCCC-WEB — v3.4.12-web.12
+# DAF-TCCC-WEB — v3.4.12-web.13
+
+Web.13 stops the elapsed evaluation display at the recorded finalization time.
+Elapsed time still begins when the evaluation opens, independently of the
+scenario's TTA timer. Reopening a finalized attempt and its PDF summary use the
+same recorded duration for review. This is a frontend-only update with no NUC
+changes.
+
+It also fixes **Remove Local Copy** for finalized assessments whose last upload
+confirmation predates finalization. RaPS checks those records against the server
+before removing the browser copy, including records in shared trash. Unconfirmed
+assessment changes stay on the device; shared server records remain retained.
 
 Web.12 removes the reassessment date/time and retention follow-up due date/time
 inputs from **Observation & Coaching**. Coaching outcomes and practice/reassessment

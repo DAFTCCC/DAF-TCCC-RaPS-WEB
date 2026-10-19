@@ -90,6 +90,7 @@ for the separate NUC rollout and real-account checks.
 - Coaching outcomes are supplemental; recording independent practice does not change an official result. A new formal assessment follows the existing attempt rules.
 - Practice history matches the exact training ID across classes already stored on the device. It does not merge cloud participants or establish identity automatically.
 - Local save, cloud sync, and network availability are shown separately. An existing assessment can record locally during an outage; starting, finalizing, and voiding still require the server.
+- Elapsed evaluation time begins when the attempt opens, independently of the scenario's TTA timer. It stops at the recorded finalization time and remains fixed when the attempt is reopened. The header and individual PDF use the same duration calculation; TTA and scoring retain their existing rules.
 
 ## Data compatibility and reporting
 
@@ -102,6 +103,15 @@ Unknown metadata is preserved. Older records without diagnostic fields remain re
 Enterprise deletion of an open class synchronizes `classes.status='archived'` and a deletion marker in the existing `app_data` JSONB. It hides the class across devices without deleting students or assessments. Restore is an explicit operation tied to the deletion and previous restoration markers; stale metadata uploads cannot undo it. Minimal conditional patches preserve unrelated server metadata. Existing local-only trash is migrated when the Enterprise user synchronizes the original device. A newer server restoration takes precedence over old local trash.
 
 Delete and restore remain queued on the device until acknowledged. Trash shows each class's sync status, and removing a local copy is blocked while its deletion is unconfirmed. Return to the original device and use **Sync Classes**, then sync the second device. Devices also refresh classes on login, network return, window focus, and foreground return. Both devices must load the current release.
+
+Removal can read and compare a finalized assessment when its grading fingerprint
+still describes the upload made before finalization. This produces a temporary,
+account-bound receipt without writing server records or browser storage. Actual
+grades, evidence, notes, signoffs, versions, start time, and timer/event history
+must match; only read-only display preferences and the generated finalization
+timestamp/event are reconciled with the terminal server record. The receipt is
+checked again before removal, and the final storage comparison protects changes
+made in another tab while verification was running.
 
 Pending delete/restore requests also have independent, user-scoped keys under `RAPS_CLASS_TRASH_OUTBOX:`. Whole-database writes from another tab cannot erase these keys. Recovery overlays lifecycle fields only, leaving roster and assessment state intact; acknowledgements remove only the matching request. Legacy trash is queued independently of the cloud collection and old sync flags. Class reads page until empty, including when the server caps responses below the requested range. A pull waits for an overlapping class push and fetches the lifecycle again before reporting success.
 

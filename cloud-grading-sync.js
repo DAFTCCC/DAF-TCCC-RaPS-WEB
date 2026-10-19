@@ -483,19 +483,57 @@ async function pushEvaluation(c,s,a,options={}){
 function freshTimerStore(t){
   const out={};for(const d of (t?.timers||[]))out[d.id]={instances:[],currentIndex:-1};return out;
 }
+function finalizedCopyMatchesServer(local,server,row){
+  if(!local.finalizedAt||local.voidedAt||row.status!=='finalized'||!server.finalizedAt
+    ||!['PASS','FAIL'].includes(server.finalResult)||local.finalResult!==server.finalResult)return false;
+  const candidate=cloneJson(server);
+  // These are read-only display preferences, not unsynchronized assessment data.
+  for(const key of ['section','showNt','observeMode'])candidate[key]=local[key];
+  // Older finalize responses used a client-time fallback. The canonical server
+  // completion still represents that same terminal result, not a local edit.
+  candidate.finalizedAt=local.finalizedAt;
+  if(JSON.stringify(canonical(candidate.events))!==JSON.stringify(canonical(local.events||[]))){
+    if(row.score_numerator==null||row.score_denominator==null)return false;
+    const pass=Number(row.score_numerator),denom=Number(row.score_denominator);
+    if(!Number.isInteger(pass)||!Number.isInteger(denom)||pass<0||denom<pass)return false;
+    const finalEvent={at:local.finalizedAt,elapsed:Math.max(0,local.finalizedAt-local.startedAt),
+      label:'Evaluation finalized',detail:`Server-authoritative ${server.finalResult} · ${pass}/${denom}`};
+    candidate.events=[...candidate.events,finalEvent];
+  }
+  return localGradingSignature(candidate)===localGradingSignature(local);
+}
+async function verifyEvaluationForLocalRemoval(c,s,a){
+  return pullEvaluation(c,s,a,{verifyForLocalRemoval:true});
+}
 async function pullEvaluation(c,s,a,options={}){
   const context=permissionContext(c,'readClass');
   if(!getClient()||!context)return false;
   await context.ready();
   const client=context.client;
   const initialSignature=localGradingSignature(a);
+  const verifyRemoval=options?.verifyForLocalRemoval===true;
   const force=options?.force===true;
+  const originalAttempt=a;
+  const currentRemovalTarget=()=>getStore()?.getClass?.(c.id)===c
+    &&(c.students||[]).includes(s)&&Object.values(s.attempts||{}).includes(originalAttempt);
+  if(verifyRemoval&&(!currentRemovalTarget()||a.cloudShellOnly||!a.finalizedAt||a.voidedAt))return false;
   const {data:row,error}=await client.from('evaluations')
     .select('id,event_id,participant_id,attempt_number,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id,curriculum_version_id,evaluator_id')
     .eq('id',a.id).maybeSingle();
   if(error)throw error;if(!row)return false;
   if(!await evaluationBelongsToClass(c,s,row,client))return false;
   context.check();
+  if(verifyRemoval){
+    if(String(row.id)!==String(a.id)||row.status!=='finalized'
+      ||(a.cloudEvaluatorUserId&&String(row.evaluator_id)!==String(a.cloudEvaluatorUserId))
+      ||(a.startedByUserId&&String(row.evaluator_id)!==String(a.startedByUserId)))return false;
+    const {data:classRow,error:classError}=await client.from('classes')
+      .select('status,created_by,base_id,bases(id,code,majcom_id)').eq('id',c.id).maybeSingle();
+    if(classError)throw classError;
+    if(!classRow||!window.RAPS_PERMISSIONS.canClass('readClass',classWithServerScope(c,classRow)))return false;
+    if(String(row.curriculum_version_id)!==String(await curriculumIdFor(c,client)))return false;
+    context.check();
+  }
 
   // VOID is a server tombstone, not a resumable evaluation. Remove only
   // the matching local evaluation UUID; never delete a newer replacement
@@ -506,13 +544,13 @@ async function pullEvaluation(c,s,a,options={}){
 
   const remoteMs=ms(row.client_modified_at||row.updated_at);
   const localMs=Number(a.modifiedAt||0);
-  const state=attemptState(a);
+  const state=verifyRemoval?(a.cloudGrading||{}):attemptState(a);
   const lastSeen=Number(state.remoteModifiedAt||0);
-  if(!force&&!a.cloudShellOnly&&state.baseGradingSignature&&initialSignature!==state.baseGradingSignature)return false;
-  if(!force&&!a.cloudShellOnly&&lastSeen&&localMs>lastSeen+10)return false;
-  if(!force&&!a.cloudShellOnly&&!lastSeen&&localMs>remoteMs+1000)return false;
-  const verifyLegacy=!force&&!a.cloudShellOnly&&!state.baseGradingSignature&&lastSeen&&remoteMs<=lastSeen+10;
-  if(!force&&!a.cloudShellOnly&&remoteMs<=lastSeen+10&&state.baseGradingSignature)return false;
+  if(!verifyRemoval&&!force&&!a.cloudShellOnly&&state.baseGradingSignature&&initialSignature!==state.baseGradingSignature)return false;
+  if(!verifyRemoval&&!force&&!a.cloudShellOnly&&lastSeen&&localMs>lastSeen+10)return false;
+  if(!verifyRemoval&&!force&&!a.cloudShellOnly&&!lastSeen&&localMs>remoteMs+1000)return false;
+  const verifyLegacy=!verifyRemoval&&!force&&!a.cloudShellOnly&&!state.baseGradingSignature&&lastSeen&&remoteMs<=lastSeen+10;
+  if(!verifyRemoval&&!force&&!a.cloudShellOnly&&remoteMs<=lastSeen+10&&state.baseGradingSignature)return false;
 
   const crit=await criteriaFor(row.curriculum_version_id,client,context.check);
   context.check();
@@ -578,6 +616,22 @@ async function pullEvaluation(c,s,a,options={}){
   a.lastModifiedDeviceId=row.source_device_id||'';
   a.syncStatus='CLOUD';
   a.cloudShellOnly=false;
+  if(verifyRemoval){
+    // A clone starts with local metadata. Replace every remaining signed field
+    // from the server before comparing, so local-only version edits cannot be
+    // mistaken for server-confirmed data.
+    a.appVersion=app.appVersion||'';
+    a.contentVersion=app.contentVersion||'';
+    a.scenarioVersion=app.scenarioVersion||'1';
+    await context.verify();
+    if(!currentRemovalTarget()||localGradingSignature(liveAttempt)!==initialSignature
+      ||!finalizedCopyMatchesServer(liveAttempt,a,row))return false;
+    // This receipt belongs only to the pending removal. Persisting the proof
+    // here could overwrite another tab's newer database before the remover
+    // gets to compare browser storage with its original local copy.
+    return {status:'synced',error:'',lastSyncedAt:Date.now(),remoteModifiedAt:remoteMs,
+      baseGradingSignature:initialSignature,syncedByUserId:String(context.identity.userId)};
+  }
   const serverSignature=localGradingSignature(a);
   if(verifyLegacy&&serverSignature!==initialSignature)return false;
   context.check();
@@ -757,11 +811,12 @@ window.addEventListener('online',()=>syncAll());
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.12-web.12';
+window.RAPS_GRADING_SYNC_BUILD='3.4.12-web.13';
 window.RAPS_GRADING_SYNC=Object.freeze({
   syncAll,
   pushEvaluation,
   pullEvaluation,
+  verifyEvaluationForLocalRemoval,
   pullAll,
   pushAll,
   inspectConflict,
