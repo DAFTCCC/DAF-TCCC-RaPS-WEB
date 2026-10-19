@@ -1,4 +1,10 @@
-# DAF-TCCC-WEB — v3.4.12-web.10
+# DAF-TCCC-WEB — v3.4.12-web.11
+
+Web.11 repeats the full phase row directly above the checklist's bottom **Next
+Unresolved** button. An incomplete finalization review marks blocking sections,
+criteria and timers in red with reason labels and clickable locations. Highlights
+clear as the existing requirements are satisfied. The scoring and finalization
+rules are unchanged. This is a frontend-only update with no NUC changes.
 
 Web.10 adds a persistent bottom phase bar in every ASM, CLS, CMC, and CPP
 assessment. It repeats the course's full section list, including COM, DOC and

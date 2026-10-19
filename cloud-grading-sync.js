@@ -757,7 +757,7 @@ window.addEventListener('online',()=>syncAll());
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.12-web.10';
+window.RAPS_GRADING_SYNC_BUILD='3.4.12-web.11';
 window.RAPS_GRADING_SYNC=Object.freeze({
   syncAll,
   pushEvaluation,
