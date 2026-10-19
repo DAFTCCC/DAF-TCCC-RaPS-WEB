@@ -1,4 +1,10 @@
-# DAF-TCCC-WEB — v3.4.12-web.11
+# DAF-TCCC-WEB — v3.4.12-web.12
+
+Web.12 removes the reassessment date/time and retention follow-up due date/time
+inputs from **Observation & Coaching**. Coaching outcomes and practice/reassessment
+plans remain available, and follow-up outcomes save without a date. Previously
+saved records retain their historical information. This is a frontend-only
+update with no NUC changes.
 
 Web.11 repeats the full phase row directly above the checklist's bottom **Next
 Unresolved** button. An incomplete finalization review marks blocking sections,

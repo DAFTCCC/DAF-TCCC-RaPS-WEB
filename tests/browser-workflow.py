@@ -64,6 +64,10 @@ window.__rapsTest = {
   timer:(id,action)=>timerAction(id,action),
   render:()=>renderEval(),
   showItem(id){evalState().section=itemById(id).section;renderEval();},
+  seedLegacyCoachingDates(itemId){
+    const dates={reassessedAt:Date.parse('2026-10-18T10:00:00Z'),retentionDueAt:Date.parse('2026-11-15T10:00:00Z')};
+    Object.assign(evalState().failureDetails[itemId],dates);saveDb();return dates;
+  },
   allPassAndMet() {
     const st=evalState(),t=tier();
     for(const i of allItems(t))st.ratings[i.id]='pass';
@@ -260,8 +264,9 @@ def main():
         page.locator('#failureConfidence').select_option('uncertain')
         page.locator('#failurePracticePlan').fill('Demonstrate the approved task in isolation, then in an integrated scenario.')
         page.locator('#failureReassessmentPlan').fill('Repeat independently against the unchanged approved criterion.')
-        page.locator('#failureReassessmentOutcome').select_option('not-assessed')
-        page.locator('#failureRetentionDueAt').fill('2026-11-15T10:00')
+        expect(page.locator('#failureReasonForm input[type="datetime-local"]')).to_have_count(0)
+        expect(page.locator('#failureReassessedAt, #failureRetentionDueAt')).to_have_count(0)
+        page.locator('#failureReassessmentOutcome').select_option('needs-practice')
         page.locator('#failureReasonForm button[type="submit"]').click()
         state = page.evaluate('window.__rapsTest.state()')
         assert state['ratings']['ASM-004'] == 'fail'
@@ -273,8 +278,12 @@ def main():
         assert state['failureDetails']['ASM-004']['classifiedAt'] > grade_stamp
         assert state['failureDetails']['ASM-004']['learnerExplanation'].startswith('I noticed the cue')
         assert state['failureDetails']['ASM-004']['practicePlan'].startswith('Demonstrate the approved')
+        assert state['failureDetails']['ASM-004']['reassessmentOutcome'] == 'needs-practice'
+        assert not state['failureDetails']['ASM-004'].get('reassessedAt')
+        assert not state['failureDetails']['ASM-004'].get('retentionDueAt')
         assert 'Observed incomplete task endpoint' in page.evaluate('window.__rapsTest.review()')
         checks.append('critical failure review preserves grade and carries actual observation into debrief')
+        checks.append('FAIL coaching has no date/time inputs and saves a follow-up outcome without requiring a date')
 
         page.reload(wait_until='networkidle')
         page.wait_for_function('!!window.__rapsTest')
@@ -289,7 +298,9 @@ def main():
         assert state['failureDetails']['ASM-004']['learnerExplanation'].startswith('I noticed the cue')
         assert state['failureDetails']['ASM-004']['practicePlan'].startswith('Demonstrate the approved')
         assert state['failureDetails']['ASM-004']['reassessmentPlan'].startswith('Repeat independently')
-        assert state['failureDetails']['ASM-004']['retentionDueAt'] > 0
+        assert state['failureDetails']['ASM-004']['reassessmentOutcome'] == 'needs-practice'
+        assert not state['failureDetails']['ASM-004'].get('reassessedAt')
+        assert not state['failureDetails']['ASM-004'].get('retentionDueAt')
         assert state['observations']['ASM-001']['tags'] == ['prompted']
         checks.append('rich diagnostic record, assistance, and follow-up survive a real page reload')
 
@@ -307,11 +318,17 @@ def main():
         page.set_viewport_size({'width': 1366, 'height': 900})
         page.locator('#reviewModeBtn').click()
         expect(page.locator('#gradedTop')).to_be_visible()
+        legacy_dates = page.evaluate('window.__rapsTest.seedLegacyCoachingDates("ASM-004")')
         page.locator('[data-failure="ASM-004"]').first.click()
         modal_image = Path('/tmp/raps-evaluator-review-modal.png')
         page.screenshot(path=str(modal_image))
         artifacts.append(str(modal_image))
-        page.locator('#formModal [data-close="formModal"]').click()
+        page.locator('#failurePracticePlan').fill('Continue targeted practice against the approved criterion.')
+        page.locator('#failureReasonForm button[type="submit"]').click()
+        legacy_detail = page.evaluate('window.__rapsTest.state().failureDetails["ASM-004"]')
+        assert legacy_detail['practicePlan'].startswith('Continue targeted practice')
+        assert all(legacy_detail[key] == value for key, value in legacy_dates.items())
+        checks.append('editing an older FAIL coaching record preserves its saved historical dates')
 
         before_correction = page.evaluate('window.__rapsTest.state().failureDetails["ASM-004"]')
         page.locator('[data-item="ASM-004"][data-rating="pass"]').click()
@@ -325,7 +342,7 @@ def main():
         assert corrected['ratings']['ASM-004'] == 'pass'
         assert corrected['stamps']['ASM-004'] == corrected_stamp
         assert corrected['observations']['ASM-004']['observedAt'] == corrected_observed_at
-        for key in ['mode', 'contributor', 'additionalContributors', 'comment', 'learnerExplanation', 'practicePlan', 'reassessmentPlan']:
+        for key in ['mode', 'contributor', 'additionalContributors', 'comment', 'learnerExplanation', 'practicePlan', 'reassessmentPlan', 'reassessmentOutcome', 'reassessedAt', 'retentionDueAt']:
             assert corrected['failureDetails']['ASM-004'][key] == before_correction[key], key
         checks.append('coaching edits after a FAIL-to-PASS correction preserve contributor history, notes, and grade timestamps')
 
