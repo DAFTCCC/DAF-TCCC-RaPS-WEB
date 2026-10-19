@@ -30,9 +30,12 @@ window.__phaseNavigationTest = {
 """
 
 
-def reveal_phase(page, code):
-    """Scroll only the bottom strip before a genuine pointer click."""
-    button = page.locator(f'#bottomTabs [data-section="{code}"]')
+PHASE_BARS = ('#tabs', '#checklistBottomTabs', '#bottomTabs')
+
+
+def reveal_phase(page, code, strip='#bottomTabs'):
+    """Reveal the control in its own horizontal strip for a pointer click."""
+    button = page.locator(f'{strip} [data-section="{code}"]')
     button.evaluate("""button=>{
       const strip=button.parentElement;
       strip.scrollLeft=button.offsetLeft-strip.offsetLeft-(strip.clientWidth-button.offsetWidth)/2;
@@ -41,7 +44,7 @@ def reveal_phase(page, code):
 
 
 def assert_selected(page, code):
-    for selector in ('#tabs', '#bottomTabs'):
+    for selector in PHASE_BARS:
         assert page.locator(f'{selector} [data-section][aria-pressed="true"]').count() == 1
         expect(page.locator(f'{selector} [data-section="{code}"]')).to_have_attribute('aria-pressed', 'true')
     assert page.evaluate('window.__rapsTest.state().section') == code
@@ -68,12 +71,12 @@ def assert_geometry(page):
     return geometry
 
 
-def select_and_check(page, code):
+def select_and_check(page, code, strip='#bottomTabs'):
     page.evaluate('window.scrollTo(0,document.documentElement.scrollHeight)')
-    button = reveal_phase(page, code)
+    button = reveal_phase(page, code, strip)
     button.click()
     assert_selected(page, code)
-    expect(page.locator(f'#bottomTabs [data-section="{code}"]')).to_be_focused()
+    expect(page.locator(f'{strip} [data-section="{code}"]')).to_be_focused()
     # Header collapse and its CSS transition may change the inset after a jump.
     page.wait_for_timeout(230)
     position = page.evaluate(r"""()=>{
@@ -133,16 +136,24 @@ def main():
         for tier in ('1', '2', '3', '4'):
             page.evaluate('(tier)=>window.__rapsTest.setup(tier)', tier)
             expected = page.evaluate('window.__phaseNavigationTest.expected()')
-            for selector in ('#tabs', '#bottomTabs'):
+            for selector in PHASE_BARS:
                 actual = page.locator(f'{selector} [data-section]').evaluate_all(
                     '(buttons)=>buttons.map(button=>({code:button.dataset.section,label:button.textContent.trim()}))')
                 assert actual == expected, (tier, selector, actual, expected)
             course = page.locator('#evalPhaseCourse').inner_text()
             assert {'1': 'ASM', '2': 'CLS', '3': 'CMC', '4': 'CPP'}[tier] in course, course
             assert_geometry(page)
-            for code in ('COMMS', 'DOC', 'EVAC'):
-                select_and_check(page, code)
-            checks.append(f'tier {tier}: complete top/bottom phase parity and native COM / DOC / EVAC access')
+            order = page.evaluate("""()=>{
+              const strip=document.getElementById('checklistBottomTabs');
+              const next=document.getElementById('nextUnresolvedBottomBtn');
+              return {before:!!(strip.compareDocumentPosition(next)&Node.DOCUMENT_POSITION_FOLLOWING),
+                sameCloseout:!!strip.closest('.blockCloseout')&&strip.closest('.blockCloseout')===next.closest('.blockCloseout')};
+            }""")
+            assert order['before'] and order['sameCloseout'], order
+            for strip in ('#bottomTabs', '#checklistBottomTabs'):
+                for code in ('COMMS', 'DOC', 'EVAC'):
+                    select_and_check(page, code, strip)
+            checks.append(f'tier {tier}: all three phase rows match; checklist row precedes Next Unresolved; native COM / DOC / EVAC access')
 
         for width, height in ((320, 740), (390, 844), (844, 390), (1366, 900)):
             page.set_viewport_size({'width': width, 'height': height})
@@ -188,6 +199,7 @@ def main():
         select_and_check(page, 'COMMS')
         assert all(button.is_disabled() for button in page.locator('#items [data-item]').all())
         assert page.locator('#bottomTabs [data-section]:disabled').count() == 0
+        assert page.locator('#checklistBottomTabs [data-section]:disabled').count() == 0
         after = page.evaluate('window.__rapsTest.state()')
         assert after['ratings'] == sealed['ratings'] and after['timers'] == sealed['timers']
         assert after['finalizedAt'] == sealed['finalizedAt']

@@ -19,6 +19,7 @@ bash tests/class-create-permissions.sh
 python3 tests/test_reporting_archive_worker.py
 python3 tests/browser-workflow.py
 python3 tests/browser-phase-navigation.py
+python3 tests/browser-unresolved-navigation.py
 python3 tests/browser-responsive.py
 python3 tests/browser-accessibility.py
 python3 tests/browser-auth-layout.py
@@ -41,6 +42,13 @@ positions with pinned timers, horizontal scrolling/focus, finalized read-only
 navigation, footer space, and a usable STOP control on short landscape screens.
 Navigation selects a section of the existing class curriculum; it does not
 switch an active assessment to another course.
+
+The unresolved-navigation check verifies the row above the checklist's Next
+Unresolved button and the locations highlighted after an incomplete finalization
+review. It covers missing grades, critical failure classification, critical NT,
+linked/overall/active timers, clearing markers after correction and valid final
+FAIL results. The markers derive from the existing proficiency checks and do not
+introduce a grading or finalization rule.
 
 The policy tests compare against the pre-change commit `be124a1d36af411ea4676eba283eb1b3b762cd14`. They protect the exact tier definitions and existing grading, timing, and authoritative lifecycle functions. Keep this reference fixed when testing this change. Any future standards update requires a separately reviewed baseline.
 

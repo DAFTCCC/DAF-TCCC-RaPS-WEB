@@ -539,9 +539,9 @@ function scrubPrivateViews(){
     'scenarioCoverage','classAnalyticsKpis','classGapTable','classRootCauses','studentComparison','classHeatmap',
     'evaluatorSignals','rosterCount','rosterList','activeEvaluationLockBanner','studentLabel','attemptBadge',
     'attemptLabel','tierTitle','tierSource','instructions','elapsedTop','criticalTop','gradedTop','unresolvedTop',
-    'globalTimer','quickCufTimer','activeTimers','activeTimerCount','items','tabs','sectionTitle','sectionProgress',
+    'globalTimer','quickCufTimer','activeTimers','activeTimerCount','items','tabs','checklistBottomTabs','bottomTabs','evalPhaseCourse','sectionTitle','sectionProgress',
     'sectionTools','timeline','eventCount','learnerPracticeHistory','observeFocus','diagnosticReviewQueue',
-    'observationFeedbackText','aarText','formModalTitle','formModalBody']){const element=$(id);if(element)element.textContent='';}
+    'observationFeedbackText','aarText','finalizationIssues','formModalTitle','formModalBody']){const element=$(id);if(element)element.textContent='';}
   for(const id of ['trainerSign','attemptEvaluatorId','studentSign','overallNotes','rosterSearch','rosterFile','backupImportFile']){const element=$(id);if(element)element.value='';}
   if($('activeEvaluationLockBanner'))$('activeEvaluationLockBanner').classList.add('hidden');
   setReadOnly(true);setHomeArea('evaluate');showView('homeView');
@@ -1578,7 +1578,7 @@ function renderEval(){
   if(tq){$('quickCufTimerCard').classList.remove('hidden');$('quickCufTimerStandard').textContent=tq.standard;$('quickCufTimer').innerHTML=timerMarkup(tq);}else $('quickCufTimerCard').classList.add('hidden');
   const gd=(t.timers||[]).find(d=>d.section==='GLOBAL');
   if(gd){$('globalTimerCard').classList.remove('hidden');$('globalTimerStandard').textContent=gd.standard;$('globalTimer').innerHTML=timerMarkup(gd);}else $('globalTimerCard').classList.add('hidden');
-  renderTabs(); renderSection(); renderTimeline(); renderKpis(); renderActiveTimers(); bindEvalDynamic(); renderObservationFeedback(); setReadOnly(!canEditCurrentEvaluation());
+  renderTabs(); renderSection(); renderTimeline(); renderKpis(); renderActiveTimers(); bindEvalDynamic(); renderObservationFeedback(); setReadOnly(!canEditCurrentEvaluation()); renderFinalizationHighlights();
   if(focused&&!focused.element.isConnected)restoreFocusTarget(focused,false);
 }
 function setReadOnly(readonly){
@@ -1597,18 +1597,19 @@ function sectionTabLabel(code){
 function renderTabs(){
   const t=tier(),st=evalState();
   const markup=t.sections.map(s=>`<button type="button" class="tab ${s.code===st.section?'active':''} ${sectionStatus(s)}" data-section="${esc(s.code)}" aria-pressed="${s.code===st.section}" aria-label="${esc(s.code)} — ${esc(s.title)}">${esc(sectionTabLabel(s.code))}</button>`).join('');
-  for(const id of ['tabs','bottomTabs']){
+  for(const id of ['tabs','checklistBottomTabs','bottomTabs']){
     const bar=$(id);if(!bar)continue;
     const offset=bar.scrollLeft;
     bar.innerHTML=markup;bar.scrollLeft=offset;
-    const active=bar.querySelector('.active');
-    if(active){
-      const bounds=bar.getBoundingClientRect(),button=active.getBoundingClientRect();
-      if(button.left<bounds.left)bar.scrollLeft+=button.left-bounds.left-8;
-      else if(button.right>bounds.right)bar.scrollLeft+=button.right-bounds.right+8;
-    }
+    keepActivePhaseVisible(bar);
   }
   if($('evalPhaseCourse')){$('evalPhaseCourse').textContent=t.shortName;$('evalPhaseCourse').title=`Tier ${t.id} — ${t.name}`;}
+}
+function keepActivePhaseVisible(bar){
+  const active=bar?.querySelector('.active');if(!active)return;
+  const bounds=bar.getBoundingClientRect(),button=active.getBoundingClientRect();
+  if(button.left<bounds.left)bar.scrollLeft+=button.left-bounds.left-8;
+  else if(button.right>bounds.right)bar.scrollLeft+=button.right-bounds.right+8;
 }
 function navigateEvaluationSection(code,{jump=false}={}){
   const st=evalState();if(!st||!tier()?.sections.some(s=>s.code===code))return;
@@ -1638,6 +1639,10 @@ function renderSection(){
   const remaining=reviewRemainingItems(sec.items);
   if($('observeFocus')){const focus=remaining[0];$('observeFocus').innerHTML=focus?`<span>Current focus</span><b>${esc(sec.code)} · ${esc(focus.id)}${focus.critical?' · CRITICAL':''}</b><em>${esc(focus.text)}</em>`:`<span>Current phase</span><b>${esc(sec.code)} · COMPLETE</b><em>No unresolved criteria remain in this phase.</em>`;}
   $('blockCloseoutHint').textContent=remaining.length?`${remaining.length} unresolved criterion${remaining.length===1?'':'a'} remain in this phase. Use Next Unresolved to continue forward without scrolling back through the checklist.`:(isObserveMode(st)?'All required criteria in this phase are resolved. Switch to REVIEW when the lane is complete to document, review, and finalize.':'All required criteria in this phase are resolved.');
+  if(finalizationReviewActive()){
+    const issues=evaluationCompletionIssues(),phaseIssues=issues.filter(issue=>issue.section===sec.code);
+    $('blockCloseoutHint').textContent=phaseIssues.length?`Resolve the ${phaseIssues.length} highlighted location${phaseIssues.length===1?'':'s'} in this phase before finalization. Use Next Unresolved to open a required criterion or timer.`:issues.length?'This phase is resolved. Use Next Unresolved to find the remaining criteria or timers, including overall timing.':'All finalization requirements are resolved. Use Review / Finalize to continue.';
+  }
   const allRemaining=reviewRemainingItems(allItems(t));
   $('nextUnresolvedBottomBtn').disabled=!!st.finalizedAt||allRemaining.length===0;
   $('nextUnresolvedBtn').disabled=!!st.finalizedAt||allRemaining.length===0;
@@ -1817,6 +1822,10 @@ function unresolvedItem(i,st){
   return !st.ratings[i.id]||(i.critical&&st.ratings[i.id]==='nt')||(!isObserveMode(st)&&criticalFailureCauseMissing(i,st))||(st.timerForced[i.id]&&st.ratings[i.id]!=='fail');
 }
 function nextUnresolved(){
+  if(finalizationReviewActive()){
+    const issue=evaluationCompletionIssues()[0];
+    if(issue){goToCompletionIssue(issue);return;}
+  }
   const st=evalState(),t=tier(),items=allItems(t),remaining=items.filter(i=>unresolvedItem(i,st));
   if(!remaining.length){alert('No unresolved criteria remain.');return;}
 
@@ -2038,8 +2047,11 @@ function proficiency(t=tier(),st=evalState()){
   return {result,score,criticalFail,criticalCauseMissing,criticalUnresolved,otherUnresolved,timerPassMissing,activeTimers,globalStatus};
 }
 function renderKpis(){
-  const st=evalState();if(!st)return;const p=proficiency();$('elapsedTop').textContent=fmt(sessionElapsed(st));$('criticalTop').textContent=p.criticalFail.length;$('gradedTop').textContent=p.score.percentText;$('unresolvedTop').textContent=p.criticalUnresolved.length+p.criticalCauseMissing.length+p.otherUnresolved.length+p.timerPassMissing.length+p.activeTimers.length;
+  const st=evalState();if(!st)return;const p=proficiency();$('elapsedTop').textContent=fmt(sessionElapsed(st));$('criticalTop').textContent=p.criticalFail.length;$('gradedTop').textContent=p.score.percentText;
   renderAssessmentStatus();
+  const issues=evaluationCompletionIssues(p);
+  $('unresolvedTop').textContent=issues.length;
+  $('unresolvedTop').title='Unresolved criterion and timer locations';
 }
 function renderTimeline(){ const st=evalState();if(!st)return;$('eventCount').textContent=`${st.events.length} events`;$('timeline').innerHTML=st.events.length?st.events.slice().reverse().map(e=>`<div class="event"><div class="eventTime">${fmt(e.elapsed)}</div><div><b>${esc(e.label)}</b>${e.detail?`<div>${esc(e.detail)}</div>`:''}<div class="stamp">${wall(e.at)}</div></div></div>`).join(''):'<div class="stamp">No events yet.</div>'; }
 function diagnosticTagLabel(tag){return ({independent:'Independent',prompted:'Prompted','self-corrected':'Self-corrected',equipment:'Equipment issue','not-observed':'Unable to observe'})[tag]||tag;}
@@ -2115,9 +2127,91 @@ ${st.overallNotes||'None'}
 
 Generated ${new Date().toLocaleString()} | TCCC Evaluation Suite v${APP_VERSION}`;
 }
+let finalizationReviewKey='';
+function completionAttemptKey(){return `${currentCloudUserId()}|${currentClassId}|${evalState()?.id||''}`;}
+function finalizationReviewActive(){return finalizationReviewKey===completionAttemptKey()&&!evalState()?.finalizedAt;}
+function evaluationCompletionIssues(p=proficiency()){
+  // Presentation of the existing finalization checks, never a second scoring rule.
+  const st=evalState(),items=allItems(),issues=new Map();
+  const add=(kind,id,section,label,reason)=>{
+    const key=`${kind}:${id}`,issue=issues.get(key)||{key,kind,id,section,label,reasons:[]};
+    if(!issue.reasons.includes(reason))issue.reasons.push(reason);
+    issues.set(key,issue);
+  };
+  [...p.criticalUnresolved,...p.otherUnresolved].forEach(i=>add('item',i.id,items.find(x=>x.id===i.id)?.section,i.id,
+    st.ratings[i.id]==='nt'?'Critical criterion cannot be NT':'Needs a grade'));
+  p.criticalCauseMissing.forEach(i=>add('item',i.id,items.find(x=>x.id===i.id)?.section,i.id,'Add critical failure mode and contributor'));
+  p.timerPassMissing.forEach(d=>{
+    const i=items.find(x=>x.id===d.linkedItemId);
+    add('item',d.linkedItemId,i?.section,d.linkedItemId,'PASS requires the linked timing standard to be met');
+    add('timer',d.id,d.section,d.label,'Resolve required timing evidence');
+  });
+  p.activeTimers.forEach(d=>add('timer',d.id,d.section,d.label,'Resolve active or paused timer'));
+  const global=(tier().timers||[]).find(d=>d.section==='GLOBAL');
+  if(global&&['incomplete','live-met'].includes(p.globalStatus))add('timer',global.id,global.section,global.label,'Complete overall timing evidence');
+  return [...issues.values()];
+}
+function renderFinalizationHighlights(){
+  document.querySelectorAll('#evalView .needsResolution').forEach(el=>el.classList.remove('needsResolution'));
+  document.querySelectorAll('#evalView .resolutionFlag').forEach(el=>el.remove());
+  if(!finalizationReviewActive())return;
+  const issues=evaluationCompletionIssues(),counts=new Map();
+  const mark=(target,issue)=>{
+    if(!target)return;target.classList.add('needsResolution');
+    const flag=document.createElement('div');flag.className='resolutionFlag';flag.textContent=`Unresolved: ${issue.reasons.join(' · ')}`;
+    flag.setAttribute(issue.kind==='item'?'data-finalization-item':'data-finalization-timer',issue.id);target.prepend(flag);
+  };
+  issues.forEach(issue=>{
+    if(issue.section&&issue.section!=='GLOBAL')counts.set(issue.section,(counts.get(issue.section)||0)+1);
+    if(issue.kind==='item')mark(document.querySelector(`#items [data-article="${CSS.escape(issue.id)}"]`),issue);
+    else{
+      const tools=new Set([...document.querySelectorAll(`#evalView [data-timer="${CSS.escape(issue.id)}"]`)].map(el=>el.closest('.toolCard')).filter(Boolean));
+      tools.forEach(tool=>mark(tool,issue));
+      document.querySelectorAll(`#activeTimers [data-active-timer-stop="${CSS.escape(issue.id)}"]`).forEach(el=>el.closest('.activeTimerRow')?.classList.add('needsResolution'));
+    }
+  });
+  document.querySelectorAll('#evalView [data-section]').forEach(button=>{
+    const count=counts.get(button.dataset.section)||0;if(!count)return;
+    button.classList.add('needsResolution');button.dataset.finalizationCount=String(count);
+    const flag=document.createElement('span');flag.className='resolutionFlag resolutionCount';flag.textContent=`! ${count}`;button.append(flag);
+    button.setAttribute('aria-label',`${button.getAttribute('aria-label')} — ${count} unresolved location${count===1?'':'s'}`);
+  });
+  ['tabs','checklistBottomTabs','bottomTabs'].forEach(id=>keepActivePhaseVisible($(id)));
+  $('unresolvedTop')?.parentElement?.classList.toggle('needsResolution',issues.length>0);
+}
+function goToCompletionIssue(issue){
+  const st=evalState();if(!st||!issue)return;
+  // This is an explicit navigation destination, rather than a modal dismissal
+  // that should return focus to Review / Finalize.
+  deferredModalFocus=null;
+  if(issue.section&&issue.section!=='GLOBAL')st.section=issue.section;
+  if(issue.kind==='item'&&st.ratings[issue.id]==='nt')st.showNt=true;
+  if(issue.kind==='timer'||criticalFailureCauseMissing(itemById(issue.id),st)){st.observeMode=false;st.fieldMode=false;}
+  if(canEditCurrentEvaluation())saveDb();renderEval();
+  requestAnimationFrame(()=>{
+    if(!evalVisible())return;
+    const control=issue.kind==='timer'?[...document.querySelectorAll(`#evalView [data-timer="${CSS.escape(issue.id)}"]`)].find(el=>el.getClientRects().length&&!el.disabled):null;
+    const target=issue.kind==='item'?document.querySelector(`#items [data-article="${CSS.escape(issue.id)}"]`):control?.closest('.toolCard');
+    if(!target)return;updateEvalHeaderCollapse();const sticky=evaluationStickyMetrics();
+    window.scrollTo({top:Math.max(0,window.scrollY+target.getBoundingClientRect().top-Math.max(sticky.height,sticky.unobstructedTop)-12),behavior:'instant'});
+    const item=itemById(issue.id),focus=control||(criticalFailureCauseMissing(item,st)?target.querySelector('[data-failure]'):target.querySelector('.choice:not(:disabled)'));
+    focus?.focus({preventScroll:true});updateEvalHeaderCollapse();
+  });
+}
 function reviewFinalize(){
   $('aarText').textContent=buildReviewText();
   const p=proficiency();
+  finalizationReviewKey=p.result==='INCOMPLETE'?completionAttemptKey():'';
+  renderEval();
+  const issues=p.result==='INCOMPLETE'?evaluationCompletionIssues(p):[],panel=$('finalizationIssues');
+  panel.classList.toggle('hidden',!issues.length);
+  panel.innerHTML=issues.length?'<p><b>Finalization blocked — resolve the highlighted locations.</b></p><p>Select a location to open its criterion or timer.</p>':'';
+  const key=completionAttemptKey();
+  issues.forEach(issue=>{
+    const button=document.createElement('button');button.type='button';button.className='ghost finalizationJump';
+    button.dataset.finalizationJump=issue.key;button.textContent=`${issue.section==='GLOBAL'?'Overall timer':sectionTabLabel(issue.section||'')} · ${issue.label} — ${issue.reasons.join(' · ')}`;
+    button.onclick=()=>{if(key!==completionAttemptKey())return;closeModal('reportModal');goToCompletionIssue(issue);};panel.append(button);
+  });
   $('confirmFinalizeBtn').disabled=p.result==='INCOMPLETE';
   $('confirmFinalizeBtn').textContent=p.activeTimers.length?'Stop / resolve active timers':p.result==='INCOMPLETE'?'Resolve Items Before Finalizing':`Finalize ${p.result}`;
   openModal('reportModal');
@@ -2486,7 +2580,7 @@ function setupNativeBackButton(){
 
 // ---------- Bindings ----------
 function bindEvalDynamic(){
-  document.querySelectorAll('[data-section]').forEach(b=>b.onclick=()=>navigateEvaluationSection(b.dataset.section,{jump:!!b.closest('#bottomTabs')}));
+  document.querySelectorAll('[data-section]').forEach(b=>b.onclick=()=>navigateEvaluationSection(b.dataset.section,{jump:!!b.closest('#bottomTabs,#checklistBottomTabs')}));
   document.querySelectorAll('[data-item]').forEach(b=>b.onclick=guardEvaluationEdit(()=>setRating(b.dataset.item,b.dataset.rating,'explicit')));
   document.querySelectorAll('[data-note]').forEach(n=>n.oninput=guardEvaluationEdit(()=>{const st=evalState();st.notes[n.dataset.note]=n.value;saveDb();}));
   document.querySelectorAll('[data-note-toggle]').forEach(b=>b.onclick=guardEvaluationEdit(()=>{const st=evalState();st.noteOpen=st.noteOpen||{};st.noteOpen[b.dataset.noteToggle]=!st.noteOpen[b.dataset.noteToggle];saveDb();renderSection();bindEvalDynamic();setReadOnly(!canEditCurrentEvaluation());setTimeout(()=>[...document.querySelectorAll('[data-note]')].find(n=>n.dataset.note===b.dataset.noteToggle)?.focus(),0);}));
@@ -2712,7 +2806,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.10';
+  const UPDATE_BUILD = '3.4.12-web.11';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
