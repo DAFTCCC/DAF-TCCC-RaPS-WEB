@@ -1,8 +1,8 @@
-# Web.8: username accounts and verified NUC CSV archives
+# Web.8: username accounts, TEST MAJCOM and verified NUC CSV archives
 
 Deploy the backend from the reviewed feature commit **before merging its frontend into `main`**. GitHub Pages publishes `main`; the new dashboards require the archive table and clear their reports if its permissions or schema are unavailable. Installing website files cannot migrate the NUC database or deploy its functions.
 
-This release adds username-only accounts with administrator-assisted recovery. It also fixes shared-trash classes appearing in scoped dashboard totals and adds selected-class CSV archival. Existing email accounts continue to use email sign-in and recovery.
+This release adds username-only accounts with administrator-assisted recovery, a peer TEST MAJCOM with a practice copy of every installation, and selected-class CSV archival. It also fixes shared-trash classes appearing in scoped dashboard totals. Existing email accounts continue to use email sign-in and recovery.
 
 ## Review and install the backend
 
@@ -24,8 +24,15 @@ It then installs only these new migrations, in this order:
 
 1. `20261018_managed_login.sql`
 2. `20261018_class_reporting_archives.sql`
+3. `20261019_test_majcom_catalog.sql`
 
 Each migration and its private deployment ledger entry commit in one database transaction. The ledger stores the SQL hash and a digest of installed function definitions, ACLs, table contracts, policies and triggers. A retry skips a migration only when both match. Existing feature objects without a matching ledger, changed definitions, unsupported schemas and unexpected permissions stop the rollout for inspection. Do not apply the old account/operational migrations again.
+
+If you already installed backend commit `05f7ccd`, use the updated reviewed helper
+with its new source commit in a fresh stage. The first two migrations and their
+fingerprint contracts are unchanged; the helper verifies and skips them before
+adding TEST. Keep the previous stage and backups; its resume marker belongs to
+the earlier commit.
 
 Next it installs the matching `managed-login`, `admin-invite-user` and `admin-manage-user` handlers, and pins the archive worker under `/home/nuc/raps-tools/web8-<full commit>/`. It restarts **only the existing Functions container**, through its base/isolation Compose service, preserving the container and immutable image. No Auth, database, Caddy, router or FieldReady service is recreated. The helper verifies container identity and health, the public organizational catalog, and the expected unauthenticated `401` responses from all three account handlers.
 
@@ -52,6 +59,27 @@ Username accounts have no user-facing recovery email. For recovery, an Enterpris
 If provisioning fails after creating the Auth identity but before registering its managed account, that banned identity can still reserve the username without appearing in the recovery selector. Stop and have the server administrator inspect the private account state, or deliberately choose a different username for the intended new account. Do not delete Auth identities blindly. Registered accounts left in `issuing` or `changing` can be recovered through an administrator retry after five minutes.
 
 Keep existing email users on the existing email invitation/reset flow. Internal identity addresses used by username accounts are implementation details and are not mailboxes.
+
+## TEST MAJCOM
+
+TEST is a peer command with a separate practice installation for each of the
+73 existing locations. For example, `BEALE` stays under its real command;
+`TEST-BEALE` belongs to TEST and appears as **Beale AFB (TEST)**. Original
+installation IDs, command relationships and training records are preserved.
+
+Assign **MAJCOM Manager → TEST** to oversee all practice installations. As with
+other MAJCOM Managers, this grants oversight rather than Enterprise account
+administration or automatic assessment editing. Assign an Evaluator or Program
+Manager membership at a specific **(TEST)** installation for practical class and
+assessment work, using the existing role rules. No test accounts are created
+automatically. Existing explicit evaluator assignments continue to authorize
+cross-scope sharing; TEST introduces no wildcard access to live installations.
+
+When creating practice classes, select **TEST** under Supported MAJCOM and choose
+any practice installation. TEST IDs and labels are retained in synchronization
+and CSV exports. Published classes keep their TEST/live scope. Enterprise
+Operations defaults to **All live MAJCOMs**, which excludes practice records;
+select **TEST** to view its separate reports and archive history.
 
 ## Local copies, shared trash and NUC archives
 
@@ -95,5 +123,9 @@ With authorized test accounts and selected test classes, verify:
 4. Confirm shared-trash classes disappear from Enterprise, MAJCOM and Program totals, while a class removed only locally remains until deliberately archived.
 5. Request a test-class archive. Confirm it remains counted while queued; run only its selected UUID on the NUC; inspect the private files locally; refresh all three dashboard scopes and confirm its totals disappear while unrelated classes remain.
 6. Check the archive history panel still identifies the completed class. Confirm queued/archived records resist mutation and no clinical grading results changed.
+7. Create a practice class at a TEST installation. Verify TEST oversight can see
+   it, an unrelated live scope cannot see it without an explicit authorized
+   assignment, and live Enterprise totals exclude it. Select TEST in Enterprise
+   and confirm its practice metrics and all practice installations are available.
 
 Development tests use synthetic accounts and training rows. They do not create production accounts, inspect live student data, deliver passwords or prove physical disk durability after hardware failure. Production field testing and an independent backup of retained CSVs remain owner-operated steps.

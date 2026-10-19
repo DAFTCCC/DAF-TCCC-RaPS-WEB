@@ -32,6 +32,14 @@ claim its first assessment.
 Official criteria, scoring thresholds, timing standards, and claim/finalize/void
 grading algorithms are unchanged.
 
+TEST is a peer MAJCOM with separate `TEST-*` installation records for every
+physical location. A TEST MAJCOM Manager oversees all practice installations;
+Evaluator and Program Manager grants remain installation-scoped. TEST does not
+grant Enterprise access or wildcard live-record access. Existing authorized
+cross-scope evaluator assignments retain their normal sharing permissions.
+Enterprise live totals exclude practice records by default; selecting TEST
+shows its reports through the same MAJCOM reporting path.
+
 Existing server administrative overrides for active assessments remain subject
 to the hardened Enterprise check, parent lifecycle restrictions, and existing
 auditing. Normal evaluator controls and background grading uploads require the

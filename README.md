@@ -8,6 +8,11 @@ Enterprise Administrators can create **username logins with temporary passwords*
 
 Enterprise Class Operations can request a **NUC CSV archive** for selected classes. The worker saves and verifies private CSV files before excluding the class from Enterprise, MAJCOM, and installation dashboards. Removing a local copy keeps shared server records; shared trash is now excluded from reporting totals.
 
+**TEST** is a peer MAJCOM with practice copies of all 73 installations. Select TEST
+for practice classes and separate TEST reporting; default Enterprise live totals
+exclude those records. Existing installation relationships and role permissions
+remain in use.
+
 Web.7 adds a separate Enterprise **Remove Local Copy** action under **Manage
 Training**, with exact synchronization checks and explicit reload. It also
 hardens membership expiry, role scope, account approval, and account switching.

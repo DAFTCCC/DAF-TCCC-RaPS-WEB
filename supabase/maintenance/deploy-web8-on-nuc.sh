@@ -23,7 +23,8 @@ PROJECT = Path('/home/nuc/supabase-project')
 HOME = Path('/home/nuc')
 REPOSITORY = 'https://raw.githubusercontent.com/DAFTCCC/DAF-TCCC-RaPS-WEB/'
 HELPER = 'supabase/maintenance/deploy-web8-on-nuc.sh'
-MIGRATIONS = ['20261018_managed_login.sql', '20261018_class_reporting_archives.sql']
+MIGRATIONS = ['20261018_managed_login.sql', '20261018_class_reporting_archives.sql',
+              '20261019_test_majcom_catalog.sql']
 HANDLERS = ['managed-login', 'admin-invite-user', 'admin-manage-user']
 WORKER = 'supabase/maintenance/archive-selected-classes-on-nuc.py'
 DB = ['sudo', '-n', 'docker', 'exec', '-i', '-u', 'postgres', 'supabase-db',
@@ -108,6 +109,23 @@ def fetch(commit, relative):
 
 
 def fingerprint(kind):
+    if kind == 'test':
+        # Keep the existing managed/archive fingerprints unchanged so an owner
+        # who installed the earlier web.8 backend can safely add TEST afterwards.
+        return """select encode(sha256(convert_to(jsonb_build_object(
+          'mapping_contract',(select jsonb_build_array(c.relrowsecurity,c.relforcerowsecurity,c.relacl,r.rolname,
+            (select jsonb_agg(jsonb_build_array(a.attname,format_type(a.atttypid,a.atttypmod),a.attnotnull,pg_get_expr(d.adbin,d.adrelid)) order by a.attnum)
+             from pg_attribute a left join pg_attrdef d on d.adrelid=a.attrelid and d.adnum=a.attnum
+             where a.attrelid=c.oid and a.attnum>0 and not a.attisdropped),
+            (select jsonb_agg(pg_get_constraintdef(x.oid) order by x.conname) from pg_constraint x where x.conrelid=c.oid),
+            (select jsonb_agg(jsonb_build_array(p.polname,p.polpermissive,p.polcmd,p.polroles,pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid)) order by p.polname)
+             from pg_policy p where p.polrelid=c.oid))
+            from pg_class c join pg_roles r on r.oid=c.relowner where c.oid='private.raps_test_installations'::regclass),
+          'test_command',(select jsonb_agg(jsonb_build_array(id,code,name,active) order by id) from public.majcoms where code='TEST'),
+          'copies',(select jsonb_agg(jsonb_build_array(m.source_base_id,m.test_base_id,m.test_majcom_id,m.source_code,
+            s.code,s.name,s.active,s.majcom_id,b.code,b.name,b.active,b.majcom_id) order by m.source_code,m.source_base_id)
+            from private.raps_test_installations m join public.bases s on s.id=m.source_base_id join public.bases b on b.id=m.test_base_id)
+        )::text,'UTF8')),'hex')"""
     if kind == 'managed':
         functions = "(n.nspname='private' and (p.proname like 'raps_login_%' or p.proname in ('raps_ops_memberships','raps_account_is_enterprise_admin','raps_account_can_view_membership'))) or (n.nspname='public' and p.proname like 'raps_managed_%')"
         tables = "n.nspname='private' and (c.relname like 'raps_managed_%' or c.relname like 'raps_login_%')"
@@ -220,6 +238,21 @@ def endpoint(path, body, expected_status, expected_code, stage):
     if path == 'request-access' and (not isinstance(result.get('bases'), list) or not isinstance(result.get('majcoms'), list)):
         raise ValueError('Public catalog contract differs')
     print(path + ': readiness MATCH')
+    return result
+
+
+def verify_test_catalog(catalog):
+    commands = [row for row in catalog['majcoms'] if row.get('code') == 'TEST']
+    if len(commands) != 1 or not commands[0].get('id'):
+        raise ValueError('The public catalog must contain exactly one TEST MAJCOM')
+    test_id = commands[0]['id']
+    copies = [row for row in catalog['bases'] if row.get('majcom_id') == test_id]
+    physical = [row for row in catalog['bases'] if row.get('majcom_id') != test_id]
+    expected = {'TEST-' + row['code'] for row in physical}
+    if (not physical or len(expected) != len(physical) or len(copies) != len(physical)
+            or {row.get('code') for row in copies} != expected):
+        raise ValueError('TEST installations do not match the active physical catalog')
+    print('TEST catalog: MATCH; ' + str(len(copies)) + ' practice installations')
 
 
 def main():
@@ -302,7 +335,7 @@ def main():
         for name, current_hash in handler_hashes(stage).items():
             if current_hash not in (saved_handlers[name], manifest['supabase/functions/' + name + '/index.ts']):
                 raise ValueError('A handler changed since this stage was backed up; inspect before overwriting it')
-        for name, kind in zip(MIGRATIONS, ['managed', 'archive']):
+        for name, kind in zip(MIGRATIONS, ['managed', 'archive', 'test']):
             apply_migration(name, downloaded['supabase/migrations/' + name], kind, stage)
         for name in HANDLERS:
             destination = PROJECT / 'volumes/functions' / name
@@ -336,7 +369,7 @@ def main():
             time.sleep(2)
         else:
             raise ValueError('Functions health check did not become healthy')
-        endpoint('request-access', None, 200, None, stage)
+        verify_test_catalog(endpoint('request-access', None, 200, None, stage))
         endpoint('managed-login', {'action': 'status'}, 401, 'MANAGED_AUTH', stage)
         endpoint('admin-invite-user', {}, 401, 'INVITE_AUTH', stage)
         endpoint('admin-manage-user', {}, 401, 'ADMIN_AUTH', stage)

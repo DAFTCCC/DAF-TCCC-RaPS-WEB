@@ -80,6 +80,21 @@ function selectedMajcomId() {
   return byId('enterpriseMajcomFilter')?.value || '';
 }
 
+function isTestMajcom(majcom) {
+  return String(majcom?.code || '').toUpperCase() === 'TEST';
+}
+
+// TEST has its own installations and reports. The default enterprise view
+// describes live activity; selecting TEST uses the same reporting path.
+function majcomInScope(majcomId) {
+  const selected = selectedMajcomId();
+  return selected ? majcomId === selected
+    : !raw?.majcoms.some(majcom => majcom.id === majcomId && isTestMajcom(majcom))
+      // An inactive TEST command is absent from the active command catalog.
+      // Its reserved installation codes still identify retained practice data.
+      && !raw?.bases.some(base => base.majcom_id === majcomId && String(base.code || '').toUpperCase().startsWith('TEST-'));
+}
+
 function selectedBaseId() {
   return byId('enterpriseBaseFilter')?.value || '';
 }
@@ -130,7 +145,7 @@ function inject() {
       '<span>Enterprise Operations</span>',
       '<span>Enterprise Admin · Global RaPS View</span>',
     '</div>',
-    '<p class="helper">Enterprise-wide cloud view across all cataloged MAJCOMs and installations. Filters change the analytical view only; Supabase Row Level Security remains the authorization boundary.</p>',
+    '<p class="helper">Enterprise-wide cloud view across all cataloged MAJCOMs and installations. All live MAJCOMs excludes TEST practice data; select TEST to view its practice installations and reports. Filters change the analytical view only; Supabase Row Level Security remains the authorization boundary.</p>',
     '<p class="helper">Removing a local copy keeps the server record in these reports. Shared Enterprise Trash and verified NUC CSV archives are excluded. Pending or failed CSV archives remain counted; closed classes remain as training history.</p>',
 
     '<div class="enterpriseToolbar">',
@@ -140,7 +155,7 @@ function inject() {
         '<option value="365">Last 12 months</option>',
         '<option value="0">All available</option>',
       '</select></label>',
-      '<label><span>MAJCOM</span><select id="enterpriseMajcomFilter"><option value="">All MAJCOMs</option></select></label>',
+      '<label><span>MAJCOM</span><select id="enterpriseMajcomFilter"><option value="">All live MAJCOMs</option></select></label>',
       '<label><span>Installation</span><select id="enterpriseBaseFilter"><option value="">All installations</option></select></label>',
       '<label><span>Course</span><select id="enterpriseCourseFilter">',
         '<option value="">All courses</option>',
@@ -337,7 +352,7 @@ function refreshFilterOptions() {
 
   if (majcomSelect) {
     majcomSelect.innerHTML =
-      '<option value="">All MAJCOMs</option>' +
+      '<option value="">All live MAJCOMs</option>' +
       raw.majcoms.map((m) =>
         '<option value="' + esc(m.id) + '">' +
         esc(m.code || m.name) + ' · ' + esc(m.name) +
@@ -359,12 +374,10 @@ function refreshBaseOptions() {
   if (!select) return;
 
   const current = select.value || '';
-  const majcomId = selectedMajcomId();
-
   const majcomById = new Map(raw.majcoms.map((majcom) => [majcom.id, majcom]));
 
   const bases = raw.bases
-    .filter((base) => !majcomId || base.majcom_id === majcomId)
+    .filter((base) => majcomInScope(base.majcom_id))
     .slice()
     .sort((a, b) => {
       const aMajcom = majcomById.get(a.majcom_id);
@@ -400,19 +413,16 @@ function refreshBaseOptions() {
     '<option value="">All installations</option>' +
     groupedOptions;
 
-  if (current && bases.some((base) => base.id === current)) {
-    select.value = current;
-  }
+  select.value = current && bases.some((base) => base.id === current) ? current : '';
 }
 
 function organizationalBases() {
   if (!raw) return [];
 
-  const majcomId = selectedMajcomId();
   const baseId = selectedBaseId();
 
   return raw.bases.filter((base) => {
-    if (majcomId && base.majcom_id !== majcomId) return false;
+    if (!majcomInScope(base.majcom_id)) return false;
     if (baseId && base.id !== baseId) return false;
     return true;
   });
@@ -452,7 +462,7 @@ function filteredData() {
   );
 
   return {
-    majcoms: raw.majcoms,
+    majcoms: raw.majcoms.filter(majcom => majcomInScope(majcom.id)),
     bases,
     classes,
     events,
@@ -1111,7 +1121,8 @@ function render() {
       : 'last ' + selectedDays() + ' days';
 
   const scope = [
-    majcom ? (majcom.code || majcom.name) : 'All MAJCOMs',
+    majcom ? (majcom.code || majcom.name) : 'All live MAJCOMs',
+    isTestMajcom(majcom) ? 'Practice data' : null,
     base ? (base.code || base.name) : null,
     selectedCourse() || null,
     windowText

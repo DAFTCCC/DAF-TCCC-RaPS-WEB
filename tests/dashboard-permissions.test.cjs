@@ -113,6 +113,8 @@ function fixture([file, role, predicate, loader, resultId], options = {}) {
   const end = source.lastIndexOf('})();');
   source = source.slice(0, end) + `window.__test = {
     load:${loader}, allowed:${predicate}, raw:() => ${file.startsWith('program') ? 'lastLoadedBaseId' : 'raw'},
+    render:${file.startsWith('program') ? 'null' : 'render'},
+    refreshBaseOptions:${file.startsWith('enterprise') ? 'refreshBaseOptions' : 'null'},
     requestArchive:${file.startsWith('enterprise') ? 'requestReportingArchive' : 'null'},
     cancelArchive:${file.startsWith('enterprise') ? 'cancelReportingArchive' : 'null'}
   };\n` + source.slice(end);
@@ -133,6 +135,8 @@ function fixture([file, role, predicate, loader, resultId], options = {}) {
     allowed:window.__test.allowed,
     load:window.__test.load,
     raw:window.__test.raw,
+    render:window.__test.render,
+    refreshBaseOptions:window.__test.refreshBaseOptions,
     release,
     identityEvent() { for (const handler of events.get('raps-cloud-identity') || []) handler(); },
     resultId
@@ -188,7 +192,7 @@ for (const item of cases) {
 
 function reportTables(classes) {
   const tables = {
-    majcoms:[{ id:'majcom', code:'TEST', name:'Test Command', active:true }],
+    majcoms:[{ id:'majcom', code:'ACC', name:'Air Combat Command', active:true }],
     bases:[{ id:'base', code:'BASE', name:'Test Installation', majcom_id:'majcom', active:true }],
     classes, class_reporting_archives:[], evaluation_events:[], evaluations:[], criterion_results:[], profiles:[], participants:[]
   };
@@ -226,6 +230,175 @@ function reportCount(f, label) {
   assert.ok(match, 'Rendered report contains the ' + label + ' KPI');
   return match[1];
 }
+
+function practiceReportTables() {
+  const rows = [
+    ['live-finished', 'Live completed class', 'completed', 'live-base-1'],
+    ['live-open', 'Live open class', 'active', 'live-base-73'],
+    ['live-verified', 'Live verified CSV', 'completed', 'live-base-1'],
+    ['practice-failed', 'Practice failed class', 'completed', 'test-base-1'],
+    ['practice-open', 'Practice open class', 'active', 'test-base-73'],
+    ['practice-no-event', 'Practice class awaiting events', 'draft', 'test-base-2'],
+    ['practice-verified', 'Practice verified CSV', 'completed', 'test-base-1'],
+    ['practice-trash', 'Practice shared Trash', 'archived', 'test-base-73']
+  ].map(([id, name, status, base_id]) => ({ ...reportClass(id, name, status), base_id }));
+  const tables = reportTables(rows);
+  tables.majcoms = [
+    { id:'live-acc', code:'ACC', name:'Air Combat Command', active:true },
+    { id:'live-amc', code:'AMC', name:'Air Mobility Command', active:true },
+    { id:'test-command', code:'TEST', name:'Test / Practice Command', active:true }
+  ];
+  tables.bases = Array.from({ length:73 }, (_, index) => {
+    const n = index + 1;
+    return [
+      { id:'live-base-' + n, code:'INSTALLATION-' + n, name:'Live Installation ' + n,
+        majcom_id:n <= 37 ? 'live-acc' : 'live-amc', active:true },
+      { id:'test-base-' + n, code:'TEST-INSTALLATION-' + n, name:'Practice Installation ' + n,
+        majcom_id:'test-command', active:true }
+    ];
+  }).flat();
+  tables.evaluation_events = tables.evaluation_events.filter(row => row.class_id !== 'practice-no-event');
+  tables.evaluations.find(row => row.id === 'evaluation-practice-failed').overall_result = 'fail';
+  tables.criterion_results.push({
+    evaluation_id:'evaluation-practice-failed', result:'fail',
+    failure_mode:'practice_only_failure', primary_contributor:'practice_only_contributor'
+  });
+  tables.class_reporting_archives = [
+    ['live-finished', 'requested'], ['live-verified', 'archived'],
+    ['practice-failed', 'failed'], ['practice-verified', 'archived']
+  ].map(([class_id, status]) => ({ class_id, status, request_id:'request-' + class_id,
+    requested_at:'2026-10-18T01:00:00Z', archived_at:status === 'archived' ? '2026-10-18T01:01:00Z' : null }));
+  return tables;
+}
+
+test('Enterprise separates live totals from the TEST peer, including installations, failures, quality, and CSV history', async () => {
+  const f = fixture(cases[0], { immediate:true, tables:practiceReportTables() });
+  await f.load(true);
+  assert.deepEqual(f.errors, []);
+  assert.match(f.node('enterpriseMajcomFilter').innerHTML, /All live MAJCOMs/);
+  assert.match(f.node('enterpriseMajcomFilter').innerHTML, /value="test-command">TEST/);
+  assert.equal(reportCount(f, 'MAJCOMs'), '2/2');
+  assert.equal(reportCount(f, 'Installations'), '2/73');
+  assert.equal(reportCount(f, 'Classes'), '2');
+  assert.equal(reportCount(f, 'Evaluations'), '2');
+  assert.equal(reportCount(f, 'Pass rate'), '100%');
+  assert.equal((f.node('enterpriseBaseFilter').innerHTML.match(/value="live-base-/g) || []).length, 73);
+  assert.doesNotMatch(f.node('enterpriseBaseFilter').innerHTML, /value="test-base-/);
+  for (const id of ['enterpriseClassTable', 'enterpriseBaseTable', 'enterpriseMajcomTable', 'enterpriseReportingArchives']) {
+    assert.doesNotMatch(f.node(id).innerHTML, /Practice|test-command|test-base-|TEST-INSTALLATION/);
+  }
+  assert.match(f.node('enterpriseDataQuality').innerHTML, /<b>0<\/b><span>classes without evaluation events/);
+  assert.doesNotMatch(f.node('enterpriseFailureModes').innerHTML, /Practice Only Failure/);
+  assert.match(f.node('enterpriseReportingArchives').innerHTML, /Class ID: live-verified/);
+  assert.match(f.node('enterpriseDashboardMessage').textContent, /^All live MAJCOMs/);
+
+  // Switching command must clear an installation chosen in the previous scope.
+  f.node('enterpriseBaseFilter').value = 'live-base-1';
+  f.node('enterpriseMajcomFilter').value = 'test-command';
+  f.refreshBaseOptions();
+  f.render();
+  assert.equal(f.node('enterpriseBaseFilter').value, '');
+  assert.equal((f.node('enterpriseBaseFilter').innerHTML.match(/value="test-base-/g) || []).length, 73);
+  assert.doesNotMatch(f.node('enterpriseBaseFilter').innerHTML, /value="live-base-/);
+  assert.equal(reportCount(f, 'MAJCOMs'), '1/1');
+  assert.equal(reportCount(f, 'Installations'), '3/73');
+  assert.equal(reportCount(f, 'Classes'), '3');
+  assert.equal(reportCount(f, 'Evaluations'), '2');
+  assert.equal(reportCount(f, 'Finalized'), '1');
+  assert.equal(reportCount(f, 'Incomplete'), '1');
+  assert.equal(reportCount(f, 'Pass rate'), '0%');
+  assert.match(f.node('enterpriseClassTable').innerHTML, /Practice failed class/);
+  assert.match(f.node('enterpriseClassTable').innerHTML, /Practice open class/);
+  assert.doesNotMatch(f.node('enterpriseClassTable').innerHTML, /Live |Practice verified CSV|Practice shared Trash/);
+  assert.match(f.node('enterpriseFailureModes').innerHTML, /Practice Only Failure/);
+  assert.match(f.node('enterpriseContributors').innerHTML, /Practice Only Contributor/);
+  assert.match(f.node('enterpriseDataQuality').innerHTML, /<b>1<\/b><span>classes without evaluation events/);
+  assert.match(f.node('enterpriseReportingArchives').innerHTML, /Class ID: practice-verified/);
+  assert.match(f.node('enterpriseReportingArchives').innerHTML, /Failed — still counted/);
+  assert.doesNotMatch(f.node('enterpriseReportingArchives').innerHTML, /Class ID: live-/);
+  assert.match(f.node('enterpriseDashboardMessage').textContent, /^TEST · Practice data/);
+
+  f.node('enterpriseBaseFilter').value = 'test-base-1';
+  f.render();
+  assert.equal(reportCount(f, 'Classes'), '1');
+  assert.equal(reportCount(f, 'Evaluations'), '1');
+  f.node('enterpriseMajcomFilter').value = '';
+  f.refreshBaseOptions();
+  f.render();
+  assert.equal(f.node('enterpriseBaseFilter').value, '');
+  assert.equal(reportCount(f, 'Classes'), '2');
+  assert.doesNotMatch(f.node('enterpriseFailureModes').innerHTML, /Practice Only Failure/);
+  assert.deepEqual(f.errors, []);
+});
+
+test('inactive TEST command metadata cannot put retained practice records into live Enterprise totals', async () => {
+  const tables = practiceReportTables();
+  tables.majcoms.find(row => row.code === 'TEST').active = false;
+  const f = fixture(cases[0], { immediate:true, tables });
+  await f.load(true);
+  assert.equal(reportCount(f, 'Classes'), '2');
+  assert.equal(reportCount(f, 'Pass rate'), '100%');
+  assert.doesNotMatch(f.node('enterpriseBaseFilter').innerHTML, /value="test-base-/);
+  assert.doesNotMatch(f.node('enterpriseClassTable').innerHTML, /Practice/);
+  assert.doesNotMatch(f.node('enterpriseFailureModes').innerHTML, /Practice Only Failure/);
+  assert.deepEqual(f.errors, []);
+});
+
+test('TEST MAJCOM managers report on all 73 practice copies while live managers retain their original command scope', async () => {
+  for (const [majcom_id, code, expectedBases, expectedClasses, expectedPass] of [
+    ['test-command', 'TEST', 73, '3', '0%'],
+    ['live-acc', 'ACC', 37, '1', '100%'],
+    ['live-amc', 'AMC', 36, '1', '—']
+  ]) {
+    const f = fixture(cases[1], { immediate:true, tables:practiceReportTables() });
+    Object.assign(f.member, { majcom_id, majcoms:{ id:majcom_id, code, active:true } });
+    await f.load(true);
+    assert.deepEqual(f.errors, []);
+    assert.equal(reportCount(f, 'Classes'), expectedClasses);
+    assert.equal(reportCount(f, 'Pass rate'), expectedPass);
+    const baseQuery = f.queries.find(query => query.table === 'bases');
+    assert.ok(baseQuery.filters.some(([op, column, value]) => op === 'eq' && column === 'majcom_id' && value === majcom_id));
+    const requestedBases = f.queries.find(query => query.table === 'classes').filters.find(([, column]) => column === 'base_id')[2];
+    assert.equal(requestedBases.length, expectedBases);
+    assert.ok(Array.from(requestedBases).every(id => id.startsWith(code === 'TEST' ? 'test-base-' : 'live-base-')));
+    assert.doesNotMatch(f.node('majcomClassTable').innerHTML, code === 'TEST' ? /Live |Practice verified CSV|Practice shared Trash/ : /Practice/);
+    if (code === 'TEST') {
+      assert.match(f.node('majcomClassTable').innerHTML, /Practice open class/);
+      assert.match(f.node('majcomDashboardScope').textContent, /^TEST · Practice data · MAJCOM Manager$/);
+      assert.match(f.node('majcomFailureModes').innerHTML, /Practice Only Failure/);
+      assert.equal(reportCount(f, 'Installations'), '3/73');
+    } else {
+      assert.doesNotMatch(f.node('majcomFailureModes').innerHTML, /Practice Only Failure/);
+      assert.doesNotMatch(f.node('majcomDashboardScope').textContent, /Practice/);
+    }
+  }
+});
+
+test('practice and live Program Managers report on distinct installation copies', async () => {
+  for (const [base_id, code, expectedName, expectedPass] of [
+    ['test-base-1', 'TEST-INSTALLATION-1', 'Practice failed class', '0%'],
+    ['live-base-1', 'INSTALLATION-1', 'Live completed class', '100%']
+  ]) {
+    const f = fixture(cases[2], { immediate:true, tables:practiceReportTables() });
+    Object.assign(f.member, { base_id, bases:{ id:base_id, code, active:true } });
+    await f.load(true);
+    assert.deepEqual(f.errors, []);
+    assert.equal(reportCount(f, 'Classes'), '1');
+    assert.equal(reportCount(f, 'Evaluations'), '1');
+    assert.equal(reportCount(f, 'Pass rate'), expectedPass);
+    const classQuery = f.queries.find(query => query.table === 'classes');
+    assert.ok(classQuery.filters.some(([op, column, value]) => op === 'eq' && column === 'base_id' && value === base_id));
+    assert.match(f.node('pmBaseClassTable').innerHTML, new RegExp(expectedName));
+    assert.doesNotMatch(f.node('pmBaseClassTable').innerHTML, /verified CSV|Practice open class|Live open class|Practice shared Trash/);
+    if (code.startsWith('TEST-')) {
+      assert.match(f.node('pmBaseScope').textContent, /TEST practice data/);
+      assert.doesNotMatch(f.node('pmBaseClassTable').innerHTML, /Live completed class/);
+    } else {
+      assert.doesNotMatch(f.node('pmBaseScope').textContent, /practice/);
+      assert.doesNotMatch(f.node('pmBaseClassTable').innerHTML, /Practice failed class/);
+    }
+  }
+});
 
 async function until(check) {
   for (let turn = 0; turn < 30; turn++) {

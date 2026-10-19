@@ -21,7 +21,7 @@ class Web8DeploymentTests(unittest.TestCase):
             data = (ROOT / 'supabase/migrations' / name).read_bytes()
             body = DEPLOY.migration_body(data)
             self.assertNotIn('\ncommit;', body.lower())
-            self.assertIn('create function', body.lower())
+            self.assertRegex(body.lower(), r'create (?:function|table)')
 
     def test_unexpected_migration_boundary_stops_before_execution(self):
         for data in (b'create table x(a int);', b'begin;\ncommit;\nselect 1;', b'begin;\nbegin;\ncommit;'):
@@ -64,6 +64,41 @@ class Web8DeploymentTests(unittest.TestCase):
         self.assertIn('raps_ops_memberships', DEPLOY.fingerprint('managed'))
         for item in ['cancel_class_reporting_archive', 'raps_fail_reporting_archive', 'raps_reporting_archive_%', 'p.proacl', 't.tgenabled', 'pg_get_constraintdef']:
             self.assertIn(item, DEPLOY.fingerprint('archive'))
+
+    def test_test_catalog_is_installed_after_account_and_archive_contracts(self):
+        self.assertEqual(DEPLOY.MIGRATIONS, ['20261018_managed_login.sql',
+                         '20261018_class_reporting_archives.sql', '20261019_test_majcom_catalog.sql'])
+        for item in ['raps_test_installations', 'source_base_id', 'test_base_id', 'test_majcom_id',
+                     'source_code', 'mapping_contract', 'c.relacl', 'pg_get_constraintdef']:
+            self.assertIn(item, DEPLOY.fingerprint('test'))
+
+    def test_test_catalog_resume_refuses_changed_mapping_or_catalog(self):
+        source = b'begin;\ncreate table example(a int);\ncommit;\n'
+        ledger = {'source_sha256': DEPLOY.sha(source), 'catalog_sha256': 'original-test-catalog'}
+        with patch.object(DEPLOY, 'sql', side_effect=['t', json.dumps(ledger), 'changed-test-catalog']), self.assertRaises(ValueError):
+            DEPLOY.apply_migration('test.sql', source, 'test', Path('/private'))
+
+    def test_pre_test_release_fingerprint_contracts_remain_compatible(self):
+        # Published backend commit 05f7ccd may already be installed on the NUC.
+        expected = {'managed': '2a2ae881eaa60d7bc026fb7b879ca3afc2c1e05ce67e2d9f35a1867dcb29d80d',
+                    'archive': '14a68d1959144e9357e27d28ac130ee6ec063325b2a91e00220af3f39aca66cc'}
+        for kind, digest in expected.items():
+            self.assertEqual(hashlib.sha256(DEPLOY.fingerprint(kind).encode()).hexdigest(), digest)
+
+    def test_public_test_catalog_requires_one_copy_of_every_active_installation(self):
+        valid = {'majcoms': [{'id': 'live', 'code': 'ACC'}, {'id': 'test', 'code': 'TEST'}],
+                 'bases': [{'id': 'base', 'code': 'BASE', 'majcom_id': 'live'},
+                           {'id': 'copy', 'code': 'TEST-BASE', 'majcom_id': 'test'}]}
+        DEPLOY.verify_test_catalog(valid)
+        for change in (lambda c: c['bases'].pop(),
+                       lambda c: c['bases'].append(dict(c['bases'][1])),
+                       lambda c: c['majcoms'].append(dict(c['majcoms'][1])),
+                       lambda c: c['bases'][1].update(code='BASE'),
+                       lambda c: c['bases'][1].update(majcom_id='live')):
+            invalid = json.loads(json.dumps(valid))
+            change(invalid)
+            with self.assertRaises(ValueError):
+                DEPLOY.verify_test_catalog(invalid)
 
     def test_private_stage_and_writes_refuse_symlinks_or_overwrites(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -14,6 +14,7 @@ bash tests/account-permissions.sh
 bash tests/operational-permissions.sh
 bash tests/managed-login-permissions.sh
 bash tests/reporting-archive-permissions.sh
+bash tests/test-majcom-permissions.sh
 python3 tests/test_reporting_archive_worker.py
 python3 tests/browser-workflow.py
 python3 tests/browser-responsive.py
@@ -21,6 +22,7 @@ python3 tests/browser-accessibility.py
 python3 tests/browser-auth-layout.py
 python3 tests/browser-auth-flows.py
 python3 tests/browser-admin-accounts.py
+python3 tests/browser-test-majcom.py
 ```
 
 The evaluator workflow check serves the real frontend through in-memory request fulfillment with synthetic learners. It omits authentication/cloud scripts from the test page, blocks external requests, and injects its fixture adapter into the served script only. It does not change the application, authenticate to Supabase, or write production records.
