@@ -1312,9 +1312,10 @@ const catalog = {
   ]
 };
 
-// TEST uses independent installation IDs. The real catalog and its command
-// relationships stay intact; selecting TEST cannot target a live base row.
-const testInstallations = catalog.installations.map(installation => Object.freeze({
+// TEST is a supported command on the ordinary installation catalog. Retain the
+// previously deployed copies only for resolving existing saved records; they
+// are not choices for new classes or training locations.
+const legacyTestInstallations = catalog.installations.map(installation => Object.freeze({
   ...installation,
   id: `TEST-${installation.id}`,
   name: `${installation.name} (TEST)`,
@@ -1323,12 +1324,13 @@ const testInstallations = catalog.installations.map(installation => Object.freez
   commands: Object.freeze(['TEST']),
   sourceInstallationId: installation.id,
   aliases: Object.freeze((installation.aliases || []).map(alias => `${alias} (TEST)`)),
-  notes: `Isolated TEST installation for ${installation.id}.`
+  notes: `Legacy TEST installation for ${installation.id}; retained for existing records.`
 }));
 window.TCCC_INSTALLATION_DATA = Object.freeze({
   ...catalog,
-  catalogVersion: '2026.10.18-test',
-  commands: Object.freeze([...catalog.commands, Object.freeze({id: 'TEST', name: 'TEST — Practice MAJCOM'})]),
-  installations: Object.freeze([...catalog.installations, ...testInstallations])
+  catalogVersion: '2026.10.19-test-command',
+  commands: Object.freeze([...catalog.commands, Object.freeze({id: 'TEST', name: 'TEST'})]),
+  installations: Object.freeze(catalog.installations),
+  legacyInstallations: Object.freeze(legacyTestInstallations)
 });
 })();

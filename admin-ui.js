@@ -271,7 +271,9 @@ function renderScope(prefix) {
 
   if (type === 'base') {
     label.textContent = 'Base';
-    select.innerHTML = catalog.bases.map(b =>
+    // Retain deployed legacy memberships in the management table, but do not
+    // offer the superseded duplicate TEST bases for a new access grant.
+    select.innerHTML = catalog.bases.filter(b => !String(b.code || '').toUpperCase().startsWith('TEST-')).map(b =>
       `<option value="${esc(b.id)}">${esc(b.code || b.name)} · ${esc(b.name)}</option>`
     ).join('');
   } else if (type === 'majcom') {

@@ -231,7 +231,9 @@ function reportCount(f, label) {
   return match[1];
 }
 
-function practiceReportTables() {
+// Retained TEST-* installation rows are ordinary historical catalog records.
+// Their names and codes must not enable special reporting or access behavior.
+function mixedMajcomReportTables() {
   const rows = [
     ['live-finished', 'Live completed class', 'completed', 'live-base-1'],
     ['live-open', 'Live open class', 'active', 'live-base-73'],
@@ -271,26 +273,27 @@ function practiceReportTables() {
   return tables;
 }
 
-test('Enterprise separates live totals from the TEST peer, including installations, failures, quality, and CSV history', async () => {
-  const f = fixture(cases[0], { immediate:true, tables:practiceReportTables() });
+test('Enterprise includes TEST in All MAJCOMs and applies the same command filter, trash, and CSV archive rules', async () => {
+  const f = fixture(cases[0], { immediate:true, tables:mixedMajcomReportTables() });
   await f.load(true);
   assert.deepEqual(f.errors, []);
-  assert.match(f.node('enterpriseMajcomFilter').innerHTML, /All live MAJCOMs/);
+  assert.match(f.node('enterpriseMajcomFilter').innerHTML, /All MAJCOMs/);
   assert.match(f.node('enterpriseMajcomFilter').innerHTML, /value="test-command">TEST/);
-  assert.equal(reportCount(f, 'MAJCOMs'), '2/2');
-  assert.equal(reportCount(f, 'Installations'), '2/73');
-  assert.equal(reportCount(f, 'Classes'), '2');
-  assert.equal(reportCount(f, 'Evaluations'), '2');
-  assert.equal(reportCount(f, 'Pass rate'), '100%');
+  assert.equal(reportCount(f, 'MAJCOMs'), '3/3');
+  assert.equal(reportCount(f, 'Installations'), '5/146');
+  assert.equal(reportCount(f, 'Classes'), '5');
+  assert.equal(reportCount(f, 'Evaluations'), '4');
+  assert.equal(reportCount(f, 'Pass rate'), '50%');
   assert.equal((f.node('enterpriseBaseFilter').innerHTML.match(/value="live-base-/g) || []).length, 73);
-  assert.doesNotMatch(f.node('enterpriseBaseFilter').innerHTML, /value="test-base-/);
-  for (const id of ['enterpriseClassTable', 'enterpriseBaseTable', 'enterpriseMajcomTable', 'enterpriseReportingArchives']) {
-    assert.doesNotMatch(f.node(id).innerHTML, /Practice|test-command|test-base-|TEST-INSTALLATION/);
-  }
-  assert.match(f.node('enterpriseDataQuality').innerHTML, /<b>0<\/b><span>classes without evaluation events/);
-  assert.doesNotMatch(f.node('enterpriseFailureModes').innerHTML, /Practice Only Failure/);
+  assert.equal((f.node('enterpriseBaseFilter').innerHTML.match(/value="test-base-/g) || []).length, 73);
+  assert.match(f.node('enterpriseClassTable').innerHTML, /Practice failed class/);
+  assert.match(f.node('enterpriseClassTable').innerHTML, /Live completed class/);
+  assert.doesNotMatch(f.node('enterpriseClassTable').innerHTML, /verified CSV|Practice shared Trash/);
+  assert.match(f.node('enterpriseDataQuality').innerHTML, /<b>1<\/b><span>classes without evaluation events/);
+  assert.match(f.node('enterpriseFailureModes').innerHTML, /Practice Only Failure/);
   assert.match(f.node('enterpriseReportingArchives').innerHTML, /Class ID: live-verified/);
-  assert.match(f.node('enterpriseDashboardMessage').textContent, /^All live MAJCOMs/);
+  assert.match(f.node('enterpriseReportingArchives').innerHTML, /Class ID: practice-verified/);
+  assert.match(f.node('enterpriseDashboardMessage').textContent, /^All MAJCOMs/);
 
   // Switching command must clear an installation chosen in the previous scope.
   f.node('enterpriseBaseFilter').value = 'live-base-1';
@@ -316,7 +319,7 @@ test('Enterprise separates live totals from the TEST peer, including installatio
   assert.match(f.node('enterpriseReportingArchives').innerHTML, /Class ID: practice-verified/);
   assert.match(f.node('enterpriseReportingArchives').innerHTML, /Failed — still counted/);
   assert.doesNotMatch(f.node('enterpriseReportingArchives').innerHTML, /Class ID: live-/);
-  assert.match(f.node('enterpriseDashboardMessage').textContent, /^TEST · Practice data/);
+  assert.match(f.node('enterpriseDashboardMessage').textContent, /^TEST · all available data/);
 
   f.node('enterpriseBaseFilter').value = 'test-base-1';
   f.render();
@@ -325,32 +328,45 @@ test('Enterprise separates live totals from the TEST peer, including installatio
   f.node('enterpriseMajcomFilter').value = '';
   f.refreshBaseOptions();
   f.render();
-  assert.equal(f.node('enterpriseBaseFilter').value, '');
-  assert.equal(reportCount(f, 'Classes'), '2');
-  assert.doesNotMatch(f.node('enterpriseFailureModes').innerHTML, /Practice Only Failure/);
+  // Returning to all commands preserves an installation that is still in scope.
+  assert.equal(f.node('enterpriseBaseFilter').value, 'test-base-1');
+  assert.equal(reportCount(f, 'Classes'), '1');
+  f.node('enterpriseBaseFilter').value = '';
+  f.render();
+  assert.equal(reportCount(f, 'Classes'), '5');
+  assert.match(f.node('enterpriseFailureModes').innerHTML, /Practice Only Failure/);
   assert.deepEqual(f.errors, []);
 });
 
-test('inactive TEST command metadata cannot put retained practice records into live Enterprise totals', async () => {
-  const tables = practiceReportTables();
+test('inactive TEST metadata follows the same retained-record behavior as an inactive ordinary MAJCOM', async () => {
+  const tables = mixedMajcomReportTables();
   tables.majcoms.find(row => row.code === 'TEST').active = false;
   const f = fixture(cases[0], { immediate:true, tables });
   await f.load(true);
-  assert.equal(reportCount(f, 'Classes'), '2');
-  assert.equal(reportCount(f, 'Pass rate'), '100%');
-  assert.doesNotMatch(f.node('enterpriseBaseFilter').innerHTML, /value="test-base-/);
-  assert.doesNotMatch(f.node('enterpriseClassTable').innerHTML, /Practice/);
-  assert.doesNotMatch(f.node('enterpriseFailureModes').innerHTML, /Practice Only Failure/);
+  assert.equal(reportCount(f, 'Classes'), '5');
+  assert.equal(reportCount(f, 'Pass rate'), '50%');
+  assert.doesNotMatch(f.node('enterpriseMajcomFilter').innerHTML, /value="test-command"/);
+  assert.match(f.node('enterpriseBaseFilter').innerHTML, /value="test-base-/);
+  assert.match(f.node('enterpriseClassTable').innerHTML, /Practice/);
+  assert.match(f.node('enterpriseFailureModes').innerHTML, /Practice Only Failure/);
+  const ordinaryTables = mixedMajcomReportTables();
+  ordinaryTables.majcoms.find(row => row.code === 'ACC').active = false;
+  const ordinary = fixture(cases[0], { immediate:true, tables:ordinaryTables });
+  await ordinary.load(true);
+  for (const kpi of ['MAJCOMs', 'Installations', 'Classes', 'Evaluations', 'Pass rate']) {
+    assert.equal(reportCount(f, kpi), reportCount(ordinary, kpi));
+  }
+  assert.deepEqual(ordinary.errors, []);
   assert.deepEqual(f.errors, []);
 });
 
-test('TEST MAJCOM managers report on all 73 practice copies while live managers retain their original command scope', async () => {
+test('TEST and ordinary MAJCOM managers use the same parent-installation query and retained-record rules', async () => {
   for (const [majcom_id, code, expectedBases, expectedClasses, expectedPass] of [
     ['test-command', 'TEST', 73, '3', '0%'],
     ['live-acc', 'ACC', 37, '1', '100%'],
     ['live-amc', 'AMC', 36, '1', '—']
   ]) {
-    const f = fixture(cases[1], { immediate:true, tables:practiceReportTables() });
+    const f = fixture(cases[1], { immediate:true, tables:mixedMajcomReportTables() });
     Object.assign(f.member, { majcom_id, majcoms:{ id:majcom_id, code, active:true } });
     await f.load(true);
     assert.deepEqual(f.errors, []);
@@ -364,7 +380,7 @@ test('TEST MAJCOM managers report on all 73 practice copies while live managers 
     assert.doesNotMatch(f.node('majcomClassTable').innerHTML, code === 'TEST' ? /Live |Practice verified CSV|Practice shared Trash/ : /Practice/);
     if (code === 'TEST') {
       assert.match(f.node('majcomClassTable').innerHTML, /Practice open class/);
-      assert.match(f.node('majcomDashboardScope').textContent, /^TEST · Practice data · MAJCOM Manager$/);
+      assert.match(f.node('majcomDashboardScope').textContent, /^TEST · MAJCOM Manager$/);
       assert.match(f.node('majcomFailureModes').innerHTML, /Practice Only Failure/);
       assert.equal(reportCount(f, 'Installations'), '3/73');
     } else {
@@ -374,12 +390,12 @@ test('TEST MAJCOM managers report on all 73 practice copies while live managers 
   }
 });
 
-test('practice and live Program Managers report on distinct installation copies', async () => {
+test('Program Managers use the same exact installation query for retained TEST and ordinary installation rows', async () => {
   for (const [base_id, code, expectedName, expectedPass] of [
     ['test-base-1', 'TEST-INSTALLATION-1', 'Practice failed class', '0%'],
     ['live-base-1', 'INSTALLATION-1', 'Live completed class', '100%']
   ]) {
-    const f = fixture(cases[2], { immediate:true, tables:practiceReportTables() });
+    const f = fixture(cases[2], { immediate:true, tables:mixedMajcomReportTables() });
     Object.assign(f.member, { base_id, bases:{ id:base_id, code, active:true } });
     await f.load(true);
     assert.deepEqual(f.errors, []);
@@ -391,7 +407,7 @@ test('practice and live Program Managers report on distinct installation copies'
     assert.match(f.node('pmBaseClassTable').innerHTML, new RegExp(expectedName));
     assert.doesNotMatch(f.node('pmBaseClassTable').innerHTML, /verified CSV|Practice open class|Live open class|Practice shared Trash/);
     if (code.startsWith('TEST-')) {
-      assert.match(f.node('pmBaseScope').textContent, /TEST practice data/);
+      assert.doesNotMatch(f.node('pmBaseScope').textContent, /practice data/i);
       assert.doesNotMatch(f.node('pmBaseClassTable').innerHTML, /Live completed class/);
     } else {
       assert.doesNotMatch(f.node('pmBaseScope').textContent, /practice/);

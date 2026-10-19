@@ -418,26 +418,25 @@ function timersForItem(id){ return (tier()?.timers||[]).filter(d=>d.linkedItemId
 function hasStartedClass(c){ return (c.students||[]).some(s=>Object.values(s.attempts||{}).some(a=>a?.startedAt)); }
 function isClassClosed(c=cls()){ return !!c && (c.status==='closed'||!!c.closedAt); }
 function lifecycleStatus(c){ return isClassClosed(c)?'CLOSED':hasStartedClass(c)?'ACTIVE':'DRAFT'; }
-function installationById(id){return (LOCATION_DATA.installations||[]).find(x=>x.id===id)||null;}
+function installationById(id){return [...(LOCATION_DATA.installations||[]),...(LOCATION_DATA.legacyInstallations||[])].find(x=>x.id===id)||null;}
 function commandById(id){return (LOCATION_DATA.commands||[]).find(x=>x.id===id)||null;}
 function commandName(id){return commandById(id)?.name||id||'—';}
 function installationDisplay(i){if(!i)return '';const suffix=i.state?`, ${i.state}`:(i.country&&i.country!=='USA'?`, ${i.country}`:'');return `${i.name}${suffix}`;}
 function isTestInstallation(i){return !!i&&i.hostCommand==='TEST'&&i.id===`TEST-${i.sourceInstallationId}`;}
 function classInstallationChoices(command,{showAll=false,training=false}={}){
-  const test=command==='TEST';
-  return (LOCATION_DATA.installations||[]).filter(i=>i.active!==false&&i.component==='ACTIVE_DUTY'&&isTestInstallation(i)===test)
-    .filter(i=>test||showAll||training||!command||command==='OTHER'||(i.commands||[]).includes(command))
+  return (LOCATION_DATA.installations||[]).filter(i=>i.active!==false&&i.component==='ACTIVE_DUTY'&&!isTestInstallation(i))
+    .filter(i=>showAll||training||!command||command==='OTHER'||command==='TEST'||(i.commands||[]).includes(command))
     .sort((a,b)=>installationDisplay(a).localeCompare(installationDisplay(b)));
 }
-function classLocationIssue(data){
-  const test=String(data.majcom||'').trim()==='TEST',home=installationById(String(data.homeInstallationId||''));
-  if(test&&!isTestInstallation(home))return 'Select a TEST installation for the TEST MAJCOM. TEST records use separate installations.';
-  if(!test&&isTestInstallation(home))return 'TEST installations require the TEST MAJCOM. Select a live installation for this command.';
-  const trainId=String(data.trainingInstallationId||''),train=installationById(trainId);
-  if(String(data.sameTrainingLocation||'')!=='on'&&train&&isTestInstallation(train)!==test)return 'Choose a training location in the same TEST or live installation list as the class.';
+function classLocationIssue(data,existing=null){
+  for(const field of ['homeInstallationId','trainingInstallationId']){
+    if(field==='trainingInstallationId'&&String(data.sameTrainingLocation||'')==='on')continue;
+    const id=String(data[field]||'');
+    if(isTestInstallation(installationById(id))&&id!==String(existing?.[field]||''))return 'Legacy TEST installations are retained for existing records. Select an ordinary installation for a new location.';
+  }
   return '';
 }
-function inferInstallationId(text){const n=String(text||'').trim().toLowerCase();if(!n)return '';const hit=(LOCATION_DATA.installations||[]).find(i=>[i.name,i.shortName,...(i.aliases||[])].some(v=>String(v||'').trim().toLowerCase()===n));return hit?.id||'';}
+function inferInstallationId(text){const n=String(text||'').trim().toLowerCase();if(!n)return '';const hit=[...(LOCATION_DATA.installations||[]),...(LOCATION_DATA.legacyInstallations||[])].find(i=>[i.name,i.shortName,...(i.aliases||[])].some(v=>String(v||'').trim().toLowerCase()===n));return hit?.id||'';}
 function ensureLocationFields(c){
   c.component=c.component||'ACTIVE_DUTY';c.majcom=c.majcom||'';c.unit=c.unit||'';c.exercise=c.exercise||'';
   const legacy=String(c.location||'').trim();
@@ -637,7 +636,9 @@ function serverActiveEvaluationText(data){
 async function claimEvaluationOnServer(c,s,a){
   const client=authoritativeEvaluationClient('Starting a new assessment');
   if(!window.RAPS_ROSTER_SYNC?.pushClassRosterAndShells)throw new Error('Cloud roster synchronization is not ready. Reload RaPS and try again.');
-  await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c);
+  const managesRoster=canAccessClass('manageRoster',c);
+  const rosterSynced=await window.RAPS_ROSTER_SYNC.pushClassRosterAndShells(c);
+  if((managesRoster&&rosterSynced!==true)||String(c?.cloudSync?.status||'')==='conflict')throw new Error('The server has not confirmed this class and roster. Use Sync Classes and resolve any errors or conflicts before starting an assessment.');
   const {data:eventRow,error:eventError}=await client.from('evaluation_events')
     .select('id,curriculum_version_id,status')
     .eq('id',c.id)
@@ -900,7 +901,7 @@ function renderManagementFilters(classes){
   const cmdSel=$('managementMajcom'),instSel=$('managementInstallation');if(!cmdSel||!instSel)return;
   cmdSel.innerHTML=`<option value="">All MAJCOMs / commands</option>${(LOCATION_DATA.commands||[]).map(x=>`<option value="${esc(x.id)}" ${managementFilters.majcom===x.id?'selected':''}>${esc(x.name)}</option>`).join('')}`;
   const ids=new Set(classes.filter(c=>!managementFilters.majcom||c.majcom===managementFilters.majcom).map(c=>c.homeInstallationId).filter(Boolean));
-  const listed=(LOCATION_DATA.installations||[]).filter(i=>ids.has(i.id)).sort((a,b)=>installationDisplay(a).localeCompare(installationDisplay(b)));
+  const listed=[...(LOCATION_DATA.installations||[]),...(LOCATION_DATA.legacyInstallations||[])].filter(i=>ids.has(i.id)).sort((a,b)=>installationDisplay(a).localeCompare(installationDisplay(b)));
   const customs=classes.filter(c=>(!managementFilters.majcom||c.majcom===managementFilters.majcom)&&!c.homeInstallationId&&c.homeInstallationName).map(c=>c.homeInstallationName).filter((v,i,a)=>a.indexOf(v)===i).sort();
   instSel.innerHTML=`<option value="">All home installations</option>${listed.map(i=>`<option value="${esc(i.id)}" ${managementFilters.installationId===i.id?'selected':''}>${esc(installationDisplay(i))}</option>`).join('')}${customs.map(n=>`<option value="CUSTOM:${esc(n)}">${esc(n)} (custom)</option>`).join('')}`;
   if(managementFilters.installationId&&!instSel.querySelector(`option[value="${CSS.escape(managementFilters.installationId)}"]`))managementFilters.installationId='';
@@ -1400,14 +1401,14 @@ function newClassForm(existing=null){
   const courseOpts=[['initial','Initial qualification'],['sustainment','Sustainment / refresher'],['remediation','Remediation'],['calibration','Instructor / evaluator calibration'],['other','Other']].map(([v,l])=>`<option value="${v}" ${(existing?.courseType||'initial')===v?'selected':''}>${l}</option>`).join('');
   const diffOpts=[['foundational','Foundational'],['standard','Standard'],['advanced','Advanced / high workload']].map(([v,l])=>`<option value="${v}" ${(existing?.scenarioDifficulty||'standard')===v?'selected':''}>${l}</option>`).join('');
   const existingHome=installationById(existing?.homeInstallationId),existingHomeCustom=!!existing&&!existingHome&&!!existing?.homeInstallationName,existingTrain=installationById(existing?.trainingInstallationId),sameTraining=existing?existing.trainingLocationType==='SAME_AS_HOME':true;
-  const cmdValue=existing?.majcom||'';const cmdOpts=['<option value="">Select command…</option>',...(LOCATION_DATA.commands||[]).map(x=>`<option value="${esc(x.id)}" ${cmdValue===x.id?'selected':''} ${published&&((x.id==='TEST')!==isTestInstallation(existingHome))?'disabled':''}>${esc(x.name)}</option>`)].join('');
+  const cmdValue=existing?.majcom||'';const cmdOpts=['<option value="">Select command…</option>',...(LOCATION_DATA.commands||[]).map(x=>`<option value="${esc(x.id)}" ${cmdValue===x.id?'selected':''}>${esc(x.name)}</option>`)].join('');
   $('formModalTitle').textContent=existing?'Edit Class':'New TCCC Class';
   $('formModalBody').innerHTML=`<form id="classForm"><div class="formGrid">
     <label><span>Class name *</span><input name="name" required value="${esc(existing?.name||'')}"></label><label><span>Tier *</span><select name="tierId" ${existing?'disabled':''}>${tOpts}</select></label>
     <label><span>Roster / course #</span><input name="roster" value="${esc(existing?.roster||'')}"></label><label><span>Course type</span><select name="courseType">${courseOpts}</select></label>
     <label><span>Date</span><input name="date" type="date" value="${esc(existing?.date||new Date().toISOString().slice(0,10))}"></label><label><span>Site code / local standardized ID</span><input name="siteCode" value="${esc(existing?.siteCode||'')}" placeholder="e.g., HIK-01"></label>
-    <label class="full"><span>Supported MAJCOM / Command *</span><select name="majcom" required>${cmdOpts}</select><small class="fieldHelp">Select the command this training supports. TEST provides a separate practice copy of every installation. Use Show all for tenant/joint relationships within the live list.</small></label>
-    <label class="full inlineCheck"><input name="showAllInstallations" type="checkbox"><span>Show all live installations</span></label>
+    <label class="full"><span>Supported MAJCOM / Command *</span><select name="majcom" required>${cmdOpts}</select><small class="fieldHelp">Select the command this training supports. TEST uses the same installations and training workflow. Use Show all for tenant/joint relationships.</small></label>
+    <label class="full inlineCheck"><input name="showAllInstallations" type="checkbox"><span>Show all installations</span></label>
     <label class="full"><span>Home installation *</span><select name="homeInstallationId" required></select><small class="fieldHelp">${published?'The home installation is locked after the class is published to preserve its permissions and assessment records. Use the training location for off-site training.':'The stable installation ID is saved for analytics even if the displayed installation name changes.'}</small></label>
     <div id="customHomeFields" class="full conditionalFields hidden"><label><span>Home installation / location *</span><input name="customHomeLocation" value="${esc(existingHomeCustom?existing.homeInstallationName:'')}"></label><label><span>State / region</span><input name="customHomeRegion" value="${esc(existingHomeCustom?existing.homeInstallationState||'':'')}"></label><label><span>Country / territory</span><input name="customHomeCountry" value="${esc(existingHomeCustom?existing.homeInstallationCountry||'':'')}"></label></div>
     <label class="full"><span>Unit / organization</span><input name="unit" value="${esc(existing?.unit||'')}" placeholder="e.g., 15 MDG"></label>
@@ -1421,13 +1422,12 @@ function newClassForm(existing=null){
   const form=$('classForm'),maj=form.elements.majcom,showAll=form.elements.showAllInstallations,home=form.elements.homeInstallationId,same=form.elements.sameTrainingLocation,train=form.elements.trainingInstallationId;
   const wantedHome=existingHome?.id||(existingHomeCustom?'__OTHER__':'');if(existingHome&&cmdValue&&!(existingHome.commands||[]).includes(cmdValue))showAll.checked=true;
   function opt(i,sel=''){return `<option value="${esc(i.id)}" ${sel===i.id?'selected':''}>${esc(installationDisplay(i))}</option>`;}
-  function refreshHome(preserve=true){const test=maj.value==='TEST',current=preserve?(home.value||wantedHome):'';showAll.disabled=published||test;let list=classInstallationChoices(maj.value,{showAll:showAll.checked});if(current&&!list.some(i=>i.id===current)&&classInstallationChoices(maj.value,{showAll:true}).some(i=>i.id===current)){showAll.checked=true;list=classInstallationChoices(maj.value,{showAll:true});}home.innerHTML=`<option value="">Select installation…</option>${list.map(i=>opt(i,current)).join('')}${test?'':`<option value="__OTHER__" ${current==='__OTHER__'?'selected':''}>Other / not listed</option>`}`;toggleHomeCustom();}
-  function refreshTraining(preserve=true){const current=preserve?(train.value||(existing?.trainingLocationType==='CUSTOM'?'__OTHER__':existingTrain?.id||'')):'';train.innerHTML=`<option value="">Select training location…</option>${classInstallationChoices(maj.value,{training:true}).map(i=>opt(i,current)).join('')}<option value="__OTHER__" ${current==='__OTHER__'?'selected':''}>Expeditionary / other location</option>`;toggleTrainingCustom();}
+  function refreshHome(preserve=true){const current=preserve?(home.value||wantedHome):'';showAll.disabled=published;let list=classInstallationChoices(maj.value,{showAll:showAll.checked});if(current&&!list.some(i=>i.id===current)&&classInstallationChoices(maj.value,{showAll:true}).some(i=>i.id===current)){showAll.checked=true;list=classInstallationChoices(maj.value,{showAll:true});}if(current===existingHome?.id&&isTestInstallation(existingHome))list=[...list,existingHome];home.innerHTML=`<option value="">Select installation…</option>${list.map(i=>opt(i,current)).join('')}<option value="__OTHER__" ${current==='__OTHER__'?'selected':''}>Other / not listed</option>`;toggleHomeCustom();}
+  function refreshTraining(preserve=true){const current=preserve?(train.value||(existing?.trainingLocationType==='CUSTOM'?'__OTHER__':existingTrain?.id||'')):'';let list=classInstallationChoices(maj.value,{training:true});if(current===existingTrain?.id&&isTestInstallation(existingTrain))list=[...list,existingTrain];train.innerHTML=`<option value="">Select training location…</option>${list.map(i=>opt(i,current)).join('')}<option value="__OTHER__" ${current==='__OTHER__'?'selected':''}>Expeditionary / other location</option>`;toggleTrainingCustom();}
   function toggleHomeCustom(){const on=home.value==='__OTHER__';$('customHomeFields').classList.toggle('hidden',!on);form.elements.customHomeLocation.required=on;}
   function toggleTraining(){const on=!same.checked;$('trainingLocationFields').classList.toggle('hidden',!on);train.required=on;if(!on)form.elements.customTrainingLocation.required=false;toggleTrainingCustom();}
   function toggleTrainingCustom(){const on=!same.checked&&train.value==='__OTHER__';$('customTrainingFields').classList.toggle('hidden',!on);form.elements.customTrainingLocation.required=on;}
-  let testSelection=maj.value==='TEST';
-  maj.onchange=()=>{const changedMode=testSelection!==(maj.value==='TEST');if(!published){refreshHome(false);if(changedMode)refreshTraining(false);}else refreshHome();testSelection=maj.value==='TEST';};showAll.onchange=()=>refreshHome(true);home.onchange=toggleHomeCustom;same.onchange=toggleTraining;train.onchange=toggleTrainingCustom;refreshHome();refreshTraining();toggleTraining();
+  maj.onchange=()=>{refreshHome();refreshTraining();};showAll.onchange=()=>refreshHome(true);home.onchange=toggleHomeCustom;same.onchange=toggleTraining;train.onchange=toggleTrainingCustom;refreshHome();refreshTraining();toggleTraining();
   if(published){
     home.disabled=true;showAll.disabled=true;
     for(const name of ['customHomeLocation','customHomeRegion','customHomeCountry'])form.elements[name].readOnly=true;
@@ -1441,7 +1441,7 @@ function newClassForm(existing=null){
       f.set('customHomeCountry',existing.homeInstallationCountry||'');
     }
     const data=Object.fromEntries(f.entries());
-    const locationIssue=classLocationIssue(data);if(locationIssue){alert(locationIssue);return;}
+    const locationIssue=classLocationIssue(data,existing);if(locationIssue){alert(locationIssue);return;}
     if(existing&&(cls()?.id!==existing.id||!requireClassAccess('manageClass',existing)||isClassClosed(existing)))return;
     if(!requireClassAccess('manageClass',data))return;
     if(existing){
@@ -2683,7 +2683,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.8';
+  const UPDATE_BUILD = '3.4.12-web.9';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 

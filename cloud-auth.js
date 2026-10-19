@@ -885,7 +885,7 @@ function renderRequestAccessScope() {
   } else {
     label.textContent = 'Installation';
 
-    select.innerHTML = accessCatalog.bases.map(b =>
+    select.innerHTML = accessCatalog.bases.filter(b => !String(b.code || '').toUpperCase().startsWith('TEST-')).map(b =>
       `<option value="${esc(b.id)}">${esc(b.code || b.name)} · ${esc(b.name)}</option>`
     ).join('');
   }

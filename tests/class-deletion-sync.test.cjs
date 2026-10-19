@@ -12,11 +12,14 @@ const copy = value => JSON.parse(JSON.stringify(value));
 
 // Two independent browser globals and class stores share only this fake server.
 // The real public class-sync API runs inside each VM; no cloud writes occur.
-function sharedServer({ rowCap = Infinity, endRangeErrorCode = null } = {}) {
+function sharedServer({ rowCap = Infinity, endRangeErrorCode = null, rejectClassInsertReturning = false } = {}) {
   let clock = Date.now();
   let nextUpdateHook = null;
   let nextClassFetchPause = null;
   let nextClassPageHook = null;
+  let nextClassInsertHook = null;
+  let nextAfterClassInsertHook = null;
+  let nextClassFetchError = null;
   const tick = () => ++clock;
   const tables = {
     classes: [],
@@ -29,9 +32,9 @@ function sharedServer({ rowCap = Infinity, endRangeErrorCode = null } = {}) {
   function client(deviceId) {
     return { from(table) {
       const filters = [], equality = {}, orders = [];
-      let action = 'select', payload, one = false, from = 0, to = Infinity, limit = Infinity;
+      let action = 'select', payload, one = false, representation = false, from = 0, to = Infinity, limit = Infinity;
       const query = {
-        select() { return query; },
+        select() { if (action !== 'select') representation = true; return query; },
         order(key, options = {}) { orders.push({ key, ascending: options.ascending !== false }); return query; },
         range(first, last) { from = first; to = last; return query; },
         eq(key, value) { equality[key] = value; filters.push(row => row[key] === value); return query; },
@@ -52,17 +55,35 @@ function sharedServer({ rowCap = Infinity, endRangeErrorCode = null } = {}) {
               nextUpdateHook = null;
               hook({ deviceId, table, payload });
             }
+            if (action === 'insert' && table === 'classes' && nextClassInsertHook) {
+              const hook = nextClassInsertHook;
+              nextClassInsertHook = null;
+              hook({ deviceId, payload });
+            }
             let selected = rows.filter(row => filters.every(matches => matches(row)));
-            if (action !== 'select') writes.push({ deviceId, table, action, payload: copy(payload), affected: action === 'insert' ? 1 : selected.length });
+            if (action !== 'select') writes.push({ deviceId, table, action, representation, payload: copy(payload), affected: action === 'insert' ? 1 : selected.length });
             if (action === 'insert') {
               if (rows.some(row => row.id === payload.id)) return { data: null, error: { code: '23505', message: 'Duplicate id' } };
+              if (table === 'classes' && representation && rejectClassInsertReturning) {
+                return { data:null, error:{code:'42501', message:'new row violates row-level security policy "raps_ops_guard_select" for table "classes"'} };
+              }
               const row = { created_at: new Date(tick()).toISOString(), ...payload, updated_at: new Date(tick()).toISOString() };
               rows.push(row);
               selected = [row];
+              if (table === 'classes' && nextAfterClassInsertHook) {
+                const hook = nextAfterClassInsertHook;
+                nextAfterClassInsertHook = null;
+                hook({ deviceId, row });
+              }
             } else if (action === 'update') {
               selected.forEach(row => Object.assign(row, payload, { updated_at: new Date(tick()).toISOString() }));
             }
             if (action === 'select') {
+              if (table === 'classes' && one && equality.id && nextClassFetchError) {
+                const error = nextClassFetchError;
+                nextClassFetchError = null;
+                return { data:null, error };
+              }
               const totalMatching = selected.length;
               selected.sort((left, right) => {
                 for (const order of orders) {
@@ -78,7 +99,7 @@ function sharedServer({ rowCap = Infinity, endRangeErrorCode = null } = {}) {
                 return { data: null, error: { code: endRangeErrorCode, message: 'Requested range is not satisfiable', status: 416 } };
               }
             }
-            const response = { data: copy(one ? selected[0] || null : selected), error: null };
+            const response = { data: action === 'insert' && !representation ? null : copy(one ? selected[0] || null : selected), error: null };
             if (action === 'select' && table === 'classes' && !one && nextClassPageHook) {
               const hook = nextClassPageHook;
               nextClassPageHook = null;
@@ -100,6 +121,9 @@ function sharedServer({ rowCap = Infinity, endRangeErrorCode = null } = {}) {
   return {
     tables, writes, reads, tick, client,
     beforeNextUpdate(hook) { nextUpdateHook = hook; },
+    beforeNextClassInsert(hook) { nextClassInsertHook = hook; },
+    afterNextClassInsert(hook) { nextAfterClassInsertHook = hook; },
+    failNextClassFetch(error) { nextClassFetchError = error; },
     afterNextClassPage(hook) { nextClassPageHook = hook; },
     pauseNextClassFetch(deviceId) {
       let snapshotCaptured, release;
@@ -247,6 +271,106 @@ function addNewerClasses(server, count = 4) {
       status: 'draft', app_data: { ...copy(template.app_data), deletedAt: null }, updated_at: at, client_modified_at: at });
   }
 }
+
+test('new class creation avoids INSERT RETURNING and verifies a separately readable revision', async () => {
+  for (const role of ['enterprise_admin', 'program_manager', 'evaluator']) {
+    const server = sharedServer({ rejectClassInsertReturning:true });
+    const rejected = await server.client('legacy-browser').from('classes')
+      .insert({id:'legacy-class'}).select('*').single();
+    assert.equal(rejected.error.code, '42501');
+    assert.match(rejected.error.message, /raps_ops_guard_select/);
+    assert.equal(server.tables.classes.length, 0, 'Rejected RETURNING rolls back the insertion');
+    const device = browser(server, role);
+    useRole(device, role);
+    const local = device.createClass();
+    assert.equal(await device.api.pushClass(local), true, role);
+    const write = server.writes.find(row => row.deviceId === role);
+    assert.equal(write.action, 'insert');
+    assert.equal(write.representation, false);
+    assert.equal(local.cloudSync.status, 'synced');
+    assert.equal(local.cloudSync.createdBy, 'enterprise-user');
+    assert.equal(local.cloudSync.baseMetadataSignature, device.api.classMetadataSignature(local));
+    assert.ok(server.reads.some(read => read.deviceId === role && read.equality.id === local.id && read.returned === 1));
+    assert.equal(server.tables.classes.length, 1);
+  }
+});
+
+test('an unreadable post-insert revision cannot certify synchronization or create an assessment', async () => {
+  for (const failure of ['missing', 'read-error']) {
+    const server = sharedServer({ rejectClassInsertReturning:true });
+    const device = browser(server, 'desktop');
+    const local = device.createClass();
+    local.students = [{id:'learner-1', name:'Synthetic learner', attempts:{}}];
+    server.afterNextClassInsert(() => {
+      if (failure === 'missing') server.tables.classes.length = 0;
+      else server.failNextClassFetch({code:'42501', message:'Class read access changed'});
+    });
+    await assert.rejects(device.api.pushClass(local), error => failure === 'missing'
+      ? /without a returned server revision/.test(error.message) : error.code === '42501' && error.message === 'Class read access changed');
+    assert.equal(local.cloudSync.status, 'error');
+    assert.equal(local.cloudSync.baseMetadataSignature, undefined);
+    assert.deepEqual(local.students[0].attempts, {});
+    assert.equal(server.writes.filter(write => write.table !== 'classes').length, 0);
+    if (failure === 'read-error') {
+      assert.equal(await device.api.pushClass(local), true, 'Retry reads the already-created matching class');
+      assert.equal(server.writes.length, 1, 'Retry must not insert a second class or overwrite the first');
+    }
+  }
+});
+
+test('concurrent changes between class INSERT and verification preserve both metadata branches', async () => {
+  for (const change of ['metadata', 'closure', 'trash', 'curriculum', 'scope', 'owner']) {
+    const server = sharedServer({ rejectClassInsertReturning:true });
+    const device = browser(server, 'desktop');
+    const local = device.createClass();
+    const originalName = local.name;
+    server.afterNextClassInsert(({row}) => {
+      if (change === 'metadata') row.name = 'Concurrent remote name';
+      if (change === 'closure') row.status = 'completed';
+      if (change === 'trash') { row.status = 'archived'; row.app_data.deletedAt = server.tick(); }
+      if (change === 'curriculum') row.curriculum_version_id = 'other-curriculum';
+      if (change === 'scope') row.base_id = 'other-base';
+      if (change === 'owner') row.created_by = 'other-owner';
+      row.updated_at = new Date(server.tick()).toISOString();
+    });
+    assert.equal(await device.api.pushClass(local), false, change);
+    assert.equal(local.cloudSync.status, 'conflict', change);
+    assert.match(local.cloudSync.error, /changed after creation/);
+    assert.equal(local.name, originalName);
+    assert.equal(local.deletedAt, null);
+    assert.equal(local.closedAt, null);
+    assert.equal(local.cloudSync.baseMetadataSignature, undefined);
+    assert.equal(server.writes.length, 1, 'The follow-up read never overwrites a newer server row');
+  }
+});
+
+test('an identical concurrent class insertion still converges through the duplicate-id retry', async () => {
+  const server = sharedServer({ rejectClassInsertReturning:true });
+  const device = browser(server, 'desktop');
+  const local = device.createClass();
+  server.beforeNextClassInsert(({payload}) => {
+    server.tables.classes.push({...copy(payload), created_at:new Date(server.tick()).toISOString(), updated_at:new Date(server.tick()).toISOString()});
+  });
+  assert.equal(await device.api.pushClass(local), true);
+  assert.equal(server.tables.classes.length, 1);
+  assert.equal(server.writes.length, 1, 'A matching class needs no further write after the duplicate response');
+  assert.equal(local.cloudSync.status, 'synced');
+});
+
+test('account changes after a bare class insert cannot patch the new account with verification results', async () => {
+  const server = sharedServer({ rejectClassInsertReturning:true });
+  const device = browser(server, 'desktop');
+  const local = device.createClass();
+  let patchesBeforeAccountChange;
+  server.afterNextClassInsert(() => {
+    patchesBeforeAccountChange = device.statePatches.length;
+    useRole(device, 'enterprise_admin', {userId:'other-user'});
+  });
+  assert.equal(await device.api.pushClass(local), false);
+  assert.equal(device.statePatches.length, patchesBeforeAccountChange);
+  assert.notEqual(local.cloudSync.status, 'synced');
+  assert.equal(local.cloudSync.baseMetadataSignature, undefined);
+});
 
 test('disabled legacy trash outside the first capped page is published from the original desktop', async () => {
   const { server, desktop, phone } = await twoBrowsers({ rowCap: 2 });

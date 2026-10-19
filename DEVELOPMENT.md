@@ -15,6 +15,7 @@ bash tests/operational-permissions.sh
 bash tests/managed-login-permissions.sh
 bash tests/reporting-archive-permissions.sh
 bash tests/test-majcom-permissions.sh
+bash tests/class-create-permissions.sh
 python3 tests/test_reporting_archive_worker.py
 python3 tests/browser-workflow.py
 python3 tests/browser-responsive.py
@@ -41,6 +42,13 @@ available official `postgres:17.6` image; they expose no ports and contact no NU
 or production database. They verify both permitted and forbidden requests,
 including direct database requests and previously permissive definer functions.
 See [PERMISSIONS.md](PERMISSIONS.md) for the role matrix and deployment sequence.
+
+The class-creation suite reproduces the `STABLE` class-read helper's snapshot
+boundary during `INSERT ... RETURNING`, then verifies the browser's two-request
+insert/read pattern and denied requests. It uses the reviewed account,
+operational, managed-login, reporting-archive and TEST catalog migrations in an
+isolated synthetic PostgreSQL database. See [web.9](WEB9-DEPLOYMENT.md) for the
+frontend-only publication and deployed retest.
 
 ## Account lifecycle checks
 

@@ -1,0 +1,20 @@
+[
+  "report_id",
+  "when",
+  "site_role",
+  "version",
+  "device",
+  "network",
+  "mission_case",
+  "blocked",
+  "workaround",
+  "friction",
+  "positive",
+  "idea",
+  "steps",
+  "expected",
+  "actual",
+  "state",
+  "repro_help",
+  "suggestion"
+]
