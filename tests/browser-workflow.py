@@ -8,6 +8,7 @@ The fixture adapter is injected into the served script, never into app.js.
 """
 
 import base64
+from datetime import datetime, timedelta, timezone
 import json
 import mimetypes
 import os
@@ -81,6 +82,34 @@ window.__rapsTest = {
   },
   clearTimer(id){evalState().timers[id]={instances:[],currentIndex:-1};saveDb();renderEval();},
   sealFixture(){const st=evalState();st.finalizedAt=now();st.finalResult='FAIL';saveDb();renderEval();},
+  installElapsedFinalizeReceipt(completedAt){
+    // This in-memory receipt exercises the production finalize handler and its
+    // session-bound client without issuing any request to a deployed server.
+    window.__elapsedFinalizeCalls=[];
+    const userId=currentCloudUserId();
+    window.RAPS_CLOUD.client={
+      auth:{getSession:async()=>({data:{session:{access_token:'isolated-fixture-token',user:{id:userId}}},error:null})},
+      rpc(name,args){
+        if(name!=='finalize_evaluation_authoritatively')throw new Error('Unexpected fixture RPC');
+        window.__elapsedFinalizeCalls.push({name,args});
+        const p=proficiency(),response={data:{finalized:true,completedAt,result:p.result.toLowerCase(),
+          scoreNumerator:p.score.pass,scoreDenominator:p.score.denom,
+          criticalFailureCount:p.criticalFail.length,globalTimerNotMet:p.globalStatus==='notmet'},error:null};
+        return {headers:{},then(resolve,reject){return Promise.resolve(response).then(resolve,reject);}};
+      }
+    };
+    window.RAPS_GRADING_SYNC={pushEvaluation:async()=>true};
+  },
+  elapsedPdf(){
+    const lines=[],prototype=CanvasRenderingContext2D.prototype,original=prototype.fillText;
+    prototype.fillText=function(text,...args){
+      if(String(text).startsWith('Elapsed '))lines.push(String(text));
+      return original.call(this,text,...args);
+    };
+    try{return {base64:bytesToBase64(buildIndividualSummaryPdf()),elapsedLines:lines};}
+    finally{prototype.fillText=original;}
+  },
+  setElapsedTerminalFixture(fields){Object.assign(evalState(),fields);saveDb();renderEval();},
   forceQuotaFailure(){
     window.__originalStorageSetItem=Storage.prototype.setItem;
     Storage.prototype.setItem=function(key,value){
@@ -151,6 +180,102 @@ def test_html():
     return re.sub(r'<script\s+src="([^"]+)"[^>]*></script>', keep_script, html)
 
 
+def check_elapsed_lifecycle(browser, fulfill, checks, errors, artifacts):
+    """Keep mocked Date isolated; RAF and clinical stopwatch clocks stay live."""
+    context = browser.new_context(service_workers='block', viewport={'width': 1366, 'height': 900})
+    context.add_init_script(IDENTITY_FIXTURE)
+    context.route('**/*', fulfill)
+    page = context.new_page()
+    page.set_default_timeout(7000)
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    received_dialogs = []
+
+    def accept_fixture_dialog(dialog):
+        received_dialogs.append(dialog.message)
+        dialog.accept()
+
+    page.on('dialog', accept_fixture_dialog)
+    start = datetime(2026, 10, 19, 10, 0, 0, tzinfo=timezone.utc)
+    page.clock.set_fixed_time(start)
+    page.goto(ORIGIN + '/', wait_until='networkidle')
+    page.locator('#safetyAck').check()
+    page.locator('#safetyEnterBtn').click()
+    page.evaluate("window.__rapsTest.setup('3');window.__rapsTest.allPassAndMet();window.__rapsTest.clearTimer('cmc_overall')")
+    initial = page.evaluate('window.__rapsTest.state()')
+    expect(page.locator('#elapsedTop')).to_have_text('00:00')
+    page.clock.set_fixed_time(start + timedelta(seconds=65))
+    expect(page.locator('#elapsedTop')).to_have_text('01:05')
+    expect(page.locator('#globalTimer [data-display="cmc_overall"]')).to_have_text('00:00')
+    assert page.evaluate('window.__rapsTest.state().timers.cmc_overall.instances') == []
+    assert page.evaluate('window.__rapsTest.state().startedAt') == initial['startedAt']
+    checks.append('assessment elapsed grows from the assessment start while the separately controlled TTA remains unstarted')
+
+    page.locator('#globalTimer [data-act="start"]').click()
+    page.wait_for_timeout(1100)
+    page.locator('[data-active-timer-stop="cmc_overall"]').click()
+    stopped_tta = page.evaluate('window.__rapsTest.state().timers.cmc_overall')
+    timer = stopped_tta['instances'][-1]
+    assert timer['wallStart'] == initial['startedAt'] + 65000
+    assert 1000 <= timer['finalDurationMs'] < 10000, timer
+    assert timer['result'] == 'met' and not timer['running']
+    page.clock.set_fixed_time(start + timedelta(seconds=120))
+    expect(page.locator('#elapsedTop')).to_have_text('02:00')
+    completed = start + timedelta(seconds=100)
+    page.evaluate('(completed)=>window.__rapsTest.installElapsedFinalizeReceipt(completed)', completed.isoformat())
+    page.locator('#reviewModeBtn').click()
+    page.locator('#finalizeBtn').click()
+    expect(page.locator('#confirmFinalizeBtn')).to_be_enabled()
+    page.locator('#confirmFinalizeBtn').click()
+    expect(page.locator('#finalizeBtn')).to_have_text('Evaluation Finalized')
+    expect(page.locator('#elapsedTop')).to_have_text('01:40')
+    finalized = page.evaluate('window.__rapsTest.state()')
+    event = next(event for event in finalized['events'] if event['label'] == 'Evaluation finalized')
+    assert finalized['finalizedAt'] == int(completed.timestamp() * 1000)
+    assert event['elapsed'] == finalized['finalizedAt'] - finalized['startedAt'] == 100000
+    assert finalized['serverFinalization']['finalizedAt'] == finalized['finalizedAt']
+    assert finalized['timers']['cmc_overall'] == stopped_tta
+    assert len(page.evaluate('window.__elapsedFinalizeCalls')) == 1
+    assert len(received_dialogs) == 2 and 'Submit this evaluation' in received_dialogs[0]
+    assert 'finalized by the server as PASS' in received_dialogs[1]
+    checks.append('real finalization handler freezes elapsed at the server receipt timestamp and agrees with its finalization event while preserving TTA evidence')
+
+    page.clock.set_fixed_time(start + timedelta(hours=4))
+    page.wait_for_timeout(700)
+    expect(page.locator('#elapsedTop')).to_have_text('01:40')
+    page.evaluate('window.scrollTo(0,0)')
+    page.locator('#backRoster').click()
+    page.locator('[data-start="test-student"][data-attempt="1"]').click()
+    expect(page.locator('#elapsedTop')).to_have_text('01:40')
+    assert page.evaluate('window.__rapsTest.state().timers.cmc_overall') == stopped_tta
+    page.reload(wait_until='networkidle')
+    page.evaluate('window.__rapsTest.resume()')
+    expect(page.locator('#elapsedTop')).to_have_text('01:40')
+    assert page.evaluate('window.__rapsTest.state().timers.cmc_overall') == stopped_tta
+    assert page.evaluate('window.__rapsTest.state().events').count(event) == 1
+    pdf = page.evaluate('window.__rapsTest.elapsedPdf()')
+    assert len(pdf['elapsedLines']) == 1 and pdf['elapsedLines'][0].startswith('Elapsed 01:40 |'), pdf['elapsedLines']
+    path = Path('/tmp/raps-frozen-elapsed-summary.pdf')
+    path.write_bytes(base64.b64decode(pdf['base64']))
+    assert path.read_bytes().startswith(b'%PDF-1.4')
+    artifacts.append(str(path))
+    checks.append('finalized elapsed stays frozen through live refresh, roster reopen and reload; actual summary PDF renders the same duration')
+
+    page.evaluate("window.__rapsTest.setup('3')")
+    active_started = page.evaluate('window.__rapsTest.state().startedAt')
+    page.evaluate('(fields)=>window.__rapsTest.setElapsedTerminalFixture(fields)',
+                  {'voidedAt': active_started + 25000})
+    page.clock.set_fixed_time(start + timedelta(hours=8))
+    expect(page.locator('#elapsedTop')).to_have_text('00:25')
+    pdf = page.evaluate('window.__rapsTest.elapsedPdf()')
+    assert len(pdf['elapsedLines']) == 1 and pdf['elapsedLines'][0].startswith('Elapsed 00:25 |'), pdf['elapsedLines']
+    page.evaluate('(fields)=>window.__rapsTest.setElapsedTerminalFixture(fields)',
+                  {'finalizedAt': active_started - 1000, 'voidedAt': None})
+    expect(page.locator('#elapsedTop')).to_have_text('00:00')
+    assert page.evaluate('window.__cloudOperations') == []
+    checks.append('retained voided fixture uses its recorded terminal time in UI and PDF; earlier terminal timestamps cannot produce negative elapsed')
+    context.close()
+
+
 def main():
     checks = []
     external_requests = []
@@ -188,6 +313,7 @@ def main():
                           content_type=mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
 
         context.route('**/*', fulfill)
+        check_elapsed_lifecycle(browser, fulfill, checks, errors, artifacts)
         page = context.new_page()
         page.set_default_timeout(7000)
         page.on('pageerror', lambda error: errors.append(str(error)))

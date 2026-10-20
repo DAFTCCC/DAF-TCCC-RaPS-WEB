@@ -712,3 +712,202 @@ test('an unavailable SDK session after a write aborts batch sync without a late 
   assert.deepEqual(copy(fixture.attempt.cloudGrading),stateAtFailure);
   assert.equal(fixture.persists,persistsAtFailure);
 });
+
+// Real finalization uploads the editable assessment first. The RPC then writes
+// terminal lifecycle fields, and the browser adds its own finalization event.
+// That local record no longer has its pre-finalization upload fingerprint.
+async function finalizedRemovalFixture({completionOffset=0}={}) {
+  const fixture=setup();
+  fixture.course.tierSnapshot.timers=[{id:'synthetic-clock',section:'M',label:'Synthetic assessment clock',
+    standard:'60 seconds',mode:'max',seconds:60,gradingClock:'active'}];
+  Object.assign(fixture.attempt,{
+    section:'M',ratings:{M1:'pass',M2:'pass'},methods:{M1:'explicit',M2:'explicit'},
+    stamps:{M1:instant+500,M2:instant+1000},ntReasons:{},
+    failureDetails:{M2:{mode:'incorrect',contributor:'skill-execution',comment:'Earlier coaching retained',
+      learnerExplanation:'Synthetic learner account',practicePlan:'Approved task repetition',
+      reassessmentOutcome:'independent-pass',classifiedAt:instant+900}},
+    observations:{M1:{tags:['independent'],reviewNeeded:false,observedAt:instant+400,recordedAt:instant+500}},
+    notes:{M1:'Synthetic criterion evidence'},timerForced:{},
+    timers:{'synthetic-clock':{currentIndex:0,instances:[{
+      id:'synthetic-instance-1',index:1,wallStart:instant+100,wallStop:instant+1600,
+      finalDurationMs:1500,result:'met',running:false,paused:false,voided:false,
+      segments:[{start:instant+100,end:instant+1600,duration:1500}],runtimeId:'synthetic-runtime'}]}},
+    events:[{at:instant+500,elapsed:500,label:'M1 PASS',detail:'Explicit evaluator selection'}],
+    instants:{sceneSafe:instant+100},trainerSign:'Synthetic evaluator',evaluatorId:'CADRE-TEST',
+    studentSign:'Synthetic learner',overallNotes:'Preserve this completed assessment and its evidence.',
+    startedByUserId:'evaluator-1',startedByDeviceId:'this-device',cloudEvaluatorUserId:'evaluator-1',
+    showNt:false,observeMode:true,remediation:{plan:'Synthetic follow-up'},
+    appVersion:'3.4.12-web.13',contentVersion:'standard',scenarioVersion:'1'
+  });
+  assert.equal(await fixture.push(),true);
+  const completedAt=instant+5000,row=fixture.tables.evaluations[0];
+  Object.assign(row,{status:'finalized',completed_at:iso(completedAt),overall_result:'pass',
+    score_numerator:2,score_denominator:2,client_modified_at:iso(completedAt)});
+  row.app_data.serverFinalization={finalizedAt:completedAt,finalizedBy:'evaluator-1',
+    result:'pass',scoreNumerator:2,scoreDenominator:2};
+  Object.assign(fixture.attempt,{finalizedAt:completedAt+completionOffset,finalResult:'PASS',
+    modifiedAt:completedAt+completionOffset});
+  fixture.attempt.events.push({at:fixture.attempt.finalizedAt,
+    elapsed:fixture.attempt.finalizedAt-fixture.attempt.startedAt,label:'Evaluation finalized',
+    detail:'Server-authoritative PASS · 2/2'});
+  fixture.tables.classes[0].status='archived';
+  fixture.course.status='archived';
+  fixture.verifyRemoval=()=>fixture.window.RAPS_GRADING_SYNC.verifyEvaluationForLocalRemoval(
+    fixture.course,fixture.student,fixture.attempt);
+  fixture.writesBeforeVerification=fixture.client.writes.length;
+  return fixture;
+}
+
+for(const completionOffset of [0,250]) {
+  test(`read-only cache-removal verification recognizes finalized uploaded evidence with ${completionOffset?'a local fallback':'the canonical'} completion timestamp`,async()=>{
+    const fixture=await finalizedRemovalFixture({completionOffset});
+    const sync=fixture.window.RAPS_GRADING_SYNC;
+    assert.notEqual(fixture.attempt.cloudGrading.baseGradingSignature,sync.localGradingSignature(fixture.attempt));
+    assert.equal(await sync.pullEvaluation(fixture.course,fixture.student,fixture.attempt),false,
+      'Ordinary sync must still protect a modified finalized copy');
+    assert.equal(await fixture.push(),false,'Archived final records must not be rewritten');
+    const before=copy(fixture.attempt),serverBefore=copy(fixture.tables),persistBefore=fixture.persists;
+    const receipt=await fixture.verifyRemoval();
+    assert.ok(receipt);
+    assert.equal(fixture.client.writes.length,fixture.writesBeforeVerification);
+    assert.deepEqual(fixture.tables,serverBefore);
+    assert.deepEqual(copy(fixture.attempt),before,
+      'Verification returns an ephemeral receipt without modifying the assessment or stored sync state');
+    assert.equal(fixture.persists,persistBefore,'A read-only proof must never write a stale database over another tab');
+    assert.equal(receipt.status,'synced');
+    assert.equal(receipt.syncedByUserId,'evaluator-1');
+    assert.equal(receipt.remoteModifiedAt,instant+5000);
+    assert.equal(receipt.baseGradingSignature,sync.localGradingSignature(fixture.attempt));
+  });
+}
+
+test('cache-removal verification ignores only disposable phase and display preferences',async()=>{
+  const fixture=await finalizedRemovalFixture();
+  fixture.attempt.section='DOC';fixture.attempt.showNt=true;fixture.attempt.observeMode=false;
+  const before=copy(fixture.attempt),persistBefore=fixture.persists;
+  const receipt=await fixture.verifyRemoval();
+  assert.ok(receipt);
+  assert.deepEqual(copy(fixture.attempt),before);
+  assert.equal(fixture.persists,persistBefore);
+  assert.equal(receipt.baseGradingSignature,
+    fixture.window.RAPS_GRADING_SYNC.localGradingSignature(fixture.attempt));
+  assert.equal(fixture.client.writes.length,fixture.writesBeforeVerification);
+});
+
+test('legacy cache-removal verification without cloudGrading returns a receipt without creating sync metadata or persisting',async()=>{
+  const fixture=await finalizedRemovalFixture();
+  delete fixture.attempt.cloudGrading;
+  const before=copy(fixture.attempt),persistBefore=fixture.persists;
+  const receipt=await fixture.verifyRemoval();
+  assert.ok(receipt);
+  assert.equal(receipt.status,'synced');
+  assert.equal(receipt.syncedByUserId,'evaluator-1');
+  assert.equal(receipt.baseGradingSignature,fixture.window.RAPS_GRADING_SYNC.localGradingSignature(fixture.attempt));
+  assert.deepEqual(copy(fixture.attempt),before);
+  assert.equal(Object.hasOwn(fixture.attempt,'cloudGrading'),false);
+  assert.equal(fixture.persists,persistBefore);
+  assert.equal(fixture.client.writes.length,fixture.writesBeforeVerification);
+});
+
+const removalMismatches={
+  'official grade':f=>{f.attempt.ratings.M1='fail';},
+  'grading method':f=>{f.attempt.methods.M1='coached';},
+  'grade timestamp':f=>{f.attempt.stamps.M1++;},
+  'criterion note':f=>{f.attempt.notes.M1='Unsaved local evidence';},
+  'overall note':f=>{f.attempt.overallNotes='Unsaved local comments';},
+  'coaching history':f=>{f.attempt.failureDetails.M2.practicePlan='Unsaved local coaching';},
+  'observation evidence':f=>{f.attempt.observations.M1.tags=['prompted'];},
+  'timer duration':f=>{f.attempt.timers['synthetic-clock'].instances[0].finalDurationMs++;},
+  'timer history':f=>{f.attempt.timers['synthetic-clock'].instances[0].segments[0].duration++;},
+  'forced timer result':f=>{f.attempt.timerForced.M1=true;},
+  'instant event':f=>{f.attempt.instants.sceneSafe++;},
+  'earlier timeline event':f=>{f.attempt.events[0].detail='Unconfirmed observation';},
+  'extra timeline event':f=>{f.attempt.events.push({at:instant+6000,elapsed:6000,label:'Unsaved note',detail:'Must not be discarded'});},
+  'finalization event detail':f=>{f.attempt.events.at(-1).detail='Server-authoritative PASS · 1/2';},
+  'finalization event timestamp':f=>{f.attempt.events.at(-1).at++;},
+  'finalization event elapsed':f=>{f.attempt.events.at(-1).elapsed++;},
+  'duplicate finalization event':f=>{f.attempt.events.push(copy(f.attempt.events.at(-1)));},
+  'evaluator signoff':f=>{f.attempt.trainerSign='Unsaved evaluator name';},
+  'evaluator display identifier':f=>{f.attempt.evaluatorId='DIFFERENT-CADRE';},
+  'student signoff':f=>{f.attempt.studentSign='Unsaved learner acknowledgement';},
+  'remediation plan':f=>{f.attempt.remediation.plan='Unconfirmed practice plan';},
+  'app version':f=>{f.attempt.appVersion='different-app-version';},
+  'content version':f=>{f.attempt.contentVersion='different-content-version';},
+  'scenario version':f=>{f.attempt.scenarioVersion='different-scenario-version';},
+  'start time':f=>{f.attempt.startedAt++;},
+  'attempt number':f=>{f.attempt.attemptNo=2;},
+  'local final result':f=>{f.attempt.finalResult='FAIL';},
+  'server final result':f=>{f.tables.evaluations[0].overall_result='fail';},
+  'server score':f=>{f.tables.evaluations[0].score_numerator=1;},
+  'server active lifecycle':f=>{f.tables.evaluations[0].status='in_progress';},
+  'server void lifecycle':f=>{f.tables.evaluations[0].status='voided';},
+  'server missing completion':f=>{f.tables.evaluations[0].completed_at=null;},
+  'server participant':f=>{f.tables.evaluations[0].participant_id='other-participant';},
+  'server event class':f=>{f.tables.evaluation_events[0].class_id='other-class';},
+  'server curriculum':f=>{f.tables.evaluations[0].curriculum_version_id='other-curriculum';},
+  'server evaluator provenance':f=>{f.tables.evaluations[0].evaluator_id='other-evaluator';},
+  'local evaluator provenance':f=>{f.attempt.startedByUserId='other-evaluator';},
+  'server version metadata':f=>{f.tables.evaluations[0].app_data.contentVersion='unconfirmed-server-version';},
+};
+for(const [name,mutate] of Object.entries(removalMismatches)) {
+  test(`cache-removal verification refuses mismatched ${name} without discarding local evidence`,async()=>{
+    const fixture=await finalizedRemovalFixture();mutate(fixture);
+    const before=copy(fixture.attempt),persistBefore=fixture.persists;
+    assert.equal(await fixture.verifyRemoval(),false);
+    assert.deepEqual(copy(fixture.attempt),before);
+    assert.equal(fixture.persists,persistBefore);
+    assert.equal(fixture.client.writes.length,fixture.writesBeforeVerification);
+  });
+}
+
+test('cache-removal verification checks authoritative class scope for a scoped evaluator',async()=>{
+  const fixture=await finalizedRemovalFixture();
+  fixture.window.RAPS_CLOUD.memberships=[{id:'scope-1',user_id:'evaluator-1',role:'evaluator',active:true,
+    base_id:'base-1',majcom_id:null,bases:{id:'base-1',code:'TEST',majcom_id:'majcom-1',active:true}}];
+  fixture.tables.classes[0].base_id='other-base';
+  fixture.tables.classes[0].bases={id:'other-base',code:'OTHER',majcom_id:'other-majcom',active:true};
+  assert.equal(await fixture.verifyRemoval(),false);
+  assert.equal(fixture.client.writes.length,fixture.writesBeforeVerification);
+});
+
+test('an account-bound removal receipt uses the verified current account without rebinding stored sync metadata',async()=>{
+  const fixture=await finalizedRemovalFixture();
+  fixture.window.RAPS_CLOUD={user:{id:'reviewer-2'},connected:true,
+    memberships:[{id:'reviewer-membership',user_id:'reviewer-2',role:'enterprise_admin',active:true,base_id:null,majcom_id:null}]};
+  fixture.client.setSession({user:{id:'reviewer-2'},access_token:'synthetic-reviewer-2'});
+  assert.equal(fixture.attempt.cloudGrading.syncedByUserId,'evaluator-1');
+  const before=copy(fixture.attempt),persistBefore=fixture.persists;
+  const receipt=await fixture.verifyRemoval();
+  assert.ok(receipt);
+  assert.equal(receipt.syncedByUserId,'reviewer-2');
+  assert.equal(receipt.baseGradingSignature,
+    fixture.window.RAPS_GRADING_SYNC.localGradingSignature(fixture.attempt));
+  assert.deepEqual(copy(fixture.attempt),before);
+  assert.equal(fixture.attempt.cloudGrading.syncedByUserId,'evaluator-1');
+  assert.equal(fixture.persists,persistBefore);
+  assert.equal(fixture.client.writes.length,fixture.writesBeforeVerification);
+  assert.ok(fixture.client.requests.filter(request=>request.authorization==='Bearer synthetic-reviewer-2').length);
+});
+
+for(const mutation of ['local-evidence','local-view','local-attempt-replacement','account','sdk-token']) {
+  test(`in-flight ${mutation} change prevents cache-removal certification`,async()=>{
+    const fixture=await finalizedRemovalFixture();
+    const proof=copy(fixture.attempt.cloudGrading),persistBefore=fixture.persists;
+    let changed=false;
+    fixture.client.hooks.beforeReturn=({table})=>{
+      if(changed||table!=='criterion_results')return;changed=true;
+      if(mutation==='local-evidence')fixture.attempt.overallNotes='Unsaved concurrent local evidence';
+      else if(mutation==='local-view')fixture.attempt.section='DOC';
+      else if(mutation==='local-attempt-replacement')fixture.student.attempts[1]=copy(fixture.attempt);
+      else if(mutation==='account')fixture.window.RAPS_CLOUD={user:{id:'other-user'},connected:true,
+        memberships:[{id:'other-membership',user_id:'other-user',role:'enterprise_admin',active:true,base_id:null,majcom_id:null}]};
+      else fixture.client.setSession({user:{id:'evaluator-1'},access_token:'synthetic-replaced-token'});
+    };
+    if(mutation.startsWith('local-'))assert.equal(await fixture.verifyRemoval(),false);
+    else await assert.rejects(fixture.verifyRemoval(),/session|permissions changed/i);
+    assert.equal(changed,true);
+    assert.deepEqual(copy(fixture.attempt.cloudGrading),proof);
+    assert.equal(fixture.persists,persistBefore);
+    assert.equal(fixture.client.writes.length,fixture.writesBeforeVerification);
+  });
+}

@@ -54,7 +54,7 @@ function fixture() {
   vm.runInContext(permissions, context);
   const names = ['currentCloudUserId','localRosterSignature','readLocalCopyExclusion',
     'isLocalCopyHidden','clearLocalCopyHidden','getExcludedLocalClassIds','discardExcludedCleanCopies','canAccessClass',
-    'requireClassAccess','hasEnterpriseAccess','localCopyRemovalIssue','removeLocalClassCopy',
+    'requireClassAccess','hasEnterpriseAccess','localGradingCopyConfirmed','localCopyRemovalIssue','removeLocalClassCopy',
     'classPermissionContext','currentCloudClient','hasClassCloseAccess','isClassClosed','closureIssues',
     'syncClassForAuthoritativeClose','closeClass','prepareBackupClass','unverifiedLocalClasses',
     'renderLocalRecoveryNotice','guardClassExport','scrubPrivateViews','refreshPrivateViewAccess','importRoster',
@@ -157,6 +157,116 @@ test('confirmed finalized grades may be evicted, and a subsequent automatic pull
   assert.equal(f.window.RAPS_CLASS_STORE.upsertFromCloud(c,{restoreLocalCopy:true}).id,c.id);
   assert.equal(f.window.RAPS_CLASS_STORE.isLocalCopyHidden(c.id),false);
   assert.equal(f.stored().classes.length,1);
+});
+
+test('a synced shared-trash copy verifies finalized grading before removing only this device copy', async () => {
+  const f=fixture(), a=f.addFinal(), c=f.api.record();
+  c.deletedAt=30;f.api.seed(c);
+  a.events=[{at:20,elapsed:10,label:'Evaluation finalized',detail:'Server-authoritative PASS · 1/1'}];
+  f.api.persist();
+  const calls=[];
+  f.window.RAPS_GRADING_SYNC.verifyEvaluationForLocalRemoval=async (course,student,attempt)=>{
+    calls.push({courseId:course.id,studentId:student.id,attemptId:attempt.id});
+    return {status:'synced',baseGradingSignature:f.window.RAPS_GRADING_SYNC.localGradingSignature(attempt),syncedByUserId:'enterprise-1'};
+  };
+  const button={textContent:'Remove Local Copy',disabled:false,isConnected:true};
+  await f.api.remove(c.id,button);
+  assert.deepEqual(calls,[{courseId:c.id,studentId:'student-1',attemptId:a.id}]);
+  assert.equal(f.stored().classes.length,0);
+  assert.equal(f.window.RAPS_CLASS_STORE.isLocalCopyHidden(c.id),true);
+  assert.equal(f.alerts.length,0);
+  assert.equal(button.disabled,false);
+  assert.equal(button.textContent,'Remove Local Copy');
+  assert.equal(f.events[0].type,'raps-local-copy-removed');
+});
+
+for(const outcome of ['different-record','network-error','account-changed','roster-changed','another-tab']){
+  test(`server verification keeps local copy when ${outcome}`,async()=>{
+    const f=fixture(),a=f.addFinal(),c=f.api.record();
+    a.events=[{at:20,elapsed:10,label:'Evaluation finalized',detail:'Server-authoritative PASS · 1/1'}];
+    f.api.persist();
+    let prompts=0;f.prompt(()=>{prompts++;return 'REMOVE LOCAL';});
+    f.window.RAPS_GRADING_SYNC.verifyEvaluationForLocalRemoval=async()=>{
+      if(outcome==='different-record')return false;
+      if(outcome==='network-error')throw new Error('Synthetic connection failure');
+      const proof={status:'synced',baseGradingSignature:f.window.RAPS_GRADING_SYNC.localGradingSignature(a),syncedByUserId:'enterprise-1'};
+      if(outcome==='account-changed')f.window.RAPS_CLOUD.memberships=[];
+      if(outcome==='roster-changed')c.students[0].name='Unsent roster edit';
+      f.api.persist();
+      if(outcome==='another-tab'){
+        const saved=f.stored();saved.classes[0].name='Newer class from another tab';
+        f.localStorage.setItem('TCCC_SUITE_DB',JSON.stringify(saved));
+      }
+      return proof;
+    };
+    await f.api.remove(c.id);
+    assert.equal(f.stored().classes.length,1);
+    assert.equal(f.api.db().classes.length,1);
+    assert.equal(f.window.RAPS_CLASS_STORE.isLocalCopyHidden(c.id),false);
+    assert.ok(f.alerts.length);
+    assert.equal(prompts,outcome==='another-tab'?1:0);
+    assert.equal(f.events.length,0);
+  });
+}
+
+for(const pending of ['metadata','roster','in-progress','outbox']){
+  test(`local-copy verification does not bypass pending ${pending}`,async()=>{
+    const f=fixture(),a=f.addFinal(),c=f.api.record();
+    a.overallNotes='An unconfirmed note';
+    if(pending==='metadata')c.name='Unsent metadata';
+    if(pending==='roster')c.students[0].name='Unsent roster';
+    if(pending==='in-progress')a.finalizedAt=null;
+    if(pending==='outbox')f.localStorage.setItem('RAPS_CLASS_TRASH_OUTBOX:'+c.id,JSON.stringify({action:{kind:'delete'}}));
+    f.api.persist();
+    let checked=0;f.window.RAPS_GRADING_SYNC.verifyEvaluationForLocalRemoval=async()=>{checked++;return true;};
+    await f.api.remove(c.id);
+    assert.equal(checked,0);
+    assert.equal(f.stored().classes.length,1);
+    assert.equal(f.window.RAPS_CLASS_STORE.isLocalCopyHidden(c.id),false);
+    assert.ok(f.alerts.length);
+  });
+}
+
+for(const changedClass of ['target','unrelated']){
+  test(`a ${changedClass} class saved by another tab during verification is never overwritten`,async()=>{
+    const f=fixture(),a=f.addFinal(),c=f.api.record();
+    a.events=[{at:20,elapsed:10,label:'Evaluation finalized',detail:'Server-authoritative PASS · 1/1'}];
+    f.api.persist();
+    f.window.RAPS_GRADING_SYNC.verifyEvaluationForLocalRemoval=async()=>{
+      const saved=f.stored();
+      if(changedClass==='target')saved.classes[0].name='Newer target from another tab';
+      else saved.classes.push({id:'other-class',name:'Newer unrelated class from another tab',students:[]});
+      f.localStorage.setItem('TCCC_SUITE_DB',JSON.stringify(saved));
+      return {status:'synced',baseGradingSignature:f.window.RAPS_GRADING_SYNC.localGradingSignature(a),syncedByUserId:'enterprise-1'};
+    };
+    await f.api.remove(c.id);
+    const saved=f.stored();
+    assert.equal(saved.classes.length,1);
+    assert.equal(saved.classes[0].name,changedClass==='target'?'Newer target from another tab':'Newer unrelated class from another tab');
+    assert.equal(f.window.RAPS_CLASS_STORE.isLocalCopyHidden(c.id),changedClass!=='target');
+    assert.equal(f.alerts.length,changedClass==='target'?1:0);
+  });
+}
+
+test('canceling removal does not save or reuse an ephemeral grading receipt',async()=>{
+  const f=fixture(),a=f.addFinal(),c=f.api.record();
+  a.events=[{at:20,elapsed:10,label:'Evaluation finalized',detail:'Server-authoritative PASS · 1/1'}];
+  f.api.persist();
+  const before=copy(f.api.db()),storedBefore=f.localStorage.getItem('TCCC_SUITE_DB');
+  let checked=0;
+  f.window.RAPS_GRADING_SYNC.verifyEvaluationForLocalRemoval=async()=>{
+    checked++;
+    return checked===1?{status:'synced',baseGradingSignature:f.window.RAPS_GRADING_SYNC.localGradingSignature(a),syncedByUserId:'enterprise-1'}:false;
+  };
+  f.prompt(()=>null);
+  await f.api.remove(c.id);
+  assert.deepEqual(copy(f.api.db()),before);
+  assert.equal(f.localStorage.getItem('TCCC_SUITE_DB'),storedBefore);
+  f.prompt(()=>'REMOVE LOCAL');
+  await f.api.remove(c.id);
+  assert.equal(checked,2);
+  assert.equal(f.stored().classes.length,1);
+  assert.equal(f.window.RAPS_CLASS_STORE.isLocalCopyHidden(c.id),false);
 });
 
 for (const state of ['metadata','roster','grades','outbox','in-progress','unpublished','other-account-baseline']) {
