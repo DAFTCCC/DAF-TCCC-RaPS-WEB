@@ -3,7 +3,7 @@ on:
   push:
     branches: [chore/fetch-supabase-js]
 permissions:
-  contents: read
+  contents: write
 jobs:
   fetch:
     runs-on: ubuntu-latest
@@ -25,6 +25,16 @@ jobs:
           cp package/LICENSE LICENSE-supabase-js 2>/dev/null || true
           echo "$VER" > VERSION
           ls -la; cat SHA256SUMS npm-integrity.txt
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+      - name: Commit fetched files to this scratch branch
+        run: |
+          set -euo pipefail
+          mkdir -p repo/vendor-fetch && cp out/*.min.js out/SHA256SUMS out/npm-integrity.txt out/VERSION repo/vendor-fetch/
+          cp out/LICENSE-supabase-js repo/vendor-fetch/ 2>/dev/null || true
+          cd repo && git config user.name github-actions && git config user.email github-actions@users.noreply.github.com
+          git add vendor-fetch && git commit -m "Fetched supabase-js $(cat vendor-fetch/VERSION) (scratch)" && git push
       - uses: actions/upload-artifact@v4
         with:
           name: supabase-js
