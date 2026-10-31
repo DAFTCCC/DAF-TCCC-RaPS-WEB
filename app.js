@@ -9,6 +9,7 @@ const DB_KEY = 'TCCC_SUITE_DB';
 const LEGACY_DB_KEYS = ['TCCC_SUITE_V215_DB'];
 const TRASH_OUTBOX_PREFIX = 'RAPS_CLASS_TRASH_OUTBOX:';
 const LOCAL_COPY_EXCLUSION_PREFIX = 'RAPS_CLASS_LOCAL_EXCLUDED:';
+const ROSTER_WITHDRAWAL_PREFIX = 'RAPS_ROSTER_WITHDRAWALS_V1:';
 const $ = id => document.getElementById(id);
 const deep = x => JSON.parse(JSON.stringify(x));
 const now = () => Date.now();
@@ -305,6 +306,52 @@ function tier(){ const c=cls(); return c ? (c.tierSnapshot||TIERS[c.tierId]) : n
 function student(){ const c=cls(); return c?.students.find(s=>s.id===currentStudentId); }
 function evalState(){ return student()?.attempts?.[String(currentAttemptNo)] || null; }
 function currentCloudUserId(){return String(window.RAPS_CLOUD?.user?.id||'');}
+// Roster withdrawals. Removing a student from a cloud class is queued in its
+// own key (identifiers and timestamps only, no names or grades) so the request
+// survives whole-database writes from another tab, browser restarts, and
+// offline periods. Roster sync uploads each entry as a recorded withdrawal on
+// the participant row and then acknowledges it here.
+function readRosterWithdrawals(classId){
+  try{
+    const entry=JSON.parse(localStorage.getItem(ROSTER_WITHDRAWAL_PREFIX+classId));
+    if(entry?.classId!==classId||!Array.isArray(entry.items))return [];
+    return entry.items.filter(x=>x&&typeof x.studentId==='string'&&x.studentId&&Number(x.requestedAt)>0);
+  }catch{return [];}
+}
+function writeRosterWithdrawals(classId,items){
+  if(items.length)localStorage.setItem(ROSTER_WITHDRAWAL_PREFIX+classId,JSON.stringify({classId,items}));
+  else localStorage.removeItem(ROSTER_WITHDRAWAL_PREFIX+classId);
+}
+function resolveRosterWithdrawal(classId,studentId,outcome={}){
+  const items=readRosterWithdrawals(classId);
+  const remaining=items.filter(x=>x.studentId!==String(studentId));
+  if(remaining.length===items.length)return false;
+  writeRosterWithdrawals(classId,remaining);
+  if(outcome.status==='rejected'){
+    const c=db.classes.find(x=>x.id===classId);
+    if(c){
+      c.rosterNotice={message:String(outcome.message||'A removed student was restored because assessment records exist.'),at:now()};
+      localStorage.setItem(DB_KEY,JSON.stringify(db));
+    }
+  }
+  return true;
+}
+// A student may be removed only while no assessment has been started for
+// them. Assessments elsewhere on the device are irrelevant to this student.
+function studentRemovalBlockReason(c,st){
+  if(!c||!st)return 'Student not found.';
+  if(isClassClosed(c))return 'Closed classes are retained records and cannot be changed.';
+  if(Object.values(st.attempts||{}).some(a=>a?.startedAt))return 'This student has a started assessment. Assessment records must be retained, so the student cannot be removed.';
+  return '';
+}
+function removeStudentFromRoster(c,st){
+  if(c.cloudSync?.enabled){
+    const items=readRosterWithdrawals(c.id).filter(x=>x.studentId!==st.id);
+    items.push({studentId:st.id,userId:currentCloudUserId(),deviceId:db.deviceId||'',requestedAt:now()});
+    writeRosterWithdrawals(c.id,items);
+  }
+  c.students=c.students.filter(x=>x.id!==st.id);
+}
 function localRosterSignature(c){
   return JSON.stringify((c?.students||[]).map(s=>({id:String(s?.id||''),name:String(s?.name||''),rank:String(s?.rank||''),trainingId:String(s?.trainingId||'')})).sort((a,b)=>a.id.localeCompare(b.id)));
 }
@@ -410,6 +457,15 @@ function renderActiveEvaluationLockBanner(){
   el.classList.remove('hidden');
   el.innerHTML=`<div><b>EVALUATION LOCK ACTIVE</b><span>${esc(activeEvaluationLockText(lock))}. Finalize or Void this attempt before opening any other evaluation.</span></div><button id="resumeActiveEvaluationBtn" class="action compact primary" type="button">Resume Current Evaluation</button>`;
   const b=$('resumeActiveEvaluationBtn');if(b)b.onclick=()=>resumeActiveEvaluation(lock);
+}
+function renderRosterNotice(c){
+  const el=$('rosterNoticeBanner');if(!el)return;
+  const notice=c?.rosterNotice;
+  if(!notice?.message){el.classList.add('hidden');el.innerHTML='';return;}
+  el.classList.remove('hidden');
+  el.innerHTML=`<div><b>ROSTER UPDATE</b><span>${esc(notice.message)}</span></div><button id="dismissRosterNoticeBtn" class="action compact" type="button">Dismiss</button>`;
+  const b=$('dismissRosterNoticeBtn');
+  if(b)b.onclick=()=>{const current=db.classes.find(x=>x.id===c.id);if(current){delete current.rosterNotice;localStorage.setItem(DB_KEY,JSON.stringify(db));}renderRosterNotice(current);};
 }
 function allItems(t=tier()){ return t ? t.sections.flatMap(s=>s.items.map(i=>({...i,section:s.code,sectionTitle:s.title}))) : []; }
 function itemById(id){ return allItems().find(i=>i.id===id); }
@@ -541,13 +597,14 @@ function scrubPrivateViews(){
   modalFocusState.clear();deferredModalFocus=null;
   for(const id of ['classTitle','classSub','classState','classMeta','closedBannerText','closedArchiveStatus',
     'scenarioCoverage','classAnalyticsKpis','classGapTable','classRootCauses','studentComparison','classHeatmap',
-    'evaluatorSignals','rosterCount','rosterList','activeEvaluationLockBanner','studentLabel','attemptBadge',
+    'evaluatorSignals','rosterCount','rosterList','activeEvaluationLockBanner','rosterNoticeBanner','studentLabel','attemptBadge',
     'attemptLabel','tierTitle','tierSource','instructions','elapsedTop','criticalTop','gradedTop','unresolvedTop',
     'globalTimer','quickCufTimer','activeTimers','activeTimerCount','items','tabs','checklistBottomTabs','bottomTabs','evalPhaseCourse','sectionTitle','sectionProgress',
     'sectionTools','timeline','eventCount','learnerPracticeHistory','observeFocus','diagnosticReviewQueue',
     'observationFeedbackText','aarText','finalizationIssues','formModalTitle','formModalBody']){const element=$(id);if(element)element.textContent='';}
   for(const id of ['trainerSign','attemptEvaluatorId','studentSign','overallNotes','rosterSearch','rosterFile','backupImportFile']){const element=$(id);if(element)element.value='';}
   if($('activeEvaluationLockBanner'))$('activeEvaluationLockBanner').classList.add('hidden');
+  if($('rosterNoticeBanner'))$('rosterNoticeBanner').classList.add('hidden');
   setReadOnly(true);setHomeArea('evaluate');showView('homeView');
 }
 function refreshPrivateViewAccess(){
@@ -1060,6 +1117,7 @@ function renderClass(){
   const visibleStudents=c.students.filter(rosterMatches);
   $('rosterCount').textContent=`${visibleStudents.length}/${stats.total} shown · ${stats.completed} finalized`;
   renderActiveEvaluationLockBanner();
+  renderRosterNotice(c);
   $('rosterList').innerHTML=visibleStudents.length?visibleStudents.map(s=>rosterRow(c,s)).join(''):c.students.length?'<div class="empty">No students match the current roster filter.</div>':'<div class="empty">No students loaded. Add a student or import a CSV roster.</div>';
   if($('rosterSearch'))$('rosterSearch').value=rosterSearchTerm;
   document.querySelectorAll('[data-roster-filter]').forEach(b=>b.classList.toggle('active',b.dataset.rosterFilter===rosterFilter));
@@ -1118,7 +1176,10 @@ function rosterRow(c,s){
     else if(a1?.finalizedAt&&a1.finalResult==='PASS')buttons+=` <span class="rowSub">A2 not indicated after A1 PASS</span>`;
     if(canEvaluate&&attemptBelongsToCurrentEvaluator(a1)&&a1?.cloudGrading?.status==='conflict')buttons+=` <button class="ghost small" data-resolve-grade-conflict="${s.id}" data-attempt="1">Resolve Grade Conflict</button>`;
     if(canEvaluate&&attemptBelongsToCurrentEvaluator(a2)&&a2?.cloudGrading?.status==='conflict')buttons+=` <button class="ghost small" data-resolve-grade-conflict="${s.id}" data-attempt="2">Resolve Grade Conflict</button>`;
-    if(canAccessClass('manageRoster',c))buttons+=` <button class="ghost small danger" data-delete-student="${s.id}"${lock||Object.values(s.attempts||{}).some(a=>a?.startedAt)?' disabled aria-disabled="true" title="Assessment records must be retained. Only students without started assessments can be removed."':''}>Remove Student</button>`;
+    if(canAccessClass('manageRoster',c)){
+      const blocked=studentRemovalBlockReason(c,s);
+      buttons+=` <button class="ghost small danger" data-delete-student="${s.id}"${blocked?` disabled aria-disabled="true" title="${esc(blocked)}"`:''}>Remove Student</button>`;
+    }
   }
   return `<div class="rosterRow"><div><div class="rowTitle">${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</div><div class="rowSub">${esc(s.trainingId||'No training ID')} · <span class="statusPill ${clsx}">${status}</span>${best?` · ${scoreStats(c.tierSnapshot,best).percentText} ${gradingSyncBadge(best)}`:a1?` ${gradingSyncBadge(a1)}`:''}</div></div><div class="rowActions">${buttons}</div></div>`;
 }
@@ -1227,10 +1288,17 @@ function bindRosterRows(){
   document.querySelectorAll('[data-delete-student]').forEach(b=>b.onclick=()=>{
     const c=cls();if(!c||isClassClosed(c)||!requireClassAccess('manageRoster',c))return;
     const st=c.students.find(x=>x.id===b.dataset.deleteStudent);if(!st)return;
-    if(findActiveEvaluationLock()||Object.values(st.attempts||{}).some(a=>a?.startedAt)){alert('Assessment records must be retained. Only students without started assessments can be removed.');return;}
-    if(confirm(`Remove ${st.name||'student'} from this roster?`)){
-      if(!requireClassAccess('manageRoster',c)||isClassClosed(c))return;
-      c.students=c.students.filter(x=>x.id!==b.dataset.deleteStudent);saveDb();renderClass();
+    const blocked=studentRemovalBlockReason(c,st);
+    if(blocked){alert(blocked);return;}
+    const synced=c.cloudSync?.enabled;
+    if(confirm(`Remove ${st.name||'student'} from this roster?${synced?'\n\nThe removal is recorded and synchronized to every device using this class.':''}`)){
+      const current=cls(),target=current?.students?.find(x=>x.id===st.id);
+      if(!current||!target||!requireClassAccess('manageRoster',current))return;
+      const recheck=studentRemovalBlockReason(current,target);
+      if(recheck){alert(recheck);renderClass();return;}
+      try{removeStudentFromRoster(current,target);}
+      catch{alert('The student was not removed. Device storage could not record the removal. Free storage and try again.');return;}
+      saveDb();renderClass();
     }
   });
 }
@@ -2778,6 +2846,8 @@ window.RAPS_CLASS_STORE = Object.freeze({
   ownsTrashAction,
   rememberTrashAction,
   acknowledgeTrashAction,
+  getRosterWithdrawals:classId=>readRosterWithdrawals(String(classId||'')),
+  resolveRosterWithdrawal:(classId,studentId,outcome)=>resolveRosterWithdrawal(String(classId||''),studentId,outcome),
   patchCloudState:(id,patch)=>{
     const c=db.classes.find(x=>x.id===id);if(!c)return null;
     c.cloudSync={...(c.cloudSync||{}),...(patch||{})};
@@ -2839,7 +2909,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.13';
+  const UPDATE_BUILD = '3.4.12-web.14';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
