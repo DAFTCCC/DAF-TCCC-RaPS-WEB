@@ -1,0 +1,37 @@
+name: Fetch supabase-js (temporary)
+on:
+  push:
+    branches: [chore/fetch-supabase-js]
+permissions:
+  contents: read
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Download the version jsDelivr currently serves for @2
+        run: |
+          set -euo pipefail
+          VER=$(npm view @supabase/supabase-js@2 version --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=JSON.parse(s);console.log(Array.isArray(v)?v[v.length-1]:v)})')
+          echo "version=$VER"
+          mkdir out && cd out
+          npm pack "@supabase/supabase-js@$VER"
+          tar -xzf supabase-supabase-js-$VER.tgz
+          cp package/dist/umd/supabase.js "supabase-js-$VER.min.js"
+          npm view "@supabase/supabase-js@$VER" dist.integrity dist.shasum > npm-integrity.txt
+          sha256sum "supabase-js-$VER.min.js" supabase-supabase-js-$VER.tgz > SHA256SUMS
+          cp package/LICENSE LICENSE-supabase-js 2>/dev/null || true
+          echo "$VER" > VERSION
+          ls -la; cat SHA256SUMS npm-integrity.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supabase-js
+          path: |
+            out/*.min.js
+            out/*.tgz
+            out/SHA256SUMS
+            out/npm-integrity.txt
+            out/VERSION
+            out/LICENSE-supabase-js
