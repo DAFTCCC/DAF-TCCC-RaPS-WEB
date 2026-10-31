@@ -99,6 +99,91 @@ function isVoidedEvaluation(row) {
 function isClosedClass(c) {
   return !!c && (!!c.closedAt || c.status === 'closed');
 }
+
+// ---- Roster withdrawal ----------------------------------------------------
+// Removing a student is recorded on the server as a withdrawal in the
+// participant's app_data (withdrawnAt/By/DeviceId/FromClassId). The row is
+// never deleted, so the audit trigger keeps the full history. Assessment
+// evidence always outranks a withdrawal: a participant with any started
+// evaluation is never withdrawn, and a withdrawn participant that still has a
+// started local attempt is reinstated when that device synchronizes.
+function isWithdrawnParticipant(p) {
+  return Number(p?.app_data?.withdrawnAt || 0) > 0;
+}
+function hasStartedAttempt(s) {
+  return Object.values(s?.attempts || {}).some(a => a?.startedAt);
+}
+function pendingWithdrawalIds(c) {
+  const items = getStore()?.getRosterWithdrawals?.(c?.id) || [];
+  return new Set(items.map(x => String(x.studentId)));
+}
+
+async function pushWithdrawals(c, client, userId) {
+  const store = getStore();
+  const items = store?.getRosterWithdrawals?.(c.id) || [];
+  let rejected = 0;
+  for (const item of items) {
+    const studentId = String(item.studentId);
+    const { data: participant, error: readError } = await client
+      .from('participants')
+      .select('id, app_data')
+      .eq('id', studentId)
+      .maybeSingle();
+    if (readError) throw readError;
+
+    // Never uploaded, or already withdrawn by another device: nothing to write.
+    if (!participant || isWithdrawnParticipant(participant)) {
+      store?.resolveRosterWithdrawal?.(c.id, studentId, { status:'confirmed' });
+      continue;
+    }
+
+    const { data: evaluations, error: evalError } = await client
+      .from('evaluations')
+      .select('id, status, started_at')
+      .in('participant_id', [studentId]);
+    if (evalError) throw evalError;
+    if ((evaluations || []).some(row => row?.started_at)) {
+      store?.resolveRosterWithdrawal?.(c.id, studentId, {
+        status:'rejected',
+        message:'A removed student was restored because an assessment had already been started for them on another device. Assessment records must be retained.'
+      });
+      rejected++;
+      continue;
+    }
+
+    const app = participant.app_data && typeof participant.app_data === 'object' && !Array.isArray(participant.app_data)
+      ? participant.app_data : {};
+    const { error: writeError } = await client
+      .from('participants')
+      .update({
+        app_data: {
+          ...app,
+          withdrawnAt: Number(item.requestedAt) || Date.now(),
+          withdrawnBy: String(userId),
+          withdrawalRequestedBy: String(item.userId || userId),
+          withdrawnDeviceId: String(item.deviceId || getStore()?.deviceId?.() || ''),
+          withdrawnFromClassId: c.id
+        },
+        client_modified_at: isoFromMs(Number(item.requestedAt) || Date.now()),
+        source_device_id: getStore()?.deviceId?.() || null
+      })
+      .eq('id', studentId);
+    if (writeError) throw writeError;
+
+    // Confirm against the server before discarding the local request.
+    const { data: verify, error: verifyError } = await client
+      .from('participants')
+      .select('id, app_data')
+      .eq('id', studentId)
+      .maybeSingle();
+    if (verifyError) throw verifyError;
+    if (!verify || !isWithdrawnParticipant(verify)) {
+      throw new Error('The server did not record the student removal. Sync Classes to retry.');
+    }
+    store?.resolveRosterWithdrawal?.(c.id, studentId, { status:'confirmed' });
+  }
+  return { rejected };
+}
 async function remoteClassStatus(classId, client = getClient()) {
   if (!client || !classId) return '';
   const { data, error } = await client
@@ -252,8 +337,9 @@ async function ensureEvent(c, refs, client, userId) {
 }
 
 async function pushParticipants(c, refs, client, userId) {
-
-  const rows = (c.students || []).map(s => ({
+  const pending = pendingWithdrawalIds(c);
+  const studentById = new Map((c.students || []).map(s => [String(s.id), s]));
+  const rows = (c.students || []).filter(s => !pending.has(String(s.id))).map(s => ({
     id: s.id,
     participant_identifier: `RAPS-${s.id}`,
     display_name: s.name || null,
@@ -274,13 +360,14 @@ async function pushParticipants(c, refs, client, userId) {
     source_device_id: getStore()?.deviceId?.() || null
   }));
 
-  if (!rows.length) return [];
+  const withdrawnIds = new Set();
+  if (!rows.length) return { rows: [], withdrawnIds };
 
   const ids = rows.map(r => r.id);
 
   const { data: existingRows, error: existingError } = await client
     .from('participants')
-    .select('id, created_by')
+    .select('id, created_by, app_data')
     .in('id', ids);
 
   if (existingError) throw existingError;
@@ -291,6 +378,19 @@ async function pushParticipants(c, refs, client, userId) {
 
   for (const row of rows) {
     const existing = existingById.get(row.id);
+
+    if (existing && isWithdrawnParticipant(existing)) {
+      // A stale device must never resurrect a withdrawn student. The local
+      // copy is removed on the next pull. The only exception is retained
+      // assessment evidence: a started local attempt reinstates the student.
+      if (!hasStartedAttempt(studentById.get(String(row.id)))) {
+        withdrawnIds.add(String(row.id));
+        continue;
+      }
+      row.app_data.reinstatedAt = Date.now();
+      row.app_data.reinstatedBy = userId;
+      row.app_data.previousWithdrawnAt = Number(existing.app_data.withdrawnAt) || null;
+    }
 
     if (existing) {
       const updatePayload = {
@@ -320,13 +420,15 @@ async function pushParticipants(c, refs, client, userId) {
     .in('id', ids);
 
   if (error) throw error;
-  return data || [];
+  return { rows: data || [], withdrawnIds };
 }
 
-async function pushEvaluationShells(c, refs, client, userId) {
+async function pushEvaluationShells(c, refs, client, userId, skipParticipantIds = new Set()) {
   const candidates = [];
+  const pending = pendingWithdrawalIds(c);
 
   for (const s of c.students || []) {
+    if (skipParticipantIds.has(String(s.id)) || pending.has(String(s.id))) continue;
     for (const [attemptKey, a] of Object.entries(s.attempts || {})) {
       if (
         !a?.id
@@ -445,22 +547,33 @@ async function pushClassRosterAndShells(c) {
     const upload = JSON.parse(JSON.stringify(c));
     const refs = await lookupBaseAndCurriculum(upload, client);
     await ensureEvent(upload, refs, client, userId);
-    await pushParticipants(upload, refs, client, userId);
-    await pushEvaluationShells(upload, refs, client, userId);
+    const withdrawal = await pushWithdrawals(upload, client, userId);
+    context.check();
+    const participantResult = await pushParticipants(upload, refs, client, userId);
+    await pushEvaluationShells(upload, refs, client, userId, participantResult.withdrawnIds);
     const {data:serverParticipants,error:verifyError} = await client.from('participants')
       .select('id,display_name,app_data').eq('app_data->>classId',c.id);
     if (verifyError) throw verifyError;
     context.check();
-    const serverStudents = (serverParticipants || []).map(p => ({id:p.id, name:p.display_name || p.app_data?.trainingId || 'Cloud participant', rank:p.app_data?.rank || '', trainingId:p.app_data?.trainingId || ''}));
-    const unchanged = rosterSignature && rosterSignature === getStore()?.localRosterSignature?.(c)
+    const serverStudents = (serverParticipants || []).filter(p => !isWithdrawnParticipant(p))
+      .map(p => ({id:p.id, name:p.display_name || p.app_data?.trainingId || 'Cloud participant', rank:p.app_data?.rank || '', trainingId:p.app_data?.trainingId || ''}));
+    const unchanged = !withdrawal.rejected && !participantResult.withdrawnIds.size
+      && rosterSignature && rosterSignature === getStore()?.localRosterSignature?.(c)
       && rosterSignature === getStore()?.localRosterSignature?.({...c, students:serverStudents});
 
+    // A refused withdrawal is explained through the class roster notice.
     getStore()?.patchRosterCloudState?.(c.id, {
       status:unchanged?'synced':'pending',
       error:'',
       lastSyncedAt:Date.now(),
       ...(unchanged ? {syncedRosterSignature:rosterSignature, syncedByUserId:userId} : {})
     });
+
+    // Bring the local roster in line with the server immediately: restore a
+    // student whose removal was refused, or drop one withdrawn elsewhere.
+    if (withdrawal.rejected || participantResult.withdrawnIds.size) {
+      await pullRosterAndShells();
+    }
 
     return true;
   })();
@@ -579,12 +692,31 @@ async function pullRosterAndShells() {
   let participantImports = 0;
   let evaluationImports = 0;
   let evaluationTombstones = 0;
+  let participantWithdrawals = 0;
+
+  // A participant is excluded from a class roster when the server records a
+  // withdrawal or this device still has an unsent removal for it. Retained
+  // assessment evidence (a started attempt) always keeps the student visible.
+  const pendingByClass = new Map();
+  const isExcluded = (c, p) => {
+    if (!pendingByClass.has(c.id)) pendingByClass.set(c.id, pendingWithdrawalIds(c));
+    return isWithdrawnParticipant(p) || pendingByClass.get(c.id).has(String(p.id));
+  };
 
   // Hydrate roster members before attaching evaluation shells.
   for (const p of participants) {
     const app = p.app_data && typeof p.app_data === 'object' ? p.app_data : {};
     const c = store.getClass(app.classId);
     if (!c || store.isLocalCopyHidden?.(c.id) || !permissions.canClass('readClass', c)) continue;
+
+    if (isExcluded(c, p)) {
+      const local = (c.students || []).find(x => x.id === p.id);
+      if (local && !hasStartedAttempt(local)) {
+        c.students = c.students.filter(x => x.id !== p.id);
+        participantWithdrawals++;
+      }
+      continue;
+    }
 
     let s = (c.students || []).find(x => x.id === p.id);
     if (!s) {
@@ -636,6 +768,9 @@ async function pullRosterAndShells() {
 
     const p = participantById.get(row.participant_id);
     if (!p) continue;
+    // Unstarted shells never bring a withdrawn student back; started
+    // evaluations are assessment evidence and are always shown.
+    if (!row.started_at && isExcluded(c, p)) continue;
 
     let s = (c.students || []).find(x => x.id === p.id);
     if (!s) {
@@ -670,14 +805,16 @@ async function pullRosterAndShells() {
     }
   }
 
-  if (participantImports || evaluationImports || evaluationTombstones || lifecycleChanges) {
+  if (participantImports || evaluationImports || evaluationTombstones || participantWithdrawals || lifecycleChanges) {
     store.persistCloudMerge?.();
   }
 
   for (const c of classes) {
     check();
     if (store.getClass(c.id) !== c || store.isLocalCopyHidden?.(c.id) || !permissions.canClass('readClass', c)) continue;
-    const serverStudents = participants.filter(p => String(p.app_data?.classId || '') === String(c.id)).map(p => ({
+    const localIds = new Set((c.students || []).map(s => String(s.id)));
+    const serverStudents = participants.filter(p => String(p.app_data?.classId || '') === String(c.id)
+      && (!isExcluded(c, p) || localIds.has(String(p.id)))).map(p => ({
       id:p.id, name:p.display_name || p.app_data?.trainingId || 'Cloud participant',
       rank:p.app_data?.rank || '', trainingId:p.app_data?.trainingId || ''
     }));
@@ -695,6 +832,7 @@ async function pullRosterAndShells() {
 
   return {
     participants: participantImports,
+    withdrawals: participantWithdrawals,
     evaluations: evaluationImports,
     tombstones: evaluationTombstones,
     lifecycleChanges
@@ -780,6 +918,6 @@ window.RAPS_ROSTER_SYNC = Object.freeze({
   pullRosterAndShells
 });
 
-window.RAPS_ROSTER_SYNC_BUILD = '3.4.12-web.13';
+window.RAPS_ROSTER_SYNC_BUILD = '3.4.12-web.14';
 
 })();
