@@ -944,3 +944,12 @@ textarea#overallNotes{width:calc(100% - 24px);font-size:var(--font-body);line-he
 
 /* Workflow tiles shrink and wrap long words under enlarged text instead of overflowing the card. */
 .workflow>div{min-width:0}.workflow span{display:block;overflow-wrap:anywhere;hyphens:auto}
+
+/* Multi-device class closure gate */
+.closureGate{margin:0 12px 12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:#121a21}
+.closureGateHead{display:flex;flex-direction:column;gap:4px;margin-bottom:6px}.closureGateHead span{font-size:13px;color:var(--muted)}
+.closureGate .helper{padding:0;margin:6px 0}
+.closureDevice{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:9px 0;border-top:1px solid #2c3943;flex-wrap:wrap}
+.closureDevice>div{display:flex;flex-direction:column;gap:2px;min-width:0}.closureDevice b{overflow-wrap:anywhere}.closureDevice span{font-size:12px;color:var(--amber)}
+.closureDevice.ready span{color:var(--green)}
+:root[data-field-display="daylight"] .closureGate{background:#fff;border-color:#607889;color:#0a1721}

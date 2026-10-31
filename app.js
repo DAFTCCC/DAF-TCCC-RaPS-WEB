@@ -388,8 +388,81 @@ function canEditCurrentEvaluation(){
   const a=evalState();
   return !!a&&!a.finalizedAt&&!a.voidedAt&&!isClassClosed(cls())&&canAccessClass('evaluate',cls(),{online:false})&&attemptBelongsToCurrentEvaluator(a);
 }
-function guardEvaluationEdit(action,online=false){
+// ---------- Offline field evaluation ----------
+// An evaluator who prepared the class online can start, grade, and finalize
+// with no connection. Field records stay on the device, sealed when finalized,
+// until Sync Classes completes the server claim, upload, verification, and
+// audit confirmation. Field times are kept separately from server times.
+function cloudReachable(){
+  const cloud=window.RAPS_CLOUD;
+  return navigator.onLine===true&&cloud?.connected===true&&cloud?.offlineCached!==true;
+}
+function isConnectivityFailure(error){
+  const message=String(error?.message||error||'').toLowerCase();
+  return !cloudReachable()||/failed to fetch|networkerror|network request failed|load failed|fetch failed|connection (refused|reset)|timed? ?out|offline|err_internet/.test(message);
+}
+function attemptEvaluatorId(a){return String(a?.cloudEvaluatorUserId||a?.startedByUserId||'');}
+function attemptAwaitingSync(a){return !!a&&!a.cloudShellOnly&&!a.voidedAt&&(a.pendingServerClaim||a.pendingServerFinalization);}
+function classAwaitingSyncCount(c){
+  let n=0;
+  for(const s of c?.students||[])for(const a of Object.values(s.attempts||{}))if(attemptAwaitingSync(a)||String(a?.cloudGrading?.status||'')==='conflict')n++;
+  return n;
+}
+// After a phone checks in clean for class closure it must not create new
+// evaluations for that class; anything new would be invisible to the gate.
+function closureCheckInBlock(c){
+  const gate=c?.closureGate||{};
+  if(gate.requestedAt&&gate.checkedInAt&&Number(gate.checkedInAt)>=Number(gate.requestedAt))return 'This phone has checked in for class closure. New evaluations for this class are locked on this phone.';
+  return '';
+}
+// Attempt 2 is a retest after an Attempt 1 FAIL and must be evaluated by a
+// different evaluator. The server enforces both rules when the retest syncs.
+function attempt2BlockReason(s,options={}){
+  const a1=s?.attempts?.['1'],uid=currentCloudUserId();
+  if(!a1)return options.retestWithoutLocalA1?'':'Attempt 2 is reserved for a retest after a finalized Attempt 1 FAIL.';
+  if(!a1.finalizedAt||String(a1.finalResult||'').toUpperCase()!=='FAIL')return 'Attempt 2 is reserved for a retest after a finalized Attempt 1 FAIL.';
+  if(uid&&attemptEvaluatorId(a1)===uid)return 'A different evaluator must conduct the Attempt 2 retest. You evaluated Attempt 1 for this student.';
+  return '';
+}
+function activateLocalOfflineAttempt(c,s,candidate,attemptNo){
+  const uid=currentCloudUserId();
+  if(!uid)throw new Error('Offline assessment start requires a RaPS sign-in verified on this device before going offline.');
+  candidate.startedAt=candidate.startedAt||now();
+  candidate.fieldStartedAt=candidate.fieldStartedAt||candidate.startedAt;
+  candidate.startedByUserId=uid;candidate.cloudEvaluatorUserId=uid;candidate.startedByDeviceId=db.deviceId;
+  candidate.pendingServerClaim=true;candidate.pendingServerFinalization=false;candidate.offlineStarted=true;
+  candidate.serverClaimMode='offline_pending';candidate.serverVerificationStatus='pending';
+  candidate.cloudGrading={status:'offline',error:'Started offline. Server sync pending.',lastSyncedAt:0,remoteModifiedAt:0};
+  candidate.events=candidate.events||[];
+  candidate.events.push({at:candidate.startedAt,elapsed:0,label:'Assessment started offline',detail:'Field record created on this device; server claim pending until Sync Classes.'});
+  s.attempts=s.attempts||{};
+  currentStudentId=s.id;currentAttemptNo=attemptNo;
+  c.status='active';
+  s.attempts[String(attemptNo)]=candidate;
+  saveDb();
+  closeModal('formModal');
+  renderEval();showView('evalView');requestEvalWakeLock();
+}
+function finalizeLocallyPendingServer(st,p,reason){
+  const completed=now();
+  st.fieldFinalizedAt=st.fieldFinalizedAt||completed;
+  st.fieldFinalResult=String(p.result||'').toUpperCase();
+  st.fieldStartedAt=st.fieldStartedAt||st.startedAt;
+  st.finalizedAt=st.fieldFinalizedAt;
+  st.finalResult=st.fieldFinalResult;
+  st.pendingServerFinalization=true;
+  st.serverVerificationStatus='pending';
+  st.cloudGrading={...(st.cloudGrading||{}),status:navigator.onLine?'pending':'offline',error:'Finalized on this device. Server verification pending.'};
+  st.events=st.events||[];
+  st.events.push({at:st.fieldFinalizedAt,elapsed:Math.max(0,st.fieldFinalizedAt-(st.fieldStartedAt||st.startedAt)),
+    label:'Evaluation finalized on device',detail:`${st.fieldFinalResult} · ${p.score.pass}/${p.score.denom} · server verification pending (${reason})`});
+  saveDb();
+}
+function guardEvaluationEdit(action,mode=false){
   return (...args)=>{
+    // 'auto' requires live access when connected and accepts the cached,
+    // previously verified identity in the field.
+    const online=mode==='auto'?cloudReachable():mode===true;
     if(!canEditCurrentEvaluation()||online&&!canAccessClass('evaluate',cls())){alert('This assessment is read-only for your account. Only its assigned evaluator with active access to this installation can change it.');return;}
     const token=window.RAPS_PERMISSIONS?.snapshot?.();
     const result=action(...args);
@@ -536,7 +609,8 @@ function makeAttempt(c,s,attemptNo){
   const ntReasons={};
   (c.scenarioNT||[]).forEach(id=>{ const i=t.sections.flatMap(x=>x.items).find(x=>x.id===id); if(i&&!i.critical){ratings[id]='nt';methods[id]='scenario-default';stamps[id]=now();ntReasons[id]={code:'scenario-profile',label:'Class scenario profile — criterion not triggered',detail:'',at:stamps[id]};} });
   return {
-    id:uuid(),attemptNo,startedAt:now(),finalizedAt:null,finalResult:null,section:t.sections[0].code,
+    id:uuid(),attemptNo,startedAt:now(),fieldStartedAt:null,finalizedAt:null,finalResult:null,section:t.sections[0].code,
+    fieldFinalizedAt:null,fieldFinalResult:null,pendingServerClaim:false,pendingServerFinalization:false,offlineStarted:false,
     ratings,methods,stamps,ntReasons,failureDetails:{},observations:{},notes:{},noteOpen:{},observeMode:true,fieldMode:true,timerForced:{},timers:makeTimerStore(t),events:[],instants:{},
     trainerSign:c.leadEvaluator||'',evaluatorId:c.evaluatorId||'',studentSign:'',overallNotes:'',showNt:false,appVersion:APP_VERSION,createdAt:now(),modifiedAt:now(),deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,classId:c.id,participantId:s.id,
     startedByUserId:currentCloudUserId(),startedByDeviceId:db.deviceId,cloudEvaluatorUserId:currentCloudUserId(),
@@ -869,7 +943,7 @@ async function removeLocalClassCopy(id,button){
   if(currentClassId===id)showHome();else renderHome();
   window.dispatchEvent(new CustomEvent('raps-local-copy-removed',{detail:{classId:id}}));
 }
-function openClass(id){releaseEvalWakeLock();const c=db.classes.find(x=>x.id===id);if(!c||c.deletedAt){renderHome();return;}if(!requireClassAccess('readClass',c,{online:false}))return;currentClassId=id;currentStudentId=null;renderClass();showView('classView');}
+function openClass(id){releaseEvalWakeLock();const c=db.classes.find(x=>x.id===id);if(!c||c.deletedAt){renderHome();return;}if(!requireClassAccess('readClass',c,{online:false}))return;currentClassId=id;currentStudentId=null;renderClass();showView('classView');if(c.cloudSync?.enabled&&!isClassClosed(c)&&cloudReachable()&&now()-Number(c.closureGateStatus?.fetchedAt||0)>15000)void refreshClosureGate(id,{quiet:true});}
 function finalStatusForStudent(s){
   const a1=s.attempts?.['1'],a2=s.attempts?.['2'];
   if(a2&&!a2.finalizedAt)return 'A2 IN PROGRESS';
@@ -1131,6 +1205,7 @@ function renderClass(){
     classConflictBtn.disabled=!conflicted;
     classConflictBtn.title=c.cloudSync?.error||'Resolve class metadata conflict';
   }
+  renderClosureGate(c);
   const closeBtn=$('closeClassBtn'),canClose=hasClassCloseAccess();if(closeBtn){closeBtn.classList.toggle('hidden',closed||!canClose);closeBtn.disabled=!canClose;closeBtn.textContent='Verify & Close Class';}$('closedBanner').classList.toggle('hidden',!closed);
   const deleteBtn=$('deleteClassBtn');
   if(deleteBtn){
@@ -1146,6 +1221,12 @@ function renderClass(){
 function gradingSyncBadge(a){
   if(!a)return '';
   if(a.cloudShellOnly)return '<span class="gradeSyncBadge shell">CLOUD SHELL</span>';
+  const sync=String(a.cloudGrading?.status||'').toLowerCase(),why=esc(a.cloudGrading?.error||'');
+  if(sync==='conflict'&&a.syncConflict)return `<span class="gradeSyncBadge conflict" title="${why}">SYNC CONFLICT · REVIEW</span>`;
+  if(a.waitingForAttempt1)return `<span class="gradeSyncBadge offline" title="${why}">RETEST · WAITING FOR A1 SYNC</span>`;
+  if(a.pendingServerFinalization)return `<span class="gradeSyncBadge offline" title="${why||'Finalized on this device. Use Sync Classes with a connection.'}">FINALIZED · AWAITING SYNC</span>`;
+  if(a.pendingServerClaim)return `<span class="gradeSyncBadge offline" title="${why||'Started offline. Use Sync Classes with a connection.'}">OFFLINE · NOT YET SYNCED</span>`;
+  if(a.serverResultDiffers)return `<span class="gradeSyncBadge conflict" title="${why}">SERVER RESULT DIFFERS · REVIEW</span>`;
   const st=String(a.cloudGrading?.status||'local').toLowerCase();
   const label=st==='synced'?'GRADE SYNCED':st==='syncing'?'GRADE SYNCING':st==='conflict'?'GRADE CONFLICT':st==='error'?'GRADE ERROR':st==='offline'?'GRADE OFFLINE':'GRADE LOCAL';
   return `<span class="gradeSyncBadge ${esc(st)}" title="${esc(a.cloudGrading?.error||'')}">${label}</span>`;
@@ -1154,8 +1235,9 @@ function rosterRow(c,s){
   const a1=s.attempts?.['1'],a2=s.attempts?.['2'],closed=isClassClosed(c),lock=findActiveEvaluationLock();
   const canEvaluate=canAccessClass('evaluate',c,{online:false});
   const best=a2?.finalizedAt?a2:a1?.finalizedAt?a1:null;
-  const status=a2&&!a2.finalizedAt?'A2 IN PROGRESS':a1&&!a1.finalizedAt?'A1 IN PROGRESS':best?best.finalResult:'NOT STARTED';
-  const clsx=status==='PASS'?'pass':status==='FAIL'?'fail':status.includes('IN PROGRESS')?'progress':'';
+  const status=a2&&!a2.finalizedAt?'A2 IN PROGRESS':a1&&!a1.finalizedAt?'A1 IN PROGRESS':best?`${best.finalResult}${best.pendingServerFinalization?' · ON DEVICE':''}`:'NOT STARTED';
+  const clsx=best?.finalResult==='PASS'&&status.startsWith('PASS')?'pass':best?.finalResult==='FAIL'&&status.startsWith('FAIL')?'fail':status.includes('IN PROGRESS')?'progress':'';
+  const closing=closureCheckInBlock(c);
   const attrs=attemptNo=>{
     if(!lock)return '';
     if(evaluationTargetMatchesLock(lock,c.id,s.id,attemptNo))return '';
@@ -1168,14 +1250,20 @@ function rosterRow(c,s){
     if(a2)buttons+=` <button class="action compact" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,'View A2')}</button>`;
     if(!a1&&!a2)buttons='<span class="rowSub">No evaluation</span>';
   }else{
-    if(!a1)buttons=canEvaluate?`<button class="action compact primary" data-start="${s.id}" data-attempt="1"${attrs(1)}>${label(1,'Start A1')}</button>`:'<span class="rowSub">Not started · Read-only access</span>';
+    const lockedTitle=closing?` disabled aria-disabled="true" title="${esc(closing)}"`:'';
+    if(!a1&&a2)buttons='<span class="rowSub">A1 on another phone</span>';
+    else if(!a1)buttons=canEvaluate?`<button class="action compact primary" data-start="${s.id}" data-attempt="1"${attrs(1)||lockedTitle}>${label(1,'Start A1')}</button>`+(!a2&&c.cloudSync?.enabled?` <button class="ghost small" data-start-retest="${s.id}"${attrs(2)||lockedTitle} title="Use only when this student failed Attempt 1 with another evaluator on a different phone.">Retest (A1 on other phone)</button>`:''):'<span class="rowSub">Not started · Read-only access</span>';
     else if(a1.cloudShellOnly)buttons=`<button class="action compact" data-start="${s.id}" data-attempt="1"${attrs(1)}>Cloud A1 Shell</button>`;
     else buttons=`<button class="action compact${!a1.finalizedAt&&canEvaluate&&attemptBelongsToCurrentEvaluator(a1)?' primary':''}" data-start="${s.id}" data-attempt="1"${attrs(1)}>${label(1,!a1.finalizedAt&&canEvaluate&&attemptBelongsToCurrentEvaluator(a1)?'Continue A1':'View A1')}</button>`;
     if(a2)buttons+=a2.cloudShellOnly?` <button class="action compact" data-start="${s.id}" data-attempt="2"${attrs(2)}>Cloud A2 Shell</button>`:` <button class="action compact${!a2.finalizedAt&&canEvaluate&&attemptBelongsToCurrentEvaluator(a2)?' primary':''}" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,!a2.finalizedAt&&canEvaluate&&attemptBelongsToCurrentEvaluator(a2)?'Continue A2':'View A2')}</button>`;
-    else if(canEvaluate&&a1?.finalizedAt&&a1.finalResult==='FAIL')buttons+=` <button class="action compact primary" data-start="${s.id}" data-attempt="2"${attrs(2)}>${label(2,'Start A2 Remediation')}</button>`;
+    else if(canEvaluate&&a1?.finalizedAt&&a1.finalResult==='FAIL'){
+      const retestBlock=attempt2BlockReason(s);
+      buttons+=` <button class="action compact primary" data-start="${s.id}" data-attempt="2"${attrs(2)||lockedTitle||(retestBlock?` disabled aria-disabled="true" title="${esc(retestBlock)}"`:'')}>${label(2,retestBlock?'A2: Different Evaluator Required':'Start A2 Retest')}</button>`;
+    }
     else if(a1?.finalizedAt&&a1.finalResult==='PASS')buttons+=` <span class="rowSub">A2 not indicated after A1 PASS</span>`;
     if(canEvaluate&&attemptBelongsToCurrentEvaluator(a1)&&a1?.cloudGrading?.status==='conflict')buttons+=` <button class="ghost small" data-resolve-grade-conflict="${s.id}" data-attempt="1">Resolve Grade Conflict</button>`;
     if(canEvaluate&&attemptBelongsToCurrentEvaluator(a2)&&a2?.cloudGrading?.status==='conflict')buttons+=` <button class="ghost small" data-resolve-grade-conflict="${s.id}" data-attempt="2">Resolve Grade Conflict</button>`;
+    for(const [n,a] of [[1,a1],[2,a2]])if(a?.syncConflict)buttons+=` <button class="ghost small" data-review-sync-conflict="${s.id}" data-attempt="${n}">Review A${n} Sync Conflict</button>`;
     if(canAccessClass('manageRoster',c)){
       const blocked=studentRemovalBlockReason(c,s);
       buttons+=` <button class="ghost small danger" data-delete-student="${s.id}"${blocked?` disabled aria-disabled="true" title="${esc(blocked)}"`:''}>Remove Student</button>`;
@@ -1284,6 +1372,11 @@ async function resolveGradeConflict(studentId,attemptNo){
 }
 function bindRosterRows(){
   document.querySelectorAll('[data-start]').forEach(b=>b.onclick=()=>openAuthorizedEvaluation(b.dataset.start,Number(b.dataset.attempt)));
+  document.querySelectorAll('[data-start-retest]').forEach(b=>b.onclick=()=>{
+    if(!confirm('RETEST WITH ATTEMPT 1 ON ANOTHER PHONE\n\nUse this only when this student already FAILED Attempt 1 with a different evaluator whose phone has not synced yet.\n\nThe server will verify the Attempt 1 FAIL and the different evaluator when the phones sync. Continue?'))return;
+    openAuthorizedEvaluation(b.dataset.startRetest,2,{retestWithoutLocalA1:true});
+  });
+  document.querySelectorAll('[data-review-sync-conflict]').forEach(b=>b.onclick=()=>reviewSyncConflict(b.dataset.reviewSyncConflict,Number(b.dataset.attempt)));
   document.querySelectorAll('[data-resolve-grade-conflict]').forEach(b=>b.onclick=()=>resolveGradeConflict(b.dataset.resolveGradeConflict,Number(b.dataset.attempt)));
   document.querySelectorAll('[data-delete-student]').forEach(b=>b.onclick=()=>{
     const c=cls();if(!c||isClassClosed(c)||!requireClassAccess('manageRoster',c))return;
@@ -1302,23 +1395,55 @@ function bindRosterRows(){
     }
   });
 }
-function openAuthorizedEvaluation(studentId,attemptNo){
+function openAuthorizedEvaluation(studentId,attemptNo,options={}){
   const c=cls(),a=c?.students?.find(s=>s.id===studentId)?.attempts?.[String(attemptNo)];
   if(!requireClassAccess('readClass',c,{online:false}))return;
   const needsStart=!a||a.cloudShellOnly&&!a.startedAt&&String(a.cloudStatus||'draft')==='draft';
-  if(needsStart&&!requireClassAccess('evaluate',c))return;
-  openEvaluation(studentId,attemptNo);
+  // A verified identity cached on this device authorizes field evaluation
+  // without a connection; the server re-checks access when the record syncs.
+  const online=cloudReachable();
+  if(needsStart&&!requireClassAccess('evaluate',c,{online}))return;
+  openEvaluation(studentId,attemptNo,options);
   const begin=$('beginAttemptBtn');
   if(needsStart&&begin){
     const start=begin.onclick;
     begin.onclick=(...args)=>{
-      if(cls()?.id!==c.id||!requireClassAccess('evaluate',c))return;
-      const context=classPermissionContext(c,'evaluate');
+      const live=cloudReachable();
+      if(cls()?.id!==c.id||!requireClassAccess('evaluate',c,{online:live}))return;
+      const context=classPermissionContext(c,'evaluate',{online:live});
       return Promise.resolve(start?.(...args)).finally(()=>{
-        if(!window.RAPS_PERMISSIONS?.isCurrent(context.token))scrubPrivateViews();
+        if(!window.RAPS_PERMISSIONS?.isCurrent(context.token,{online:live}))scrubPrivateViews();
       });
     };
   }
+}
+// Sync conflicts from offline field records are never resolved by deleting
+// evidence. Adopting the server record first archives the complete local copy
+// on this device (included in backups) and offers an export.
+function reviewSyncConflict(studentId,attemptNo){
+  const c=cls(),s=c?.students?.find(x=>x.id===studentId),a=s?.attempts?.[String(attemptNo)];
+  if(!c||!s||!a?.syncConflict)return;
+  const k=a.syncConflict,who=`${s.rank?`${s.rank} `:''}${s.name}`;
+  const summary=`SYNC CONFLICT · ${who} · Attempt ${attemptNo}\n\n${k.message||a.cloudGrading?.error||'The server did not accept this field record.'}\n\nThis phone's record: ${a.finalResult||'in progress'}${a.fieldFinalizedAt?' · finalized '+new Date(a.fieldFinalizedAt).toLocaleString():''}`;
+  if(k.kind==='duplicate_attempt'){
+    if(!confirm(summary+'\n\nThe official record is the one already on the server. Choose OK to keep the server record. This phone\'s copy is archived on this device and exported for the Program Manager. Choose Cancel to leave it for review.'))return;
+    void exportConflictRecord(c,s,a).finally(()=>{
+      s.syncConflictArchive=Array.isArray(s.syncConflictArchive)?s.syncConflictArchive:[];
+      s.syncConflictArchive.push({archivedAt:now(),archivedBy:currentCloudUserId(),deviceId:db.deviceId,reason:k.kind,canonicalEvaluationId:k.canonicalEvaluationId||'',record:JSON.parse(JSON.stringify(a))});
+      delete s.attempts[String(attemptNo)];
+      saveDb(c.id);renderClass();
+      window.RAPS_ROSTER_SYNC?.pullRosterAndShells?.().then(()=>window.RAPS_GRADING_SYNC?.pullAll?.()).catch(()=>{});
+      alert('Server record kept. This phone\'s copy is archived on this device and was exported.');
+    });
+    return;
+  }
+  if(confirm(summary+'\n\nThe record stays on this phone, read-only, until it is resolved. Choose OK to export it for the Program Manager.'))void exportConflictRecord(c,s,a);
+}
+async function exportConflictRecord(c,s,a){
+  const payload={type:'RAPS_SYNC_CONFLICT_RECORD',appVersion:APP_VERSION,exportedAt:new Date().toISOString(),deviceId:db.deviceId,
+    exportedBy:currentCloudUserId(),class:{id:c.id,name:c.name,tierId:c.tierId},student:{id:s.id,name:s.name,rank:s.rank||'',trainingId:s.trainingId||''},attempt:a};
+  try{await saveFile(`RaPS_Conflict_${(s.name||'student').replace(/[^A-Za-z0-9]+/g,'_')}_A${a.attemptNo}.json`,bytes(JSON.stringify(payload,null,2)),'application/json');}
+  catch(error){console.warn('Conflict export failed',error);}
 }
 function closureIssues(c){
   const issues=[];
@@ -1328,6 +1453,8 @@ function closureIssues(c){
     if(!a1)issues.push(`${s.name}: no evaluation started/finalized.`);
     else if(!a1.finalizedAt)issues.push(`${s.name}: Attempt 1 is still in progress.`);
     if(a2&&!a2.finalizedAt)issues.push(`${s.name}: Attempt 2 is still in progress.`);
+    for(const a of [a1,a2])if(attemptAwaitingSync(a))issues.push(`${s.name}: Attempt ${a.attemptNo} is on this device and has not synced yet. Use Sync Classes.`);
+    for(const a of [a1,a2])if(a?.syncConflict)issues.push(`${s.name}: Attempt ${a.attemptNo} has a sync conflict to review.`);
   });
   return issues;
 }
@@ -1361,12 +1488,72 @@ async function syncClassForAuthoritativeClose(c){
   }
   return client;
 }
+// ---------- Multi-device closure gate ----------
+function closureTime(value){if(!value)return '—';const d=new Date(value);return Number.isFinite(d.getTime())?d.toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—';}
+function renderClosureGate(c){
+  const el=$('closureGatePanel');if(!el)return;
+  if(!c?.cloudSync?.enabled||isClassClosed(c)){el.classList.add('hidden');el.innerHTML='';return;}
+  el.classList.remove('hidden');
+  const gate=c.closureGate||{},server=c.closureGateStatus||null,manager=hasClassCloseAccess(c);
+  const pendingHere=window.RAPS_CLOSURE_GATE?.pendingCountFor?.(c)??classAwaitingSyncCount(c);
+  const requested=server?.closureRequestedAt||gate.requestedAt;
+  const thisPhone=!requested?`This phone: ${pendingHere?`${pendingHere} item${pendingHere===1?'':'s'} not yet synced`:'nothing waiting to sync'}.`
+    :gate.checkedInAt?`This phone checked in for closure ${closureTime(gate.checkedInAt)}. New evaluations are locked on this phone.`
+    :`Closure was requested. ${pendingHere?`This phone still has ${pendingHere} item${pendingHere===1?'':'s'} to sync.`:'Use Sync Classes so this phone checks in.'}`;
+  const devices=Array.isArray(server?.devices)?server.devices:[];
+  const rows=devices.map(d=>{
+    const state=d.releasedAt?`Released: ${esc(d.releaseReason||'')}`:d.checkedIn?`✓ Synced ${closureTime(d.lastCleanAt)}`:Number(d.pendingCount)>0?`⏳ ${Number(d.pendingCount)} item${Number(d.pendingCount)===1?'':'s'} on device`:requested?'⏳ Waiting for Sync Classes':`Last sync ${closureTime(d.lastReportedAt)}`;
+    const release=manager&&requested&&!d.releasedAt&&!d.checkedIn?` <button class="ghost small" data-release-device="${esc(d.deviceId)}">Release lost phone</button>`:'';
+    return `<div class="closureDevice${d.checkedIn||d.releasedAt?' ready':''}"><div><b>${esc(d.label||d.deviceId)}</b><span>${state}</span></div>${release}</div>`;
+  }).join('');
+  const summary=!requested?'Before closing, select Prepare to Close. Every phone that has this class must then use Sync Classes with a connection.'
+    :server?.ready?'All phones have synced. The class can be closed.':`Waiting for ${Number(server?.waiting??0)} phone${Number(server?.waiting)===1?'':'s'} to sync.`;
+  el.innerHTML=`<div class="closureGateHead"><b>CLASS CLOSURE · PHONES</b><span>${esc(summary)}</span></div><p class="helper">${esc(thisPhone)}</p>${rows||(server?'<p class="helper">No phones have synced this class yet.</p>':'')}<div class="formActions">${manager&&!requested?'<button id="prepareCloseBtn" class="action">Prepare to Close</button>':''}<button id="refreshClosureBtn" class="ghost small">Refresh phone status</button></div>`;
+  const prepare=$('prepareCloseBtn');if(prepare)prepare.onclick=()=>void prepareClassClosure(c.id);
+  const refresh=$('refreshClosureBtn');if(refresh)refresh.onclick=()=>void refreshClosureGate(c.id,{report:true});
+  el.querySelectorAll('[data-release-device]').forEach(b=>b.onclick=()=>void releaseClosureDevice(c.id,b.dataset.releaseDevice,devices.find(d=>d.deviceId===b.dataset.releaseDevice)));
+}
+async function refreshClosureGate(classId,{report=false,quiet=false}={}){
+  const c=db.classes.find(x=>x.id===classId);if(!c||!window.RAPS_CLOSURE_GATE)return null;
+  try{
+    if(report&&cloudReachable()){await window.RAPS_GRADING_SYNC?.syncAll?.();await window.RAPS_CLOSURE_GATE.reportAll();}
+    const status=await window.RAPS_CLOSURE_GATE.status(classId);
+    const live=db.classes.find(x=>x.id===classId);if(!live)return null;
+    live.closureGateStatus={...status,fetchedAt:now()};
+    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    if(currentClassId===classId&&!$('classView')?.classList.contains('hidden'))renderClass();
+    return status;
+  }catch(error){if(!quiet)alert('Phone status is unavailable: '+(error?.message||error));return null;}
+}
+async function prepareClassClosure(classId){
+  const c=db.classes.find(x=>x.id===classId);if(!c||!hasClassCloseAccess(c))return;
+  if(!cloudReachable()){alert('Prepare to Close needs a connection.');return;}
+  const issues=closureIssues(c).filter(x=>!/has not synced yet|sync conflict/.test(x));
+  if(!confirm('PREPARE TO CLOSE\n\nEvery phone that has this class must now use Sync Classes with a connection. Each phone that checks in clean can no longer start evaluations for this class.'+(issues.length?`\n\nThis phone still shows ${issues.length} open item${issues.length===1?'':'s'}; other phones may hold those records.`:'')+'\n\nContinue?'))return;
+  try{
+    await window.RAPS_CLOSURE_GATE.requestClosure(classId);
+    await refreshClosureGate(classId,{report:true,quiet:true});
+  }catch(error){alert('Closure request failed: '+(error?.message||error));}
+}
+async function releaseClosureDevice(classId,deviceId,device){
+  const c=db.classes.find(x=>x.id===classId);if(!c||!hasClassCloseAccess(c))return;
+  const reason=prompt(`RELEASE PHONE\n\n${device?.label||deviceId}\n\nAny records still on that phone will NOT be included in this class. Use this only when the phone is lost, broken, or wiped.\n\nRecord the reason:`);
+  if(reason===null)return;
+  if(reason.trim().length<5){alert('Record a reason of at least 5 characters.');return;}
+  try{await window.RAPS_CLOSURE_GATE.releaseDevice(classId,deviceId,reason.trim());await refreshClosureGate(classId,{quiet:true});}
+  catch(error){alert('Release failed: '+(error?.message||error));}
+}
 async function closeClass(){
   let c=cls();
   if(!c||isClassClosed(c))return;
   if(!hasClassCloseAccess()){
     alert('Class closure requires an active Program Manager for this installation or an Enterprise Administrator.');
     return;
+  }
+  // Bring in every record other phones have already synced before judging completeness.
+  if(cloudReachable()){
+    try{await window.RAPS_ROSTER_SYNC?.pullRosterAndShells?.();await window.RAPS_GRADING_SYNC?.syncAll?.();}catch(error){console.warn('Pre-close sync failed',error);}
+    c=cls();if(!c||isClassClosed(c))return;
   }
   const issues=closureIssues(c);
   if(issues.length){
@@ -1388,13 +1575,16 @@ async function closeClass(){
     context.check();
     const client=await syncClassForAuthoritativeClose(c);
     c=context.check();
-    const {data,error}=await client.rpc('close_class_authoritatively',{p_class_id:c.id});
+    void client;
+    if(!window.RAPS_CLOSURE_GATE?.closeClass)throw new Error('The class closure gate is not ready. Reload RaPS and try again.');
+    await window.RAPS_CLOSURE_GATE.reportAll();
+    const data=await window.RAPS_CLOSURE_GATE.closeClass(c.id);
     c=context.check();
-    if(error)throw error;
     if(!data?.closed){
       const serverIssues=Array.isArray(data?.issues)?data.issues:[];
       const detail=serverIssues.length?serverIssues.slice(0,12).join('\n'):'The server did not confirm closure.';
       alert('SERVER VERIFICATION DID NOT CLOSE THIS CLASS\n\n'+detail+(serverIssues.length>12?'\n+ '+(serverIssues.length-12)+' more':'')+'\n\nThe local class remains open.');
+      void refreshClosureGate(c.id,{quiet:true});
       return;
     }
 
@@ -1577,7 +1767,7 @@ function scenarioForm(){
 }
 
 // ---------- Evaluation ----------
-function openEvaluation(studentId,attemptNo){
+function openEvaluation(studentId,attemptNo,options={}){
   const c=cls(),s=c?.students.find(x=>x.id===studentId);if(!c||!s)return;
   const lock=findActiveEvaluationLock();
   if(lock&&!evaluationTargetMatchesLock(lock,c.id,studentId,attemptNo)){
@@ -1594,11 +1784,13 @@ function openEvaluation(studentId,attemptNo){
     }
     currentStudentId=studentId;currentAttemptNo=attemptNo;renderEval();showView('evalView');requestEvalWakeLock();return;
   }
-  if(attemptNo===2 && s.attempts?.['1']?.finalResult!=='FAIL'){alert('Attempt 2 is reserved for remediation after a finalized Attempt 1 FAIL.');return;}
   if(isClassClosed(c)){alert('Closed classes are read-only.');return;}
+  const closing=closureCheckInBlock(c);if(closing){alert(closing);return;}
+  const retestWithoutLocalA1=attemptNo===2&&!s.attempts?.['1']&&options.retestWithoutLocalA1===true;
+  if(attemptNo===2){const blocked=attempt2BlockReason(s,{retestWithoutLocalA1});if(blocked){alert(blocked);return;}}
   $('formModalTitle').textContent=`Begin Attempt ${attemptNo}`;
   const remediationFields=attemptNo===2?`<div class="remediationStart"><label><span>Remediation reason *</span><select id="remediationReason" required><option value="">Select</option><option>Critical task failure</option><option>Knowledge gap</option><option>Skill execution gap</option><option>Sequencing / prioritization gap</option><option>Timing standard</option><option>Other</option></select></label><label><span>Corrective action completed / planned *</span><textarea id="remediationAction" rows="2" placeholder="e.g., coached repetition, deliberate practice, knowledge review"></textarea></label></div>`:'';
-  $('formModalBody').innerHTML=`<div class="startGate"><p><b>${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</b></p><p>Tier ${esc(c.tierId)} · ${esc(c.name)}</p>${remediationFields}<div class="startWarning"><b>Evaluator ready check</b><br>Confirm the correct student, tier, scenario, and attempt before starting. The evaluation clock begins only after you press <b>Begin Assessment</b>.</div><label class="safetyAckRow"><input id="beginAttemptAck" type="checkbox"><span>I am ready to begin direct observation of this assessment.</span></label><div class="formActions"><button id="beginAttemptBtn" class="action primary" disabled>Begin Assessment</button></div></div>`;
+  $('formModalBody').innerHTML=`<div class="startGate"><p><b>${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</b></p><p>Tier ${esc(c.tierId)} · ${esc(c.name)}</p>${retestWithoutLocalA1?'<div class="startWarning"><b>Retest from another phone</b><br>Attempt 1 for this student was evaluated on a different phone. Start this retest only if that Attempt 1 was a FAIL by another evaluator. The server verifies both when the phones sync; until then this retest waits for Attempt 1.</div>':''}${remediationFields}<div class="startWarning"><b>Evaluator ready check</b><br>Confirm the correct student, tier, scenario, and attempt before starting. The evaluation clock begins only after you press <b>Begin Assessment</b>.</div><label class="safetyAckRow"><input id="beginAttemptAck" type="checkbox"><span>I am ready to begin direct observation of this assessment.</span></label><div class="formActions"><button id="beginAttemptBtn" class="action primary" disabled>Begin Assessment</button></div></div>`;
   $('beginAttemptAck').onchange=e=>$('beginAttemptBtn').disabled=!e.target.checked;
   $('beginAttemptBtn').onclick=async()=>{
     const activeLock=findActiveEvaluationLock();
@@ -1609,12 +1801,14 @@ function openEvaluation(studentId,attemptNo){
     const reason=attemptNo===2?$('remediationReason').value.trim():'',action=attemptNo===2?$('remediationAction').value.trim():'';
     if(attemptNo===2&&(!reason||!action)){alert('Record the remediation reason and corrective action before starting Attempt 2.');return;}
     const btn=$('beginAttemptBtn');
-    if(btn){btn.disabled=true;btn.textContent='CLAIMING ASSESSMENT…';}
-    let claimClient=null,claimedId='';
+    const offline=!cloudReachable();
+    if(btn){btn.disabled=true;btn.textContent=offline?'STARTING OFFLINE…':'CLAIMING ASSESSMENT…';}
+    let claimClient=null,claimedId='',candidate=null;
     try{
-      const candidate=makeAttempt(c,s,attemptNo);
+      candidate=makeAttempt(c,s,attemptNo);
       if(unstartedCloudShell&&existing?.id)candidate.id=existing.id;
-      if(attemptNo===2)candidate.remediation={reason,action,at:now()};
+      if(attemptNo===2)candidate.remediation={reason,action,at:now(),...(retestWithoutLocalA1?{attempt1OnAnotherDevice:true}:{})};
+      if(offline){activateLocalOfflineAttempt(c,s,candidate,attemptNo);return;}
       const claim=await claimEvaluationOnServer(c,s,candidate);
       claimClient=claim.client;
       const data=claim.data||{};
@@ -1635,6 +1829,7 @@ function openEvaluation(studentId,attemptNo){
         return;
       }
       candidate.id=claimedId;
+      candidate.fieldStartedAt=candidate.startedAt;
       candidate.startedAt=serverTimeMs(data.startedAt,candidate.startedAt||now());
       candidate.serverClaimedAt=candidate.startedAt;
       candidate.serverClaimedBy=currentCloudUserId();
@@ -1648,6 +1843,11 @@ function openEvaluation(studentId,attemptNo){
       renderEval();showView('evalView');requestEvalWakeLock();
     }catch(error){
       console.error('Authoritative evaluation claim failed',error);
+      // The connection dropped before any server claim: continue in the field.
+      if(candidate&&!claimedId&&!s.attempts?.[String(attemptNo)]&&isConnectivityFailure(error)){
+        try{activateLocalOfflineAttempt(c,s,candidate,attemptNo);alert('NETWORK UNAVAILABLE\n\nRaPS started this assessment on this device. Grade and finalize normally; it will sync to the server when you use Sync Classes with a connection.');return;}
+        catch(localError){alert('ASSESSMENT NOT STARTED\n\n'+(localError?.message||localError));return;}
+      }
       if(claimedId&&claimClient&&!s.attempts?.[String(attemptNo)]){
         try{
           await claimClient.rpc('void_evaluation_authoritatively',{
@@ -1672,7 +1872,7 @@ function renderEval(){
   if(!canAccessClass('readClass',c,{online:false}))return showHome();
   $('tierTitle').textContent=`Tier ${t.id} — ${t.shortName}`; $('tierSource').textContent=t.source;
   $('studentLabel').textContent=`${s.rank?`${s.rank} `:''}${s.name} · ${c.name}`;
-  $('attemptBadge').textContent=`Attempt ${st.attemptNo}${st.finalizedAt?' · FINALIZED':''}`; $('attemptLabel').textContent=`Attempt ${st.attemptNo}`; $('instructions').textContent=t.instructions;
+  $('attemptBadge').textContent=`Attempt ${st.attemptNo}${st.pendingServerFinalization?' · FINALIZED · AWAITING SYNC':st.finalizedAt?' · FINALIZED':st.pendingServerClaim?' · OFFLINE':''}`; $('attemptLabel').textContent=`Attempt ${st.attemptNo}`; $('instructions').textContent=t.instructions;
   $('trainerSign').value=st.trainerSign||''; $('attemptEvaluatorId').value=st.evaluatorId||c.evaluatorId||''; $('studentSign').value=st.studentSign||''; $('overallNotes').value=st.overallNotes||''; $('showNtToggle').checked=!!st.showNt;
   const observe=isObserveMode(st);$('evalView').classList.toggle('reviewMode',!observe);$('evalView').classList.toggle('observeMode',observe);
   if($('observeModeBtn')){$('observeModeBtn').classList.toggle('active',observe);$('observeModeBtn').setAttribute('aria-pressed',String(observe));}
@@ -2324,6 +2524,16 @@ async function finalizeEvaluation(){
     alert(p.activeTimers.length?'Stop or administratively resolve all active/paused timers before finalization.':'Resolve all required criteria and timing standards before finalization.');
     return;
   }
+  // Offline, or the server has not yet claimed this field record: seal it on
+  // the device. Sync Classes completes server verification later.
+  if(!cloudReachable()||st.pendingServerClaim){
+    if(!confirm(`Finalize this evaluation on this device?\n\nResult: ${p.result}\nScore: ${p.score.percentText}\n\nIt becomes read-only now and is kept on this phone. When you use Sync Classes with a connection, the server verifies it and records the official result.`))return;
+    finalizeLocallyPendingServer(st,p,cloudReachable()?'server claim pending':'offline');
+    closeModal('reportModal');renderEval();
+    window.dispatchEvent(new CustomEvent('raps-offline-evaluation-sealed',{detail:{classId:c.id,evaluationId:st.id}}));
+    alert(`Evaluation finalized on this device as ${st.finalResult}.\n\nStatus: FINALIZED · AWAITING SYNC. Use Sync Classes when connected.`);
+    return;
+  }
   if(!confirm(`Submit this evaluation for server verification?\n\nLocal review result: ${p.result}\nScore: ${p.score.percentText}\n\nThe server will independently validate completeness and derive the authoritative PASS/FAIL result. Finalized attempts become read-only and release the evaluator lock.`))return;
   const btn=$('confirmFinalizeBtn');
   if(btn){btn.disabled=true;btn.textContent='VERIFYING & FINALIZING…';}
@@ -2361,6 +2571,12 @@ async function finalizeEvaluation(){
     alert(`Evaluation finalized by the server as ${st.finalResult}.`);
   }catch(error){
     console.error('Authoritative evaluation finalization failed',error);
+    if(isConnectivityFailure(error)&&!st.finalizedAt){
+      finalizeLocallyPendingServer(st,p,'connection lost during finalization');
+      closeModal('reportModal');renderEval();
+      alert(`CONNECTION LOST\n\nThe evaluation was finalized on this device as ${st.finalResult} and is read-only. Server verification completes on the next Sync Classes.`);
+      return;
+    }
     alert('EVALUATION NOT FINALIZED\n\n'+(error?.message||error)+'\n\nRaPS left the local attempt editable. Reconnect/sync and try again.');
   }finally{
     if(btn&&!st.finalizedAt){btn.disabled=false;btn.textContent=`Finalize ${p.result}`;}
@@ -2375,6 +2591,16 @@ Use this only for an accidental or invalid start. RaPS will retain the synchroni
 
 Type VOID to continue.`);
   if(token!=='VOID')return;
+  if(st.pendingServerClaim){
+    // Never reached the server: remove the field record, keep a local audit line.
+    c.localVoidLog=Array.isArray(c.localVoidLog)?c.localVoidLog:[];
+    c.localVoidLog.push({evaluationId:st.id,studentId:s.id,attemptNo:st.attemptNo,fieldStartedAt:st.fieldStartedAt||st.startedAt,voidedAt:now(),voidedBy:currentCloudUserId(),deviceId:db.deviceId});
+    delete s.attempts[String(st.attemptNo)];
+    if(!hasStartedClass(c))c.status='draft';
+    saveDb();releaseEvalWakeLock();openClass(c.id);
+    alert('Attempt voided on this device. It was never sent to the server.');
+    return;
+  }
   const btn=$('voidAttemptBtn');
   if(btn){btn.disabled=true;btn.textContent='VOIDING…';}
   try{
@@ -2699,7 +2925,7 @@ if($('rosterSearch'))$('rosterSearch').oninput=e=>{rosterSearchTerm=e.target.val
 $('backRoster').onclick=()=>navigateBackSafely();$('nextUnresolvedBottomBtn').onclick=nextUnresolved;$('nextUnresolvedBtn').onclick=nextUnresolved;if($('observeModeBtn'))$('observeModeBtn').onclick=()=>{const st=evalState();st.observeMode=true;st.fieldMode=true;if(canEditCurrentEvaluation())saveDb();renderEval();};if($('reviewModeBtn'))$('reviewModeBtn').onclick=()=>{const st=evalState();st.observeMode=false;st.fieldMode=false;if(canEditCurrentEvaluation())saveDb();renderEval();};$('showNtToggle').onchange=e=>{const st=evalState();st.showNt=e.target.checked;if(canEditCurrentEvaluation())saveDb();renderSection();bindEvalDynamic();setReadOnly(!canEditCurrentEvaluation());};
 $('prevPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i>0){st.section=t.sections[i-1].code;if(canEditCurrentEvaluation())saveDb();renderEval();}};$('nextPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i<t.sections.length-1){st.section=t.sections[i+1].code;if(canEditCurrentEvaluation())saveDb();renderEval();}};
 $('trainerSign').oninput=guardEvaluationEdit(e=>{evalState().trainerSign=e.target.value;saveDb();});$('attemptEvaluatorId').oninput=guardEvaluationEdit(e=>{evalState().evaluatorId=e.target.value;saveDb();});$('studentSign').oninput=guardEvaluationEdit(e=>{evalState().studentSign=e.target.value;saveDb();});$('overallNotes').oninput=guardEvaluationEdit(e=>{evalState().overallNotes=e.target.value;saveDb();});
-$('finalizeBtn').onclick=guardEvaluationEdit(reviewFinalize);$('voidAttemptBtn').onclick=guardEvaluationEdit(voidCurrentAttempt,true);$('confirmFinalizeBtn').onclick=guardEvaluationEdit(finalizeEvaluation,true);$('copyAar').onclick=guardClassExport(async()=>{await navigator.clipboard.writeText($('aarText').textContent);alert('Review copied.');});$('individualPdfBtn').onclick=guardClassExport(exportIndividualPdf);$('individualCsvBtn').onclick=guardClassExport(exportIndividualCsv);$('attemptBackupBtn').onclick=guardClassExport(backupAttempt);
+$('finalizeBtn').onclick=guardEvaluationEdit(reviewFinalize);$('voidAttemptBtn').onclick=guardEvaluationEdit(voidCurrentAttempt,'auto');$('confirmFinalizeBtn').onclick=guardEvaluationEdit(finalizeEvaluation,'auto');$('copyAar').onclick=guardClassExport(async()=>{await navigator.clipboard.writeText($('aarText').textContent);alert('Review copied.');});$('individualPdfBtn').onclick=guardClassExport(exportIndividualPdf);$('individualCsvBtn').onclick=guardClassExport(exportIndividualCsv);$('attemptBackupBtn').onclick=guardClassExport(backupAttempt);
 $('classPdfBtn').onclick=guardClassExport(exportClassPdf);$('classSummaryCsvBtn').onclick=guardClassExport(exportClassSummaryCsv);$('classCriteriaCsvBtn').onclick=guardClassExport(exportClassCriteriaCsv);$('classTimersCsvBtn').onclick=guardClassExport(exportClassTimersCsv);$('classEventsCsvBtn').onclick=guardClassExport(exportClassEventsCsv);$('classAnalyticsCsvBtn').onclick=guardClassExport(exportClassAnalyticsCsv);$('classEnterpriseCsvBtn').onclick=guardClassExport(exportClassEnterpriseAnalyticsCsv);$('backupClassBtn').onclick=guardClassExport(backupClass);$('closeClassBtn').onclick=closeClass;$('deleteClassBtn').onclick=()=>{void deleteClass();};
 const moreExportsBtn=$('moreExportsBtn'),moreExportsMenu=$('moreExportsMenu');
 if($('jumpRosterBtn'))$('jumpRosterBtn').onclick=()=>{
@@ -2909,7 +3135,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.12-web.15';
+  const UPDATE_BUILD = '3.4.13-web.1';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
