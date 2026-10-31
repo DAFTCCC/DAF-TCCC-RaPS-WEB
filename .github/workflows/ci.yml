@@ -31,3 +31,29 @@ jobs:
         run: for f in *.js; do node --check "$f" || exit 1; done
       - name: Unit and contract tests
         run: node --test tests/*.test.cjs
+
+  browser:
+    # Isolated Chromium suites: assets are served from this checkout and every
+    # request to another host is blocked. No secrets, no NUC, no Supabase.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Playwright (uses the runner's Google Chrome)
+        run: pip install playwright==1.*
+      - name: Browser suites
+        env:
+          CHROMIUM_EXECUTABLE: /usr/bin/google-chrome
+        run: |
+          set -e
+          for suite in browser-workflow browser-accessibility browser-responsive \
+                       browser-phase-navigation browser-unresolved-navigation \
+                       browser-auth-layout browser-auth-flows browser-admin-accounts \
+                       browser-test-majcom browser-remove-student browser-offline-startup; do
+            echo "::group::$suite"
+            python "tests/$suite.py"
+            echo "::endgroup::"
+          done

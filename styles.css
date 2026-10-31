@@ -941,3 +941,6 @@ textarea#overallNotes{width:calc(100% - 24px);font-size:var(--font-body);line-he
   #activeTimers .activeTimerStop{min-height:44px;padding:8px 12px}
   #activeTimersCard:not(.hidden){max-height:max(56px,calc(100dvh - var(--eval-header-height,195px) - var(--eval-nav-height,72px) - 168px))}
 }
+
+/* Workflow tiles shrink and wrap long words under enlarged text instead of overflowing the card. */
+.workflow>div{min-width:0}.workflow span{display:block;overflow-wrap:anywhere;hyphens:auto}

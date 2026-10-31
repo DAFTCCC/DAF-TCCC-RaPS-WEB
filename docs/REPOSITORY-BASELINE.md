@@ -117,18 +117,13 @@ be unique per line. For example, development builds could carry a suffix such
 as `3.4.13-dev.<n>+<shortsha>`, and only `main` would mint release numbers. The
 team should agree on this convention before the next release.
 
-## 5. Open items not done in this branch
+## 5. Follow-up status
 
-- **Vendor supabase-js.** `index.html` loads the unpinned
-  `@supabase/supabase-js@2` from jsDelivr. Because it is cross-origin, the
-  service worker never caches it. This blocks a reliable offline cold start.
-  The fix is to pin a version, save it as `vendor/supabase-js-<ver>.min.js`,
-  add it to the service worker shell, remove jsDelivr from the CSP, and bump
-  the build. It was not done here because the authoring environment could not
-  download the file.
-- **Remove the obsolete CSP entry.** The CSP still allows the old hosted
-  project, `bplevsfvpwrkgafizvao.supabase.co`. Bundle this with the vendoring
-  change.
-- **Move the offline migration.** The offline branch's migration lives in
-  `database/` and should move to `supabase/migrations/` when that work is
-  re-applied.
+- **Done in web.14:** Remove Student fixed, and roster withdrawals now synchronize.
+- **Done in web.15:** supabase-js 2.118.0 is vendored and precached, the CSP no
+  longer allows jsDelivr or the retired hosted project, enlarged-text layout is
+  fixed, and the browser suites run in CI.
+- **Open:** the offline branch's migration lives in `database/` and should move
+  to `supabase/migrations/` when that work is re-applied.
+- **Open:** the four lifecycle RPCs exist only in the production database.
+  Capture them from the NUC.
