@@ -1,0 +1,33 @@
+name: CI
+
+# Runs the dependency-free unit/contract suite on every pull request and on
+# pushes to main. No secrets are used and nothing contacts the NUC or Supabase.
+# Browser (*.py) and database (*.sh) suites need a live stack and stay manual.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # grading-policy.test.cjs compares against a baseline commit
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'  # node:module stripTypeScriptTypes requires Node 22.13+
+      - name: Syntax check frontend scripts
+        run: for f in *.js; do node --check "$f" || exit 1; done
+      - name: Unit and contract tests
+        run: node --test tests/*.test.cjs
