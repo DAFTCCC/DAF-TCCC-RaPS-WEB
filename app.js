@@ -498,6 +498,9 @@ function canEditCurrentEvaluation(){
 // with no connection. Field records stay on the device, sealed when finalized,
 // until Sync Classes completes the server claim, upload, verification, and
 // audit confirmation. Field times are kept separately from server times.
+// Installed Android app (Capacitor): files are bundled in the APK and its
+// storage is app data that the browser never evicts.
+function isNativeApp(){const cap=window.Capacitor;return !!(cap&&(cap.isNativePlatform?.()||cap.getPlatform?.()==='android'));}
 function cloudReachable(){
   const cloud=window.RAPS_CLOUD;
   return navigator.onLine===true&&cloud?.connected===true&&cloud?.offlineCached!==true;
@@ -1669,12 +1672,12 @@ function offlineReadiness(c){
   let identityCached=false;try{identityCached=!!localStorage.getItem(cfg.identityCacheKey||'RAPS_CLOUD_IDENTITY_V1');}catch{}
   add(cloud.user?.id&&identityCached,'Sign-in saved for offline use','Sign in while connected.');
   add(canAccessClass('evaluate',c,{online:false}),'You can evaluate in this class','Ask a Program Manager to assign you to this class.');
-  add(!('serviceWorker' in navigator)||!!navigator.serviceWorker.controller,'App saved for offline use','Reload RaPS once while connected.');
+  add(isNativeApp()||!('serviceWorker' in navigator)||!!navigator.serviceWorker.controller,'App saved for offline use','Reload RaPS once while connected.');
   add(!!c?.tierSnapshot?.sections?.length,'Curriculum on this device','Open the class while connected.');
   const synced=!c?.cloudSync?.enabled||(c.cloudSync.status==='synced'&&(c.students||[]).length>0);
   add(synced,'Class and roster downloaded','Tap Sync Classes while connected.');
   add(!idbUnavailable&&!window.rapsDeviceStorage?.error,'Records protected by durable storage','Use a normal (not private) browser window, or the installed app.');
-  if(window.rapsStoragePersisted===false)add(false,'Browser will keep this app\'s data','Install RaPS to the Home Screen.',true);
+  if(window.rapsStoragePersisted===false&&!isNativeApp())add(false,'Browser will keep this app\'s data','Install RaPS to the Home Screen.',true);
   const last=Math.max(Number(c?.cloudSync?.lastSyncedAt||0),Number(c?.cloudRosterSync?.lastSyncedAt||0));
   if(c?.cloudSync?.enabled)add(last&&now()-last<18*3600000,'Synced within the last 18 hours','Tap Sync Classes before leaving the connection.',true);
   const conflicts=(c?.students||[]).reduce((n,s)=>n+Object.values(s.attempts||{}).filter(a=>a?.syncConflict).length,0);
@@ -3339,7 +3342,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.13-web.4';
+  const UPDATE_BUILD = '3.4.13-web.5';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
@@ -3531,7 +3534,8 @@ renderHome();
     });
   }
 
-  if ('serviceWorker' in navigator && window.isSecureContext) {
+  // The installed app bundles its files; the web service worker is not used there.
+  if ('serviceWorker' in navigator && window.isSecureContext && !isNativeApp()) {
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       window.setTimeout(() => checkForUpdate({force:true}), 100);
     });
