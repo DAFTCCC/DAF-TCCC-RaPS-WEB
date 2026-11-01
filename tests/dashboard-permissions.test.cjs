@@ -109,6 +109,8 @@ function fixture([file, role, predicate, loader, resultId], options = {}) {
     console:{ warn() {}, error(...args) { errors.push(args); } }, Date, setTimeout, clearTimeout
   });
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'permissions.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'tiers.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'trend-analytics.js'), 'utf8'), context);
   let source = fs.readFileSync(path.join(ROOT, file), 'utf8');
   const end = source.lastIndexOf('})();');
   source = source.slice(0, end) + `window.__test = {
@@ -757,3 +759,33 @@ test('Enterprise archive cancellation suppresses a response after membership rev
   assert.equal(f.node(f.resultId).innerHTML, '');
   assert.equal(f.node('enterpriseReportingArchives').innerHTML, '');
 });
+
+
+// Missed Trends renders from each dashboard's own scoped rows.
+for (const testCase of cases) {
+  test(`${testCase[0]} renders Missed Trends from graded criterion results`, async () => {
+    const classes = [reportClass('trend-class', 'Trend class', 'completed')];
+    const tables = reportTables(classes);
+    tables.evaluations = [];
+    tables.criteria = [{ id:'crit-a', criterion_code:'ASM-004', critical:true }, { id:'crit-b', criterion_code:'ASM-001', critical:false }];
+    for (let i = 0; i < 8; i++) {
+      const fail = i < 3;
+      tables.evaluations.push({ id:'trend-eval-' + i, event_id:'event-trend-class', participant_id:'p' + i, evaluator_id:'evaluator-trend-class',
+        attempt_number:1, status:'finalized', overall_result:fail ? 'fail' : 'pass', completed_at:'2026-10-17T01:00:00Z' });
+      tables.criterion_results.push({ id:'r-a-' + i, evaluation_id:'trend-eval-' + i, criterion_id:'crit-a', result:fail ? 'fail' : 'pass',
+        failure_mode:fail ? 'omission' : null, primary_contributor:fail ? 'knowledge' : null });
+      tables.criterion_results.push({ id:'r-b-' + i, evaluation_id:'trend-eval-' + i, criterion_id:'crit-b', result:'pass' });
+    }
+    const f = fixture(testCase, { immediate:true, tables });
+    await f.load(true);
+    if (f.render) f.render();
+    const trendsId = testCase[0].startsWith('enterprise') ? 'enterpriseTrends' : testCase[0].startsWith('majcom') ? 'majcomTrends' : 'pmBaseTrends';
+    const html = f.node(trendsId).innerHTML;
+    assert.match(html, /Most-missed criteria/);
+    assert.match(html, /ASM-004/);
+    assert.match(html, /38%/, '3 of 8 missed');
+    assert.match(html, /review the content/, 'Knowledge-driven misses suggest content review');
+    assert.ok(!/ASM-001<\/b>/.test(html), 'A criterion nobody missed is not listed');
+    assert.ok(f.reads.includes('criteria'), 'The criterion catalog is read under the dashboard scope');
+  });
+}

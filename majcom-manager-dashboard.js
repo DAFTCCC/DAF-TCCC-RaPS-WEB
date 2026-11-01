@@ -166,6 +166,10 @@ function inject() {
       '</div>',
     '</details>',
 
+    '<details class="analyticsDetails" open>',
+      '<summary>Missed Trends</summary>',
+      '<div id="majcomTrends"></div>',
+    '</details>',
     '<div id="majcomDataQuality" class="dataQualityPanel"></div>',
     '<p class="helper majcomDashboardFoot">Metrics are descriptive. PASS rate uses finalized evaluations with an overall PASS/FAIL result. Incomplete evaluations are shown separately.</p>'
   ].join('');
@@ -299,6 +303,7 @@ function filteredData() {
   const evaluations = raw.evaluations.filter((evaluation) => eventIds.has(evaluation.event_id));
   const evaluationIds = new Set(evaluations.map((evaluation) => evaluation.id));
   const failures = raw.failures.filter((failure) => evaluationIds.has(failure.evaluation_id));
+  const results = (raw.results || []).filter((result) => evaluationIds.has(result.evaluation_id));
 
   return {
     bases,
@@ -306,6 +311,7 @@ function filteredData() {
     events,
     evaluations,
     failures,
+    results,
     profileRows: raw.profileRows,
     participantRows: raw.participantRows
   };
@@ -460,6 +466,8 @@ function render() {
   const data = filteredData();
   const model = buildModel(data);
   const k = model.kpis;
+  window.RAPS_TRENDS?.render(byId('majcomTrends'), window.RAPS_TRENDS.build({
+    evaluations: data.evaluations, results: data.results, criteria: raw.criteria || [], profiles: data.profileRows }));
 
   byId('majcomKpis').innerHTML = [
     ['Installations', k.activeInstallations + '/' + k.installations, 'with activity / in view'],
@@ -661,18 +669,27 @@ async function load(force = false) {
 
     const evaluations = await readChunks(
       'evaluations',
-      'id,event_id,participant_id,evaluator_id,status,overall_result,score_numerator,score_denominator,started_at,completed_at,updated_at',
+      'id,event_id,participant_id,evaluator_id,attempt_number,status,overall_result,score_numerator,score_denominator,started_at,completed_at,updated_at',
       'event_id',
       events.map((event) => event.id)
     );
 
-    const failures = await readChunks(
+    // All graded results (PASS/FAIL) with the criterion, for Missed Trends.
+    // Failure panels keep using the FAIL subset exactly as before.
+    const results = await readChunks(
       'criterion_results',
-      'evaluation_id,result,failure_mode,primary_contributor',
+      'evaluation_id,criterion_id,result,failure_mode,primary_contributor',
       'evaluation_id',
       evaluations.map((evaluation) => evaluation.id),
-      (q) => q.eq('result', 'fail')
+      (q) => q.in('result', ['pass', 'fail']).order('id')
     );
+    const failures = results.filter((r) => r.result === 'fail');
+    const criterionIds = [...new Set(results.map((r) => r.criterion_id).filter(Boolean))];
+    let criteria = [];
+    if (criterionIds.length) {
+      try { criteria = await readChunks('criteria', 'id,criterion_code,critical', 'id', criterionIds); }
+      catch (error) { console.warn('Criteria catalog unavailable for Missed Trends.', error); }
+    }
 
     const evaluatorIds = [...new Set(evaluations.map((evaluation) => evaluation.evaluator_id).filter(Boolean))];
     const participantIds = [...new Set(evaluations.map((evaluation) => evaluation.participant_id).filter(Boolean))];
@@ -703,6 +720,8 @@ async function load(force = false) {
       events,
       evaluations,
       failures,
+      results,
+      criteria,
       profileRows,
       participantRows
     };

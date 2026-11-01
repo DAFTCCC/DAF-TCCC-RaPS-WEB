@@ -205,6 +205,10 @@ function inject() {
     '</details>',
 
     '<details class="analyticsDetails" open>',
+      '<summary>Missed Trends</summary>',
+      '<div id="enterpriseTrends"></div>',
+    '</details>',
+    '<details class="analyticsDetails" open>',
       '<summary>Observed Failure Patterns</summary>',
       '<div class="analyticsSplit">',
         '<div><h3>Failure Modes</h3><div id="enterpriseFailureModes"></div></div>',
@@ -450,8 +454,10 @@ function filteredData() {
   const failures = raw.failures.filter((failure) =>
     evaluationIds.has(failure.evaluation_id)
   );
+  const results = (raw.results || []).filter((result) => evaluationIds.has(result.evaluation_id));
 
   return {
+    results,
     majcoms: raw.majcoms.filter(majcom => majcomInScope(majcom.id)),
     bases,
     classes,
@@ -879,6 +885,8 @@ function render() {
   const data = filteredData();
   const model = buildModel(data);
   const k = model.kpis;
+  window.RAPS_TRENDS?.render(byId('enterpriseTrends'), window.RAPS_TRENDS.build({
+    evaluations: data.evaluations, results: data.results, criteria: raw.criteria || [], profiles: data.profileRows }));
 
   byId('enterpriseKpis').innerHTML = [
     ['MAJCOMs', k.activeMajcoms + '/' + k.majcoms, 'with activity / in view'],
@@ -1378,13 +1386,22 @@ async function load(force = false) {
       events.map((event) => event.id)
     );
 
-    const failures = await readChunks(
+    // All graded results (PASS/FAIL) with the criterion, for Missed Trends.
+    // Failure panels keep using the FAIL subset exactly as before.
+    const results = await readChunks(
       'criterion_results',
-      'evaluation_id,result,failure_mode,primary_contributor',
+      'evaluation_id,criterion_id,result,failure_mode,primary_contributor',
       'evaluation_id',
       evaluations.map((evaluation) => evaluation.id),
-      (q) => q.eq('result', 'fail')
+      (q) => q.in('result', ['pass', 'fail']).order('id')
     );
+    const failures = results.filter((r) => r.result === 'fail');
+    const criterionIds = [...new Set(results.map((r) => r.criterion_id).filter(Boolean))];
+    let criteria = [];
+    if (criterionIds.length) {
+      try { criteria = await readChunks('criteria', 'id,criterion_code,critical', 'id', criterionIds); }
+      catch (error) { console.warn('Criteria catalog unavailable for Missed Trends.', error); }
+    }
 
     const evaluatorIds = [...new Set(
       evaluations.map((evaluation) => evaluation.evaluator_id).filter(Boolean)
@@ -1432,6 +1449,8 @@ async function load(force = false) {
       events,
       evaluations,
       failures,
+      results,
+      criteria,
       profileRows,
       participantRows
     };
