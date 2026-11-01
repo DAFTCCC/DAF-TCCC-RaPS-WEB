@@ -79,6 +79,17 @@ function msFromIso(value) {
 function shortError(error) {
   return String(error?.message || error || 'Unknown sync error').slice(0, 240);
 }
+// Student assignment: {studentId: instructor/group label}. Normalized so that
+// key order and blank entries never look like a metadata change.
+function normalizeStudentGroups(value) {
+  const out = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  for (const key of Object.keys(value).sort()) {
+    const label = String(value[key] || '').trim().slice(0, 60);
+    if (key && label) out[String(key)] = label;
+  }
+  return out;
+}
 function classMetadataSnapshot(c) {
   return {
     name:String(c?.name||''),
@@ -110,7 +121,8 @@ function classMetadataSnapshot(c) {
     location:String(c?.location||''),
     deletedAt:Number(c?.deletedAt||0)||null,
     restoredAt:Number(c?.restoredAt||0)||null,
-    scenarioNT:[...(Array.isArray(c?.scenarioNT)?c.scenarioNT:[])].map(String).sort()
+    scenarioNT:[...(Array.isArray(c?.scenarioNT)?c.scenarioNT:[])].map(String).sort(),
+    studentGroups:normalizeStudentGroups(c?.studentGroups)
   };
 }
 function classMetadataSignature(c) {
@@ -333,6 +345,7 @@ function serializeAppData(c) {
     trainingLocationCountry: c.trainingLocationCountry || '',
     location: c.location || '',
     scenarioNT: Array.isArray(c.scenarioNT) ? c.scenarioNT : [],
+    studentGroups: normalizeStudentGroups(c.studentGroups),
     participantIds: Array.isArray(c.students) ? c.students.map(s => s?.id).filter(Boolean) : [],
     closedAt: c.closedAt || null,
     closedBy: c.closedBy || '',
@@ -974,6 +987,7 @@ function remoteToLocal(row, loadedRefs) {
     deletedAt: row.status === 'archived' ? (appData.deletedAt || remoteModifiedAt) : null,
     restoredAt: appData.restoredAt || null,
     scenarioNT: Array.isArray(appData.scenarioNT) ? appData.scenarioNT : [],
+    studentGroups: normalizeStudentGroups(appData.studentGroups),
     students: [],
     contentVersion: appData.contentVersion || (tier ? `${tier.source} | app ${window.TCCC_BUILD?.versionName || ''}` : ''),
     tierSnapshot: tier ? JSON.parse(JSON.stringify(tier)) : null,
@@ -1434,7 +1448,7 @@ if (document.readyState === 'loading') {
   if (cloudReady()) syncAll({ silent:true });
 }
 
-window.RAPS_CLASS_SYNC_BUILD = '3.4.12-web.13';
+window.RAPS_CLASS_SYNC_BUILD = '3.4.13-web.3';
 
 window.RAPS_CLASS_SYNC = Object.freeze({
   syncAll,

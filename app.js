@@ -1058,9 +1058,69 @@ function finalStatusForStudent(s){
   const best=a2?.finalizedAt?a2:a1?.finalizedAt?a1:null;
   return best?best.finalResult:'NOT STARTED';
 }
+// ---------- Student assignment ----------
+// A Program Manager splits the roster among instructors (group labels, usually
+// instructor names). Assignments sync with the class. Each device chooses
+// which group is "mine": those students list first, and starting a student
+// assigned to someone else asks for confirmation. Nothing is blocked.
+const MY_GROUP_PREFIX='RAPS_MY_STUDENT_GROUP:';
+function studentGroupOf(c,s){return String(c?.studentGroups?.[s?.id]||'');}
+function studentGroupLabels(c){return [...new Set(Object.values(c?.studentGroups||{}).map(String).filter(Boolean))].sort((a,b)=>a.localeCompare(b));}
+function myStudentGroup(c){
+  try{const v=localStorage.getItem(MY_GROUP_PREFIX+c.id)||'';if(v&&studentGroupLabels(c).includes(v))return v;}catch{}
+  // Default: a group named like the signed-in instructor.
+  const name=String(window.RAPS_CLOUD?.profile?.display_name||'').trim().toLowerCase();
+  return name?studentGroupLabels(c).find(l=>l.toLowerCase()===name||l.toLowerCase().includes(name)||name.includes(l.toLowerCase()))||'':'';
+}
+function setMyStudentGroup(c,label){try{if(label)localStorage.setItem(MY_GROUP_PREFIX+c.id,label);else localStorage.removeItem(MY_GROUP_PREFIX+c.id);}catch{}}
+function assignmentWarning(c,s){
+  const group=studentGroupOf(c,s),mine=myStudentGroup(c);
+  return group&&mine&&group!==mine?`${s.rank?`${s.rank} `:''}${s.name} is assigned to ${group}, not ${mine}.\n\nGrading the same student on two phones creates a conflict. Start anyway?`:'';
+}
+function splitEvenly(students,labels){
+  const out={};students.forEach((s,i)=>{out[s.id]=labels[i%labels.length];});return out;
+}
+function assignStudentsForm(){
+  const c=cls();if(!c||isClassClosed(c)||!requireClassAccess('manageClass',c))return;
+  const labels=studentGroupLabels(c);
+  $('formModalTitle').textContent='Assign Students';
+  const options=current=>['<option value="">Unassigned</option>',...labels.map(l=>`<option${l===current?' selected':''}>${esc(l)}</option>`)].join('');
+  const rows=(c.students||[]).map(s=>`<label class="assignRow"><span>${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</span><select data-assign-student="${esc(s.id)}">${options(studentGroupOf(c,s))}</select></label>`).join('');
+  $('formModalBody').innerHTML=`<p class="helper">Enter instructor names (or lanes), separated by commas, then split the roster evenly or adjust each student. Assignments sync to every phone with this class. Instructors can still grade anyone; RaPS only warns.</p>
+    <div class="formGrid"><label class="full"><span>Instructors / groups</span><input id="assignLabels" value="${esc(labels.join(', '))}" placeholder="SSgt Alpha, TSgt Bravo, MSgt Charlie"></label></div>
+    <div class="formActions"><button id="assignSplitBtn" class="action" type="button">Split Evenly</button><button id="assignApplyLabelsBtn" class="ghost small" type="button">Update Choices</button></div>
+    <div id="assignRows" class="assignRows">${rows||'<p class="helper">Add students first.</p>'}</div>
+    <div class="formActions"><button id="assignSaveBtn" class="action primary" type="button">Save Assignments</button><button id="assignClearBtn" class="ghost small danger" type="button">Clear All</button></div>`;
+  const parsed=()=>[...new Set($('assignLabels').value.split(',').map(x=>x.trim().slice(0,60)).filter(Boolean))];
+  const refreshChoices=map=>{
+    const next=parsed();
+    document.querySelectorAll('[data-assign-student]').forEach(sel=>{
+      const value=map?map[sel.dataset.assignStudent]||'':sel.value;
+      sel.innerHTML=['<option value="">Unassigned</option>',...next.map(l=>`<option${l===value?' selected':''}>${esc(l)}</option>`)].join('');
+    });
+  };
+  $('assignApplyLabelsBtn').onclick=()=>refreshChoices();
+  $('assignSplitBtn').onclick=()=>{const l=parsed();if(!l.length){alert('Enter at least one instructor or group name.');return;}refreshChoices(splitEvenly(c.students||[],l));};
+  $('assignClearBtn').onclick=()=>document.querySelectorAll('[data-assign-student]').forEach(sel=>{sel.value='';});
+  $('assignSaveBtn').onclick=()=>{
+    const live=cls();if(live?.id!==c.id||isClassClosed(live)||!requireClassAccess('manageClass',live))return;
+    const map={};document.querySelectorAll('[data-assign-student]').forEach(sel=>{if(sel.value&&live.students.some(x=>x.id===sel.dataset.assignStudent))map[sel.dataset.assignStudent]=sel.value;});
+    live.studentGroups=map;saveDb(live.id);closeModal('formModal');renderClass();
+  };
+  openModal('formModal');
+}
+function renderMyGroupPicker(c){
+  const picker=$('myGroupPicker'),select=$('myGroupSelect'),chip=$('mineFilterChip');if(!picker||!select)return;
+  const labels=studentGroupLabels(c),mine=myStudentGroup(c);
+  picker.classList.toggle('hidden',!labels.length);chip?.classList.toggle('hidden',!labels.length||!mine);
+  if(!labels.length&&rosterFilter==='mine')rosterFilter='all';
+  select.innerHTML=['<option value="">All students</option>',...labels.map(l=>`<option${l===mine?' selected':''}>${esc(l)}</option>`)].join('');
+  select.onchange=()=>{setMyStudentGroup(c,select.value);if(!select.value&&rosterFilter==='mine')rosterFilter='all';renderClass();};
+}
 function rosterMatches(s){
   const q=rosterSearchTerm.trim().toLowerCase();
   if(q&&!`${s.name||''} ${s.rank||''} ${s.trainingId||''}`.toLowerCase().includes(q))return false;
+  if(rosterFilter==='mine'){const c=cls(),mine=myStudentGroup(c);return !!mine&&studentGroupOf(c,s)===mine;}
   const a1=s.attempts?.['1'],a2=s.attempts?.['2'],status=finalStatusForStudent(s);
   if(rosterFilter==='not-started')return !a1;
   if(rosterFilter==='in-progress')return !!((a1&&!a1.finalizedAt)||(a2&&!a2.finalizedAt));
@@ -1295,7 +1355,9 @@ function renderClass(){
   const items=allItems(t),critical=items.filter(i=>i.critical).length,noncrit=items.filter(i=>!i.critical).length;
   $('scenarioCoverage').textContent=`${critical} critical required · ${noncrit-(c.scenarioNT||[]).length}/${noncrit} noncritical active`;
   $('scenarioBtn').textContent=closed?'Scenario NT (closed)':hasStartedClass(c)?'View Scenario NT (locked)':'Configure Scenario NT';
-  const visibleStudents=c.students.filter(rosterMatches);
+  renderMyGroupPicker(c);
+  const mine=myStudentGroup(c);
+  const visibleStudents=c.students.filter(rosterMatches).map((s,i)=>({s,i})).sort((x,y)=>(mine?(studentGroupOf(c,y.s)===mine)-(studentGroupOf(c,x.s)===mine):0)||x.i-y.i).map(x=>x.s);
   $('rosterCount').textContent=`${visibleStudents.length}/${stats.total} shown · ${stats.completed} finalized`;
   renderActiveEvaluationLockBanner();
   renderRosterNotice(c);
@@ -1304,7 +1366,7 @@ function renderClass(){
   document.querySelectorAll('[data-roster-filter]').forEach(b=>b.classList.toggle('active',b.dataset.rosterFilter===rosterFilter));
   renderClassAnalytics(c,t);
   if($('analyticsScope'))$('analyticsScope').textContent=`${classAttempt1s(c).length} finalized A1 · normalized rates`;
-  $('editClassBtn').disabled=closed||!canAccessClass('manageClass',c);$('scenarioBtn').disabled=closed||!canAccessClass('manageClass',c);$('addStudentBtn').disabled=closed||!canAccessClass('manageRoster',c);$('importRosterBtn').disabled=closed||!canAccessClass('manageRoster',c);
+  $('editClassBtn').disabled=closed||!canAccessClass('manageClass',c);$('scenarioBtn').disabled=closed||!canAccessClass('manageClass',c);$('addStudentBtn').disabled=closed||!canAccessClass('manageRoster',c);$('importRosterBtn').disabled=closed||!canAccessClass('manageRoster',c);if($('assignStudentsBtn')){$('assignStudentsBtn').disabled=closed||!canAccessClass('manageClass',c);$('assignStudentsBtn').classList.toggle('hidden',!canAccessClass('manageClass',c,{online:false}));}
   const classConflictBtn=$('resolveClassConflictBtn');
   if(classConflictBtn){
     const conflicted=!closed&&canAccessClass('manageClass',c)&&String(c.cloudSync?.status||'')==='conflict';
@@ -1377,7 +1439,7 @@ function rosterRow(c,s){
       buttons+=` <button class="ghost small danger" data-delete-student="${s.id}"${blocked?` disabled aria-disabled="true" title="${esc(blocked)}"`:''}>Remove Student</button>`;
     }
   }
-  return `<div class="rosterRow"><div><div class="rowTitle">${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</div><div class="rowSub">${esc(s.trainingId||'No training ID')} · <span class="statusPill ${clsx}">${status}</span>${best?` · ${scoreStats(c.tierSnapshot,best).percentText} ${gradingSyncBadge(best)}`:a1?` ${gradingSyncBadge(a1)}`:''}</div></div><div class="rowActions">${buttons}</div></div>`;
+  return `<div class="rosterRow"><div><div class="rowTitle">${esc(s.rank?`${s.rank} `:'')}${esc(s.name)}</div><div class="rowSub">${esc(s.trainingId||'No training ID')}${studentGroupOf(c,s)?` · <span class="assignTag${studentGroupOf(c,s)===myStudentGroup(c)?' mine':''}">${esc(studentGroupOf(c,s))}</span>`:''} · <span class="statusPill ${clsx}">${status}</span>${best?` · ${scoreStats(c.tierSnapshot,best).percentText} ${gradingSyncBadge(best)}`:a1?` ${gradingSyncBadge(a1)}`:''}</div></div><div class="rowActions">${buttons}</div></div>`;
 }
 function classConflictSummary(x){
   if(!x)return 'Unavailable';
@@ -1511,6 +1573,8 @@ function openAuthorizedEvaluation(studentId,attemptNo,options={}){
   // without a connection; the server re-checks access when the record syncs.
   const online=cloudReachable();
   if(needsStart&&!requireClassAccess('evaluate',c,{online}))return;
+  const assigned=needsStart?assignmentWarning(c,c.students.find(s=>s.id===studentId)):'';
+  if(assigned&&!confirm(assigned))return;
   openEvaluation(studentId,attemptNo,options);
   const begin=$('beginAttemptBtn');
   if(needsStart&&begin){
@@ -3060,7 +3124,7 @@ function bindEvalDynamic(){
 if($('activeTimers'))$('activeTimers').onclick=guardEvaluationEdit(e=>{const b=e.target.closest('[data-active-timer-stop]');if(!b||b.disabled)return;timerAction(b.dataset.activeTimerStop,'stop');});
 document.querySelectorAll('[data-home-area]').forEach(b=>b.onclick=()=>setHomeArea(b.dataset.homeArea));
 $('newClassBtn').onclick=()=>newClassForm();$('importBackupBtn').onclick=()=>$('backupImportFile').click();$('backupImportFile').onchange=e=>e.target.files[0]&&restoreBackup(e.target.files[0]);
-$('backHome').onclick=()=>{releaseEvalWakeLock();showHome();};$('editClassBtn').onclick=()=>newClassForm(cls());if($('resolveClassConflictBtn'))$('resolveClassConflictBtn').onclick=resolveClassMetadataConflict;$('addStudentBtn').onclick=addStudentForm;$('importRosterBtn').onclick=()=>$('rosterFile').click();$('rosterFile').onchange=e=>e.target.files[0]&&importRoster(e.target.files[0]);$('scenarioBtn').onclick=scenarioForm;
+$('backHome').onclick=()=>{releaseEvalWakeLock();showHome();};$('editClassBtn').onclick=()=>newClassForm(cls());if($('resolveClassConflictBtn'))$('resolveClassConflictBtn').onclick=resolveClassMetadataConflict;$('addStudentBtn').onclick=addStudentForm;$('importRosterBtn').onclick=()=>$('rosterFile').click();if($('assignStudentsBtn'))$('assignStudentsBtn').onclick=assignStudentsForm;$('rosterFile').onchange=e=>e.target.files[0]&&importRoster(e.target.files[0]);$('scenarioBtn').onclick=scenarioForm;
 if($('rosterSearch'))$('rosterSearch').oninput=e=>{rosterSearchTerm=e.target.value;renderClass();};document.querySelectorAll('[data-roster-filter]').forEach(b=>b.onclick=()=>{rosterFilter=b.dataset.rosterFilter;renderClass();});
 $('backRoster').onclick=()=>navigateBackSafely();$('nextUnresolvedBottomBtn').onclick=nextUnresolved;$('nextUnresolvedBtn').onclick=nextUnresolved;if($('observeModeBtn'))$('observeModeBtn').onclick=()=>{const st=evalState();st.observeMode=true;st.fieldMode=true;if(canEditCurrentEvaluation())saveDb();renderEval();};if($('reviewModeBtn'))$('reviewModeBtn').onclick=()=>{const st=evalState();st.observeMode=false;st.fieldMode=false;if(canEditCurrentEvaluation())saveDb();renderEval();};$('showNtToggle').onchange=e=>{const st=evalState();st.showNt=e.target.checked;if(canEditCurrentEvaluation())saveDb();renderSection();bindEvalDynamic();setReadOnly(!canEditCurrentEvaluation());};
 $('prevPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i>0){st.section=t.sections[i-1].code;if(canEditCurrentEvaluation())saveDb();renderEval();}};$('nextPhaseBtn').onclick=()=>{const t=tier(),st=evalState(),i=t.sections.findIndex(s=>s.code===st.section);if(i<t.sections.length-1){st.section=t.sections[i+1].code;if(canEditCurrentEvaluation())saveDb();renderEval();}};
@@ -3275,7 +3339,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.13-web.2';
+  const UPDATE_BUILD = '3.4.13-web.3';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 

@@ -99,6 +99,7 @@ function fixture() {
     const $=id=>window.testDom?.[id]||null;
     const saveDb=()=>localStorage.setItem(DB_KEY,JSON.stringify(db));
     ${names.map(name=>functionSource(app,name)).join('\n')}
+    ${functionSource(classes,'normalizeStudentGroups')}
     ${functionSource(classes,'classMetadataSnapshot')}
     ${functionSource(classes,'classMetadataSignature')}
     ${functionSource(grading,'canonical')}
