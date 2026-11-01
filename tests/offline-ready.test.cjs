@@ -33,8 +33,7 @@ function check(overrides = {}) {
     navigator: { serviceWorker: { controller: o.swController ? {} : null } },
     canAccessClass: () => o.canEvaluate, idbUnavailable: !o.idbOk, now: () => NOW
   };
-  if (o.native) sandbox.window.Capacitor = { isNativePlatform: () => true };
-  vm.runInNewContext(functionSource('isNativeApp') + '\n' + functionSource('offlineReadiness') + '\nthis.result = offlineReadiness(c);', Object.assign(sandbox, { c }));
+  vm.runInNewContext(functionSource('offlineReadiness') + '\nthis.result = offlineReadiness(c);', Object.assign(sandbox, { c }));
   return sandbox.result;
 }
 
@@ -71,9 +70,3 @@ for (const [name, override, pattern] of [
     assert.ok(r.warnings.some(x => pattern.test(x.label)), JSON.stringify(r.warnings));
   });
 }
-
-test('the installed Android app counts as saved for offline use and is never warned about browser eviction', () => {
-  const r = check({ native: true, swController: false, persisted: false });
-  assert.equal(r.ready, true);
-  assert.equal(r.warnings.length, 0);
-});
