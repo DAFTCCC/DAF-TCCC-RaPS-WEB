@@ -3535,7 +3535,8 @@ renderHome();
   }
 
   // The installed app bundles its files; the web service worker is not used there.
-  if ('serviceWorker' in navigator && window.isSecureContext && !isNativeApp()) {
+  const nativeApp = !!(window.Capacitor && (window.Capacitor.isNativePlatform?.() || window.Capacitor.getPlatform?.() === 'android'));
+  if ('serviceWorker' in navigator && window.isSecureContext && !nativeApp) {
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       window.setTimeout(() => checkForUpdate({force:true}), 100);
     });
