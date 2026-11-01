@@ -1,0 +1,14 @@
+# v3.4.13-web.1 — offline field finalization
+
+- **Grade and finalize without a connection.** An instructor who synced in the morning can start, grade, and finalize offline. Finalized records are sealed read-only on the phone (**FINALIZED · AWAITING SYNC**) and survive app restarts and reloads. If the connection drops mid-claim or mid-finalize, the record continues safely on the phone. Previously, starting an assessment required a live connection.
+- **Deterministic sync.** Sync Classes processes field records one at a time, in a fixed order: claim, upload evidence, server finalization, field-time audit confirmation, then adoption of the canonical server record. Every step can be repeated safely. An interrupted sync resumes without finalizing twice. **GRADE SYNCED** appears only after the server confirms every step. Background and manual syncs no longer overlap.
+- **Retests by a different instructor.** **Start A2 Retest** is locked for the A1 instructor. **Retest (A1 on other phone)** records a retest when the A1 FAIL is on a phone that has not synced yet; the retest shows **RETEST · WAITING FOR A1 SYNC** until it does. The server enforces both rules.
+- **Duplicates are never overwritten.** When two phones grade the same student and attempt, the first to sync is official. The other keeps **SYNC CONFLICT · REVIEW**, can be exported, and can be archived on the phone before the server record is adopted.
+- **All phones synced before closing.** Every phone registers for the class when it syncs. **Prepare to Close** starts a check-in round, the class screen shows each phone's status, and the server refuses to close until every phone has checked in clean. A Program Manager can release a lost phone with an audited reason. A phone that has checked in cannot start new evaluations for the class.
+- An unsynced offline start can be voided on the phone; it is recorded in a local void log.
+
+**Requires** migration `supabase/migrations/20261101_offline_field_finalization.sql`. Apply it before deploying this frontend. See `docs/OFFLINE-FIELD-OPERATIONS.md` for the field procedure, deployment order, and limitations.
+
+The online claim, finalize, and void paths are unchanged. `tests/grading-policy.test.cjs` now verifies that every approved baseline line is still present, with seven reviewed replacements in `openEvaluation`. JTS criteria, scoring, timing standards, and grading algorithms are unchanged.
+
+Validation on 2026-10-31: 799/799 Node tests pass, including a simulated field day with 18 students, 3 phones, offline retests, a duplicate, and a gated close; an interrupted-sync resume; the same-evaluator retest refusal; and check-in rules. 37/37 PostgreSQL 16 assertions pass for the migration. All 12 Chromium suites pass, including the new offline evaluator UI test, with no page errors or external requests. The new scenario tests fail on 3.4.12-web.15.

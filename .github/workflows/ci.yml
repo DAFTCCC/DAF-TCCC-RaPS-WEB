@@ -52,8 +52,24 @@ jobs:
           for suite in browser-workflow browser-accessibility browser-responsive \
                        browser-phase-navigation browser-unresolved-navigation \
                        browser-auth-layout browser-auth-flows browser-admin-accounts \
-                       browser-test-majcom browser-remove-student browser-offline-startup; do
+                       browser-test-majcom browser-remove-student browser-offline-startup \
+                       browser-offline-evaluation; do
             echo "::group::$suite"
             python "tests/$suite.py"
             echo "::endgroup::"
           done
+
+  database:
+    # Network-isolated PostgreSQL 17 test of the offline finalization migration
+    # against a synthetic schema. Never contacts the NUC.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull PostgreSQL image
+        run: docker pull postgres:17.6
+      - name: Offline finalization migration suite
+        run: |
+          out=$(bash tests/offline-finalization.sh)
+          echo "$out"
+          echo "$out" | grep -q 'ALL OFFLINE FINALIZATION ASSERTIONS PASSED'

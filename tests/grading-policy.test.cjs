@@ -85,12 +85,52 @@ test('approved criterion wording, criticality, timing definitions, and tier rule
     '297d83f691d03ac3995abb2a323b0a119f9018696f847b77994164003f25bc0a');
 });
 
-for (const name of ['authoritativeEvaluationClient', 'openEvaluation',
-  'finalizeEvaluation', 'voidCurrentAttempt']) {
-  test(`server lifecycle remains unchanged: ${name}`, () => {
-    assert.equal(functionSource(current, name), functionSource(original, name));
+test('server lifecycle remains unchanged: authoritativeEvaluationClient', () => {
+  assert.equal(functionSource(current, 'authoritativeEvaluationClient'), functionSource(original, 'authoritativeEvaluationClient'));
+});
+
+// 3.4.13 adds offline field evaluation in front of the online server path.
+// Every approved baseline line must still be present, in order, so the online
+// claim, finalize, and void workflow is untouched. The only baseline lines that
+// may differ are the reviewed replacements below, and each replacement must be
+// present exactly as written.
+const APPROVED_LIFECYCLE_REPLACEMENTS = {
+  openEvaluation: [
+    ["function openEvaluation(studentId,attemptNo){", "function openEvaluation(studentId,attemptNo,options={}){"],
+    ["  if(attemptNo===2 && s.attempts?.['1']?.finalResult!=='FAIL'){alert('Attempt 2 is reserved for remediation after a finalized Attempt 1 FAIL.');return;}",
+      "  if(attemptNo===2){const blocked=attempt2BlockReason(s,{retestWithoutLocalA1});if(blocked){alert(blocked);return;}}"],
+    ["$('formModalBody').innerHTML=`<div class=\"startGate\">", "${retestWithoutLocalA1?'<div class=\"startWarning\"><b>Retest from another phone</b>"],
+    ["    if(btn){btn.disabled=true;btn.textContent='CLAIMING ASSESSMENT…';}", "    if(btn){btn.disabled=true;btn.textContent=offline?'STARTING OFFLINE…':'CLAIMING ASSESSMENT…';}"],
+    ["    let claimClient=null,claimedId='';", "    let claimClient=null,claimedId='',candidate=null;"],
+    ["      const candidate=makeAttempt(c,s,attemptNo);", "      candidate=makeAttempt(c,s,attemptNo);"],
+    ["      if(attemptNo===2)candidate.remediation={reason,action,at:now()};", "      if(attemptNo===2)candidate.remediation={reason,action,at:now(),...(retestWithoutLocalA1?{attempt1OnAnotherDevice:true}:{})};"]
+  ],
+  finalizeEvaluation: [],
+  voidCurrentAttempt: []
+};
+for (const [name, replacements] of Object.entries(APPROVED_LIFECYCLE_REPLACEMENTS)) {
+  test(`server lifecycle baseline is preserved: ${name}`, () => {
+    const before = functionSource(original, name).split('\n');
+    const after = functionSource(current, name);
+    const lines = after.split('\n');
+    let cursor = 0;
+    for (const line of before) {
+      const at = lines.indexOf(line, cursor);
+      if (at >= 0) { cursor = at + 1; continue; }
+      const approved = replacements.find(([old]) => line.startsWith(old) || line.includes(old));
+      assert.ok(approved, `Unapproved change to ${name}: ${line.slice(0, 140)}`);
+      assert.ok(after.includes(approved[1]), `Approved replacement missing in ${name}: ${approved[1].slice(0, 140)}`);
+    }
   });
 }
+
+test('offline finalization seals locally only when the server is unreachable or the claim is pending', () => {
+  const body = functionSource(current, 'finalizeEvaluation');
+  const offline = body.indexOf('if(!cloudReachable()||st.pendingServerClaim){');
+  const online = body.indexOf("client.rpc('finalize_evaluation_authoritatively'");
+  assert.ok(offline > 0 && online > offline, 'The local seal must be an explicit branch ahead of the unchanged server finalize');
+  assert.ok(functionSource(current, 'finalizeLocallyPendingServer').includes('st.pendingServerFinalization=true'));
+});
 
 test('claim protocol is unchanged apart from requiring confirmed roster synchronization', () => {
   const guard = "  const managesRoster=canAccessClass('manageRoster',c);\n" +

@@ -39,6 +39,7 @@ function harness(options = {}) {
     },
     async rpc(name, args) {
       calls.push({action:'rpc',name,args});
+      if (options.networkDrop) throw new TypeError('Failed to fetch');
       return {data:options.denied?{claimed:false,reason:'evaluation_owned_by_other_evaluator'}:
         {claimed:true,evaluationId:args.p_evaluation_id,startedAt:'2026-10-18T12:00:00Z'},error:null};
     }
@@ -58,9 +59,12 @@ function harness(options = {}) {
     serverActiveEvaluationText:()=> 'Other evaluator claim',now:()=>1,
     openModal(){},closeModal(){},renderClass(){},renderEval(){},requestEvalWakeLock(){},
     saveDb(){state.saved++;},showView(value){state.view=value;},alert:value=>alerts.push(value),
-    currentStudentId:null,currentAttemptNo:null,db:{deviceId:'device-1'}
+    currentStudentId:null,currentAttemptNo:null,db:{deviceId:'device-1'},
+    navigator:{onLine:options.offline!==true},
+    closureCheckInBlock:()=>'',attempt2BlockReason:()=>''
   });
-  vm.runInContext(functionSource('claimEvaluationOnServer')+'\n'+functionSource('openEvaluation'),context);
+  context.window.RAPS_CLOUD={connected:options.offline!==true,offlineCached:options.offline===true,user:{id:'evaluator-1'}};
+  vm.runInContext(['cloudReachable','isConnectivityFailure','activateLocalOfflineAttempt','claimEvaluationOnServer','openEvaluation'].map(functionSource).join('\n'),context);
   return {course,alerts,calls,state,async begin(){
     context.openEvaluation('learner-1',1);
     await node('beginAttemptBtn').onclick();
@@ -101,4 +105,31 @@ test('a server-denied claim creates no local evaluation after successful sync', 
   assert.deepEqual(f.course.students[0].attempts,{});
   assert.equal(f.state.saved,0);
   assert.match(f.alerts[0],/owned by another evaluator/);
+});
+
+test('offline start creates a sealed-claim-pending field record without contacting the server', async () => {
+  const f=harness({offline:true}); await f.begin();
+  assert.deepEqual(f.calls,[],'No server call while offline');
+  const a=f.course.students[0].attempts[1];
+  assert.equal(a.pendingServerClaim,true);
+  assert.equal(a.offlineStarted,true);
+  assert.equal(a.fieldStartedAt,a.startedAt);
+  assert.equal(a.cloudEvaluatorUserId,'evaluator-1');
+  assert.equal(f.state.saved,1);
+  assert.equal(f.state.view,'evalView');
+  assert.deepEqual(f.alerts,[]);
+});
+
+test('a connection drop during the claim continues as an offline field record', async () => {
+  const f=harness({networkDrop:true}); await f.begin();
+  const a=f.course.students[0].attempts[1];
+  assert.equal(a.pendingServerClaim,true);
+  assert.equal(f.state.view,'evalView');
+  assert.match(f.alerts[0],/NETWORK UNAVAILABLE/);
+});
+
+test('a permission failure while online never becomes an offline start', async () => {
+  const f=harness({syncError:true}); await f.begin();
+  assert.deepEqual(f.course.students[0].attempts,{});
+  assert.match(f.alerts[0],/ASSESSMENT NOT STARTED/);
 });

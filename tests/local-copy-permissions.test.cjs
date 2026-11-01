@@ -58,7 +58,8 @@ function fixture() {
     'classPermissionContext','currentCloudClient','hasClassCloseAccess','isClassClosed','closureIssues',
     'syncClassForAuthoritativeClose','closeClass','prepareBackupClass','unverifiedLocalClasses',
     'renderLocalRecoveryNotice','guardClassExport','scrubPrivateViews','refreshPrivateViewAccess','importRoster',
-    'attemptBelongsToCurrentEvaluator','findActiveEvaluationLock','resumeActiveEvaluation','renderLearnerPracticeHistory'];
+    'attemptBelongsToCurrentEvaluator','findActiveEvaluationLock','resumeActiveEvaluation','renderLearnerPracticeHistory',
+    'cloudReachable','attemptAwaitingSync','refreshClosureGate'];
   const storeStart = app.indexOf('window.RAPS_CLASS_STORE = Object.freeze({');
   const storeEnd = app.indexOf("\n\nwindow.addEventListener('raps-evaluation-tombstoned'", storeStart);
   assert.ok(storeStart >= 0 && storeEnd > storeStart);

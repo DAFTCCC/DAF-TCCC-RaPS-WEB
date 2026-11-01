@@ -80,6 +80,10 @@ function boundRequestContext(identity, scopeCheck) {
     check();
     if (!bound) abort();
     return wrap(bound.from(table));
+  }, rpc(name, args) {
+    check();
+    if (!bound) abort();
+    return wrap(bound.rpc(name, args));
   }}};
 }
 
@@ -252,7 +256,10 @@ async function pushEvaluation(c,s,a,options={}){
   // Terminal lifecycle is server-authoritative in v3.4.11+.
   // Criteria/timers are pushed before finalize/void; once the server marks
   // the parent terminal, background sync must not attempt a direct rewrite.
-  if(a?.finalizedAt||a?.voidedAt){
+  // Exception: a field record sealed offline uploads its evidence once during
+  // reconciliation, while the server row is still in progress.
+  const sealedFieldUpload=options?.offlineReconcile===true&&a?.pendingServerFinalization&&!a?.voidedAt;
+  if((a?.finalizedAt&&!sealedFieldUpload)||a?.voidedAt){
     return false;
   }
 
@@ -447,7 +454,13 @@ async function pushEvaluation(c,s,a,options={}){
     remediation:a.remediation||null,
     appVersion:a.appVersion||'',
     contentVersion:a.contentVersion||'',
-    scenarioVersion:a.scenarioVersion||'1'
+    scenarioVersion:a.scenarioVersion||'1',
+    // Field evidence: when the assessment really happened on the device.
+    // Kept separately from server claim/finalization/verification times.
+    ...(a.fieldStartedAt?{fieldStartedAt:Number(a.fieldStartedAt)}:{}),
+    ...(a.fieldFinalizedAt?{fieldFinalizedAt:Number(a.fieldFinalizedAt)}:{}),
+    ...(a.fieldFinalResult?{fieldFinalResult:String(a.fieldFinalResult).toUpperCase()}:{}),
+    ...(a.offlineStarted?{offlineStarted:true}:{})
   };
 
   const {data:updated,error:updateError}=await client.from('evaluations').update({
@@ -517,6 +530,8 @@ async function pullEvaluation(c,s,a,options={}){
   const currentRemovalTarget=()=>getStore()?.getClass?.(c.id)===c
     &&(c.students||[]).includes(s)&&Object.values(s.attempts||{}).includes(originalAttempt);
   if(verifyRemoval&&(!currentRemovalTarget()||a.cloudShellOnly||!a.finalizedAt||a.voidedAt))return false;
+  // Never replace a field record that has not completed reconciliation.
+  if(!options?.afterReconcile&&(a.pendingServerClaim||a.pendingServerFinalization||a.syncConflict))return false;
   const {data:row,error}=await client.from('evaluations')
     .select('id,event_id,participant_id,attempt_number,status,overall_result,score_numerator,score_denominator,started_at,completed_at,app_data,client_modified_at,updated_at,source_device_id,curriculum_version_id,evaluator_id')
     .eq('id',a.id).maybeSingle();
@@ -604,6 +619,10 @@ async function pullEvaluation(c,s,a,options={}){
     startedByUserId:row.evaluator_id||'',startedByDeviceId:'',studentSign:'',overallNotes:'',remediation:null};
   for(const [key,value] of Object.entries(appDefaults))a[key]=cloneJson(app[key]??value);
   a.cloudEvaluatorUserId=row.evaluator_id||'';
+  for(const key of ['fieldStartedAt','fieldFinalizedAt'])a[key]=Number(app[key])||null;
+  a.fieldFinalResult=app.fieldFinalResult?String(app.fieldFinalResult).toUpperCase():null;
+  a.offlineStarted=!!app.offlineStarted;
+  a.serverAuditConfirmation=app.serverAuditConfirmation?cloneJson(app.serverAuditConfirmation):null;
   a.showNt=!!app.showNt;
   a.observeMode=app.observeMode!==false;
   a.fieldMode=a.observeMode;
@@ -754,6 +773,175 @@ async function resolveConflict(c,s,a,strategy){
   return true;
 }
 
+// ---------- Offline field record reconciliation ----------
+// Runs one record at a time: claim -> upload evidence -> server finalization ->
+// field-time audit confirmation -> adopt the canonical server record. Every
+// step can be repeated safely. A failure leaves the sealed field record on the
+// device; nothing is marked synced until the server confirms it.
+function needsReconcile(a){return !!a&&!!a.id&&!a.cloudShellOnly&&!a.voidedAt&&!a.syncConflict&&(a.pendingServerClaim||a.pendingServerFinalization);}
+function rpcMissing(error){const m=String(error?.message||'');return error?.code==='PGRST202'||error?.code==='42883'||/could not find the function|does not exist/i.test(m);}
+function markSyncConflict(a,kind,message,extra={}){
+  a.syncConflict={kind,message,detectedAt:Date.now(),...extra};
+  a.serverVerificationStatus='conflict';
+  patchAttempt(a,{status:'conflict',error:message});
+}
+async function serverAttempt1State(client,c,s){
+  const {data,error}=await client.from('evaluations').select('id,status,overall_result,evaluator_id')
+    .eq('event_id',c.id).eq('participant_id',s.id).in('attempt_number',[1]);
+  if(error)throw error;
+  const rows=(data||[]).filter(r=>String(r.status)!=='voided');
+  return rows.find(r=>String(r.status)==='finalized')||rows[0]||null;
+}
+async function reconcileOfflineAttempt(c,s,a){
+  const cloud=getCloud(),store=getStore(),context=permissionContext(c,'evaluate');
+  if(!getClient()||!context||!cloud?.user?.id||!navigator.onLine||!needsReconcile(a))return false;
+  await context.ready();
+  const client=context.client,userId=String(cloud.user.id),deviceId=store?.deviceId?.()||null;
+  if(attemptEvaluatorId(a)&&attemptEvaluatorId(a)!==userId){
+    patchAttempt(a,{status:'error',error:'Sign in as the evaluator who recorded this assessment to sync it.'});return false;
+  }
+  patchAttempt(a,{status:'syncing',error:'Syncing field record…'});
+  try{
+    // 1. Server claim (idempotent: a repeat returns this same evaluation).
+    if(a.pendingServerClaim){
+      const {data:eventRow,error:eventError}=await client.from('evaluation_events').select('id,curriculum_version_id,status').eq('id',c.id).maybeSingle();
+      if(eventError)throw eventError;
+      if(!eventRow?.curriculum_version_id)throw new Error('The class event is not ready on the server. A class manager must Sync Classes first.');
+      let claim,claimError;
+      try{({data:claim,error:claimError}=await client.rpc('claim_evaluation_authoritatively',{
+        p_evaluation_id:a.id,p_event_id:c.id,p_participant_id:s.id,p_curriculum_version_id:eventRow.curriculum_version_id,
+        p_attempt_number:Number(a.attemptNo||1),p_source_device_id:deviceId}));}
+      catch(error){claimError=error;}
+      context.check();
+      const claimMessage=String(claimError?.message||'');
+      if(claimError&&/different evaluator/i.test(claimMessage)){
+        markSyncConflict(a,'same_evaluator_retest','The server rejected this retest: Attempt 2 must be evaluated by a different evaluator than Attempt 1.');return false;
+      }
+      if(claimError&&Number(a.attemptNo)!==2)throw claimError;
+      claim=claim||{};
+      const canonicalId=String(claim.evaluationId||claim.existingEvaluationId||'');
+      if(claim.claimed&&(!canonicalId||canonicalId===String(a.id))){
+        a.pendingServerClaim=false;a.waitingForAttempt1=false;
+        a.serverClaimMode='authoritative-v1';a.serverClaimedAt=ms(claim.startedAt)||Date.now();a.serverClaimedBy=userId;
+        a.fieldStartedAt=a.fieldStartedAt||a.startedAt;
+        persist();
+      }else if(claim.claimed||claim.reason==='evaluation_owned_by_other_evaluator'||(canonicalId&&canonicalId!==String(a.id))){
+        markSyncConflict(a,'duplicate_attempt','Another evaluator already recorded Attempt '+Number(a.attemptNo||1)+' for this student. The server record is official; this phone\'s record was kept for review.',{canonicalEvaluationId:canonicalId});
+        return false;
+      }else if(claim.reason==='active_evaluation_exists'){
+        patchAttempt(a,{status:'error',error:'You have another evaluation in progress on the server. Finalize or void it, then Sync Classes again.'});return false;
+      }else if(Number(a.attemptNo)===2){
+        // The retest waits until the Attempt 1 FAIL from another phone reaches the server.
+        const first=await serverAttempt1State(client,c,s);
+        if(first&&String(first.status)==='finalized'&&String(first.overall_result||'').toLowerCase()==='pass'){
+          markSyncConflict(a,'retest_after_pass','The server shows Attempt 1 as PASS, so this retest is not allowed. The record was kept for review.');return false;
+        }
+        if(first&&String(first.status)==='finalized'&&String(first.evaluator_id)===userId){
+          markSyncConflict(a,'same_evaluator_retest','You evaluated Attempt 1, so you cannot conduct the retest. The record was kept for review.');return false;
+        }
+        a.waitingForAttempt1=true;
+        patchAttempt(a,{status:'pending',error:'Waiting for the Attempt 1 FAIL from another phone to sync. Have that evaluator Sync Classes, then sync again.'});
+        return false;
+      }else{
+        markSyncConflict(a,'claim_rejected','The server did not accept this field record ('+String(claim.reason||claimMessage||'unknown reason')+'). The record was kept for review.');return false;
+      }
+    }
+
+    // 2. Upload criteria, timers, and field evidence, unless an earlier
+    // interrupted run already finalized this record on the server.
+    const {data:row,error:rowError}=await client.from('evaluations').select('id,status,overall_result,completed_at,evaluator_id').eq('id',a.id).maybeSingle();
+    if(rowError)throw rowError;
+    if(!row)throw new Error('The server claim for this field record was not found. Sync Classes again.');
+    if(String(row.status)!=='finalized'){
+      const pushed=await pushEvaluation(c,s,a,{skipRosterSync:true,offlineReconcile:true});
+      context.check();
+      if(!pushed)throw new Error(attemptState(a).error||'Field evidence did not upload.');
+    }else if(String(row.evaluator_id)!==userId){
+      markSyncConflict(a,'duplicate_attempt','This record is finalized on the server by another evaluator. The record on this phone was kept for review.',{canonicalEvaluationId:String(row.id)});return false;
+    }
+    if(!a.pendingServerFinalization){patchAttempt(a,{status:'synced',error:''});return true;}
+
+    // 3. Server finalization, unless an earlier interrupted run already did it.
+    let serverResult='',completedAt=0;
+    if(String(row?.status)==='finalized'){
+      serverResult=String(row.overall_result||'').toUpperCase();completedAt=ms(row.completed_at);
+    }else{
+      const {data:fin,error:finError}=await client.rpc('finalize_evaluation_authoritatively',{p_evaluation_id:a.id,p_source_device_id:deviceId});
+      context.check();
+      if(finError)throw finError;
+      if(!fin?.finalized){
+        const issues=Array.isArray(fin?.issues)?fin.issues:[];
+        markSyncConflict(a,'server_rejected','The server did not verify this evaluation: '+(issues.length?issues.slice(0,5).join(' | '):String(fin?.reason||'unknown reason'))+'. The record was kept for review.',{issues});
+        return false;
+      }
+      serverResult=String(fin.result||'').toUpperCase();completedAt=ms(fin.completedAt)||Date.now();
+      a.serverFinalization={mode:'server_authoritative',finalizedAt:completedAt,result:serverResult,
+        scoreNumerator:Number(fin.scoreNumerator||0),scoreDenominator:Number(fin.scoreDenominator||0),
+        criticalFailureCount:Number(fin.criticalFailureCount||0),globalTimerNotMet:!!fin.globalTimerNotMet};
+    }
+
+    // 4. Confirm the field start/finish times and field result on the server.
+    const fieldResult=String(a.fieldFinalResult||a.finalResult||'').toUpperCase();
+    const {data:audit,error:auditError}=await client.rpc('confirm_offline_evaluation_audit',{
+      p_evaluation_id:a.id,p_field_started_at:iso(a.fieldStartedAt||a.startedAt),p_field_finalized_at:iso(a.fieldFinalizedAt||a.finalizedAt),
+      p_field_result:fieldResult||serverResult,p_source_device_id:deviceId});
+    context.check();
+    if(auditError){
+      if(rpcMissing(auditError))throw new Error('The RaPS server needs the offline evaluation update before field records can be verified. Contact the administrator.');
+      throw auditError;
+    }
+    a.serverResultDiffers=false;
+    if(!audit?.confirmed){
+      if(audit?.reason==='field_result_mismatch'){
+        a.serverResultDiffers=true;
+      }else{
+        markSyncConflict(a,'audit_rejected','The server could not confirm the field times for this record ('+String(audit?.reason||'unknown reason')+'). The record was kept for review.');return false;
+      }
+    }
+
+    // 5. Done: adopt the canonical server record.
+    a.pendingServerFinalization=false;a.waitingForAttempt1=false;
+    a.serverVerificationStatus='verified';
+    a.finalResult=serverResult||fieldResult;
+    a.events=a.events||[];
+    a.events.push({at:completedAt||Date.now(),elapsed:Math.max(0,(a.fieldFinalizedAt||a.finalizedAt)-(a.fieldStartedAt||a.startedAt)),
+      label:'Server verification completed',detail:`${a.finalResult} · verified after field finalization on device`+(a.serverResultDiffers?` · server result differs from field result ${fieldResult}`:'')});
+    patchAttempt(a,{status:'synced',error:a.serverResultDiffers?`The server result (${serverResult}) differs from the result shown on this phone (${fieldResult}). The server result is official; review the record.`:''});
+    try{await pullEvaluation(c,s,a,{force:true,afterReconcile:true});}catch(error){console.warn('Canonical pull after reconciliation failed',a.id,error);}
+    return true;
+  }catch(error){
+    if(error?.code==='RAPS_SESSION_CHANGED')throw error;
+    patchAttempt(a,{status:navigator.onLine?'error':'offline',error:navigator.onLine?err(error):'Connection lost during sync. The field record is safe on this device.'});
+    console.warn('Offline field record reconciliation failed',a.id,error);
+    return false;
+  }
+}
+function attemptEvaluatorId(a){return String(a?.cloudEvaluatorUserId||a?.startedByUserId||'');}
+async function reconcilePendingOffline(){
+  const store=getStore(),permissions=window.RAPS_PERMISSIONS;
+  if(!store||!permissions?.snapshot||!navigator.onLine||!getCloud()?.user?.id)return {synced:0,remaining:0};
+  const identity=permissions.snapshot();if(!permissions.isCurrent(identity))return {synced:0,remaining:0};
+  const pending=[];
+  for(const c of store.getClasses().filter(x=>x?.cloudSync?.enabled&&!x.deletedAt&&!x.closedAt&&x.status!=='closed'&&!store.isLocalCopyHidden?.(x.id))){
+    for(const s of c.students||[])for(const a of Object.values(s.attempts||{}))if(needsReconcile(a))pending.push({c,s,a});
+  }
+  // Sealed records first (each releases the evaluator's server lock when it
+  // finalizes), oldest field start first, Attempt 1 before Attempt 2; an
+  // unfinished offline start is claimed last because it stays active.
+  pending.sort((x,y)=>(x.a.pendingServerFinalization?0:1)-(y.a.pendingServerFinalization?0:1)
+    ||Number(x.a.attemptNo||1)-Number(y.a.attemptNo||1)
+    ||Number(x.a.fieldStartedAt||x.a.startedAt||0)-Number(y.a.fieldStartedAt||y.a.startedAt||0));
+  let synced=0;
+  for(const {c,s,a} of pending){
+    if(!permissions.isCurrent(identity)||!navigator.onLine)break;
+    try{if(await reconcileOfflineAttempt(c,s,a))synced++;}
+    catch(error){if(error?.code==='RAPS_SESSION_CHANGED'||!permissions.isCurrent(identity))break;}
+  }
+  const remaining=pending.filter(x=>needsReconcile(x.a)).length;
+  window.dispatchEvent(new CustomEvent('raps-offline-reconcile-complete',{detail:{synced,remaining}}));
+  return {synced,remaining};
+}
+
 async function pullAll(){
   const store=getStore(),permissions=window.RAPS_PERMISSIONS;if(!store||!permissions?.snapshot)return 0;
   const identity=permissions.snapshot();if(!permissions.isCurrent(identity))return 0;let n=0;
@@ -775,7 +963,7 @@ async function pushAll(){
     for(const s of c.students||[]){
       for(const a of Object.values(s.attempts||{})){
         if(!permissions.isCurrent(identity))return n;
-        if(!a?.id||a.cloudShellOnly)continue;
+        if(!a?.id||a.cloudShellOnly||a.pendingServerClaim||a.pendingServerFinalization||a.syncConflict)continue;
         const state=attemptState(a),localMs=Number(a.modifiedAt||0),remoteMs=Number(state.remoteModifiedAt||0);
         if(state.status==='conflict')continue;
         if(state.status==='synced'&&state.baseGradingSignature===localGradingSignature(a)&&remoteMs&&localMs<=remoteMs+10)continue;
@@ -785,13 +973,24 @@ async function pushAll(){
   }
   return n;
 }
+let rerunRequested=false,currentRun=null;
+// One sync at a time. A request made while a run is active schedules exactly
+// one follow-up run instead of starting a competing one.
 async function syncAll(){
-  if(busy||!navigator.onLine||!getCloud()?.user?.id)return;
-  busy=true;
+  if(!navigator.onLine||!getCloud()?.user?.id)return;
+  if(busy){rerunRequested=true;return currentRun;}
+  busy=true;rerunRequested=false;
   const identity=window.RAPS_PERMISSIONS?.snapshot?.();
-  try{await pullAll();if(identity&&window.RAPS_PERMISSIONS?.isCurrent?.(identity))await pushAll();}
-  catch(error){if(identity&&window.RAPS_PERMISSIONS?.isCurrent?.(identity))console.warn('Grading sync failed',error);}
-  finally{busy=false}
+  currentRun=(async()=>{
+    try{
+      await pullAll();
+      if(identity&&window.RAPS_PERMISSIONS?.isCurrent?.(identity))await reconcilePendingOffline();
+      if(identity&&window.RAPS_PERMISSIONS?.isCurrent?.(identity))await pushAll();
+      if(identity&&window.RAPS_PERMISSIONS?.isCurrent?.(identity))await window.RAPS_CLOSURE_GATE?.reportAll?.();
+    }catch(error){if(identity&&window.RAPS_PERMISSIONS?.isCurrent?.(identity))console.warn('Grading sync failed',error);}
+    finally{busy=false;currentRun=null;if(rerunRequested&&navigator.onLine){rerunRequested=false;setTimeout(()=>syncAll(),150);}}
+  })();
+  return currentRun;
 }
 function queue(classId){
   clearTimeout(timers.get(classId));
@@ -807,11 +1006,12 @@ window.addEventListener('raps-cloud-identity',()=>{
   syncAll();
 });
 window.addEventListener('online',()=>syncAll());
+window.addEventListener('raps-offline-evaluation-sealed',()=>{if(navigator.onLine)syncAll();});
 
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>syncAll(),{once:true});
 else syncAll();
 
-window.RAPS_GRADING_SYNC_BUILD='3.4.12-web.13';
+window.RAPS_GRADING_SYNC_BUILD='3.4.13-web.1';
 window.RAPS_GRADING_SYNC=Object.freeze({
   syncAll,
   pushEvaluation,
@@ -819,6 +1019,8 @@ window.RAPS_GRADING_SYNC=Object.freeze({
   verifyEvaluationForLocalRemoval,
   pullAll,
   pushAll,
+  reconcilePendingOffline,
+  reconcileOfflineAttempt,
   inspectConflict,
   resolveConflict,
   localGradingSignature
