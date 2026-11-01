@@ -159,16 +159,121 @@ function normalizeDb(x){
   });
   return x;
 }
+// ---------- Device storage ----------
+// IndexedDB is the durable store: every save also writes each class as its own
+// record there. localStorage stays the fast, synchronous startup cache. When the
+// cache is full, closed or fully synchronized classes are kept in IndexedDB only
+// (a small stub stays in the cache); anything with unsynced work always stays in
+// both. Startup opens from the cache and restores IndexedDB-only classes moments
+// later, or the whole database if the cache was cleared.
+const IDB_NAME='raps-local-v1',IDB_CLASSES='classes',IDB_META='meta';
+const idbPendingHydration=new Set();
+let idbHandle=null,idbWriteChain=Promise.resolve(),idbUnavailable=false;
+// Durable writes wait for startup restore: an early save must never mistake an
+// empty or partial startup database for deletions and erase the durable copy.
+let idbHydrationGate=Promise.resolve(),idbQueued=null;
+function idbOpen(){
+  if(idbUnavailable||typeof indexedDB==='undefined')return Promise.resolve(null);
+  return idbHandle||=new Promise(resolve=>{
+    let req;
+    try{req=indexedDB.open(IDB_NAME,1);}catch{idbUnavailable=true;resolve(null);return;}
+    req.onupgradeneeded=()=>{const d=req.result;if(!d.objectStoreNames.contains(IDB_CLASSES))d.createObjectStore(IDB_CLASSES,{keyPath:'id'});if(!d.objectStoreNames.contains(IDB_META))d.createObjectStore(IDB_META);};
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>{idbUnavailable=true;resolve(null);};
+    req.onblocked=()=>resolve(null);
+  });
+}
+function idbDone(tx){return new Promise((resolve,reject)=>{tx.oncomplete=()=>resolve(true);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('IndexedDB write aborted'));});}
+// Mirror the whole database: upsert present classes, remove classes that are
+// gone, but never remove a class that is still waiting to be restored.
+function idbMirror(snapshot){
+  // Coalesce bursts of saves (each grading tap) into one write of the latest state.
+  const pending=idbQueued!==null;
+  idbQueued=JSON.parse(JSON.stringify(snapshot));
+  if(pending)return idbWriteChain;
+  idbWriteChain=idbWriteChain.catch(()=>{}).then(()=>idbHydrationGate).then(async()=>{
+    const copy=idbQueued;idbQueued=null;
+    const d=await idbOpen();if(!d)return false;
+    const tx=d.transaction([IDB_CLASSES,IDB_META],'readwrite'),classes=tx.objectStore(IDB_CLASSES);
+    const present=new Set((copy.classes||[]).map(c=>c.id));
+    const keys=await new Promise((resolve,reject)=>{const r=classes.getAllKeys();r.onsuccess=()=>resolve(r.result||[]);r.onerror=()=>reject(r.error);});
+    for(const key of keys)if(!present.has(key)&&!idbPendingHydration.has(key))classes.delete(key);
+    for(const c of copy.classes||[])classes.put(c);
+    const meta={...copy};delete meta.classes;tx.objectStore(IDB_META).put(meta,'db');
+    await idbDone(tx);
+    window.rapsDeviceStorage={...(window.rapsDeviceStorage||{}),durableAt:now(),error:''};
+    return true;
+  }).catch(error=>{
+    console.warn('IndexedDB mirror failed',error);
+    window.rapsDeviceStorage={...(window.rapsDeviceStorage||{}),error:'Durable device storage did not save the latest change.'};
+    return false;
+  });
+  return idbWriteChain;
+}
+function classArchivableFromCache(c){
+  if(!c||idbPendingHydration.has(c.id))return false;
+  if(readRosterWithdrawals(c.id).length||readTrashOutbox(c.id))return false;
+  for(const s of c.students||[])for(const a of Object.values(s.attempts||{})){
+    if(!a||a.cloudShellOnly)continue;
+    if(a.startedAt&&!a.finalizedAt&&!a.voidedAt)return false;
+    if(a.pendingServerClaim||a.pendingServerFinalization||a.syncConflict)return false;
+    if(!isClassClosed(c)&&String(a.cloudGrading?.status||'synced')!=='synced')return false;
+  }
+  if(isClassClosed(c))return true;
+  return c.cloudSync?.enabled===true&&c.cloudSync?.status==='synced'&&c.cloudRosterSync?.status==='synced';
+}
+function compactCacheSnapshot(snapshot){
+  const stub=c=>({id:c.id,archivedToDevice:true,name:c.name||'',closedAt:c.closedAt||null,modifiedAt:c.modifiedAt||0});
+  const classes=(snapshot.classes||[]).map(c=>classArchivableFromCache(c)?stub(c):c);
+  for(const id of idbPendingHydration)if(!classes.some(c=>c.id===id))classes.push({id,archivedToDevice:true});
+  return {...snapshot,classes};
+}
+// The single write path for the class database.
+function writeDbSnapshot(snapshot=db){
+  void idbMirror(snapshot);
+  const withPending=idbPendingHydration.size?{...snapshot,classes:[...(snapshot.classes||[]),...[...idbPendingHydration].filter(id=>!(snapshot.classes||[]).some(c=>c.id===id)).map(id=>({id,archivedToDevice:true}))]}:snapshot;
+  try{localStorage.setItem(DB_KEY,JSON.stringify(withPending));window.rapsDeviceStorage={...(window.rapsDeviceStorage||{}),compacted:false};return;}
+  catch(error){
+    try{localStorage.setItem(DB_KEY,JSON.stringify(compactCacheSnapshot(snapshot)));window.rapsDeviceStorage={...(window.rapsDeviceStorage||{}),compacted:true};return;}
+    catch{throw error;}
+  }
+}
+async function hydrateFromIndexedDb(){
+  const d=await idbOpen();if(!d)return 0;
+  const tx=d.transaction([IDB_CLASSES,IDB_META],'readonly');
+  const get=(store,key)=>new Promise((resolve,reject)=>{const r=key===undefined?tx.objectStore(store).getAll():tx.objectStore(store).get(key);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
+  const [stored,meta]=await Promise.all([get(IDB_CLASSES),get(IDB_META,'db')]);
+  let restored=0;
+  // Cache cleared (or evicted) but durable copy present: adopt it, including the device identity.
+  if(!(db.classes||[]).length&&!idbPendingHydration.size&&Array.isArray(stored)&&stored.length){
+    const recovered=normalizeDb({...(meta||{}),classes:stored});
+    if(recovered){db=recovered;restored=stored.length;}
+  }else{
+    for(const c of stored||[]){
+      if(!idbPendingHydration.has(c.id))continue;
+      if(!db.classes.some(x=>x.id===c.id)){const n=normalizeDb({schemaVersion:5,deviceId:db.deviceId,classes:[c]})?.classes?.[0];if(n){db.classes.push(n);restored++;}}
+      idbPendingHydration.delete(c.id);
+    }
+  }
+  if(restored){try{writeDbSnapshot(db);}catch{}renderHome();if(currentClassId&&!$('classView')?.classList.contains('hidden'))renderClass();}
+  return restored;
+}
 function loadDb(){
   for(const key of [DB_KEY,...LEGACY_DB_KEYS]){
     try{
-      const x=normalizeDb(JSON.parse(localStorage.getItem(key)));
-      if(x){ if(key!==DB_KEY)localStorage.setItem(DB_KEY,JSON.stringify(x)); return x; }
+      const raw=JSON.parse(localStorage.getItem(key));
+      if(raw&&Array.isArray(raw.classes)){
+        for(const c of raw.classes)if(c?.archivedToDevice)idbPendingHydration.add(c.id);
+        raw.classes=raw.classes.filter(c=>c&&!c.archivedToDevice);
+      }
+      const x=normalizeDb(raw);
+      if(x){ if(key!==DB_KEY)writeDbSnapshot(x); return x; }
     }catch{}
   }
   const ts=now();return {schemaVersion:5,appVersion:APP_VERSION,deviceId:`device-${uuid()}`,createdAt:ts,modifiedAt:ts,syncStatus:SYNC_LOCAL,classes:[]};
 }
 db = loadDb();
+window.rapsDeviceStorageReady=idbHydrationGate=hydrateFromIndexedDb().catch(error=>{console.warn('IndexedDB restore failed',error);return 0;});
 
 function sameTrashAction(a,b){return !!a&&!!b&&a.kind===b.kind&&Number(a.requestedAt)===Number(b.requestedAt);}
 function readTrashOutbox(classId){
@@ -240,7 +345,7 @@ function recoverTrashActions(){
     applyTrashAction(c,a);changed=true;
   }
   if(changed){
-    try{localStorage.setItem(DB_KEY,JSON.stringify(db));}
+    try{writeDbSnapshot(db);}
     catch{window.rapsLocalSaveState={at:0,error:'Queued class changes were recovered, but device storage could not save the class database.'};}
     if(cls()?.deletedAt)showHome();
     else renderHome();
@@ -291,7 +396,7 @@ function saveDb(targetClassId=currentClassId){
   }
   try{
     discardExcludedCleanCopies();
-    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    writeDbSnapshot(db);
     window.rapsLocalSaveState={at:ts,error:''};
   }catch(error){
     window.rapsLocalSaveState={at:0,error:'Device storage could not save this change. Free storage or export a backup before continuing.'};
@@ -331,7 +436,7 @@ function resolveRosterWithdrawal(classId,studentId,outcome={}){
     const c=db.classes.find(x=>x.id===classId);
     if(c){
       c.rosterNotice={message:String(outcome.message||'A removed student was restored because assessment records exist.'),at:now()};
-      localStorage.setItem(DB_KEY,JSON.stringify(db));
+      writeDbSnapshot(db);
     }
   }
   return true;
@@ -538,7 +643,7 @@ function renderRosterNotice(c){
   el.classList.remove('hidden');
   el.innerHTML=`<div><b>ROSTER UPDATE</b><span>${esc(notice.message)}</span></div><button id="dismissRosterNoticeBtn" class="action compact" type="button">Dismiss</button>`;
   const b=$('dismissRosterNoticeBtn');
-  if(b)b.onclick=()=>{const current=db.classes.find(x=>x.id===c.id);if(current){delete current.rosterNotice;localStorage.setItem(DB_KEY,JSON.stringify(db));}renderRosterNotice(current);};
+  if(b)b.onclick=()=>{const current=db.classes.find(x=>x.id===c.id);if(current){delete current.rosterNotice;writeDbSnapshot(db);}renderRosterNotice(current);};
 }
 function allItems(t=tier()){ return t ? t.sections.flatMap(s=>s.items.map(i=>({...i,section:s.code,sectionTitle:s.title}))) : []; }
 function itemById(id){ return allItems().find(i=>i.id===id); }
@@ -648,7 +753,7 @@ function createClass(data){
   const ts=now();const c={id:uuid(),name:String(data.name||'').trim(),tierId:data.tierId,roster:String(data.roster||'').trim(),scenario:String(data.scenario||'').trim(),scenarioVersion:String(data.scenarioVersion||'1').trim()||'1',date:data.date,siteCode:String(data.siteCode||'').trim(),courseType:String(data.courseType||'initial'),scenarioDifficulty:String(data.scenarioDifficulty||'standard'),scenarioProfile:String(data.scenarioProfile||'').trim(),leadEvaluator:String(data.leadEvaluator||'').trim(),evaluatorId:String(data.evaluatorId||'').trim(),curriculumId:`TCCC-TIER${data.tierId}`,appVersion:APP_VERSION,createdAt:ts,modifiedAt:ts,deviceId:db.deviceId,lastModifiedDeviceId:db.deviceId,syncStatus:SYNC_LOCAL,status:'draft',closedAt:null,closedBy:'',deletedAt:null,scenarioNT:[],students:[],cloudSync:{enabled:true,status:navigator.onLine?'pending':'offline',error:'',createdBy:'',lastSyncedAt:0,localModifiedAt:ts,remoteModifiedAt:0},contentVersion:`${source.source} | app ${APP_VERSION}`,tierSnapshot:deep(source)};
   c.localCreatedByUserId=currentCloudUserId();
   applyClassLocationFields(c,data);db.classes.unshift(c);saveDb();
-  localStorage.setItem(DB_KEY,JSON.stringify(db));
+  writeDbSnapshot(db);
   window.dispatchEvent(new CustomEvent('raps-local-class-change',{detail:{classId:c.id,at:ts}}));
   return c;
 }
@@ -931,12 +1036,14 @@ async function removeLocalClassCopy(id,button){
   let previous=null;
   try{
     const saved=JSON.parse(localStorage.getItem(DB_KEY));
-    const savedClass=saved?.classes?.find(x=>x.id===id);
+    const cachedClass=saved?.classes?.find(x=>x.id===id);
+    // A class archived to durable storage is not in the cache; compare in memory.
+    const savedClass=cachedClass?.archivedToDevice?c:cachedClass;
     if(!savedClass||JSON.stringify(savedClass)!==JSON.stringify(c)){alert('This class changed in another tab. Reload RaPS and sync before removing its local copy.');return;}
     previous=localStorage.getItem(LOCAL_COPY_EXCLUSION_PREFIX+id);
     localStorage.setItem(LOCAL_COPY_EXCLUSION_PREFIX+id,JSON.stringify({classId:id,userId:currentCloudUserId(),removedAt:now()}));
-    const nextDb={...saved,classes:saved.classes.filter(x=>x.id!==id)};
-    try{localStorage.setItem(DB_KEY,JSON.stringify(nextDb));}
+    const nextDb={...saved,classes:saved.classes.filter(x=>x.id!==id&&!x.archivedToDevice).concat(db.classes.filter(x=>x.id!==id&&saved.classes.some(y=>y.id===x.id&&y.archivedToDevice)))};
+    try{writeDbSnapshot(nextDb);}
     catch(error){if(previous===null)clearLocalCopyHidden(id);else localStorage.setItem(LOCAL_COPY_EXCLUSION_PREFIX+id,previous);throw error;}
     db=normalizeDb(nextDb)||nextDb;
   }catch{alert('The local copy was kept because browser storage could not save its removal. Free storage and try again.');return;}
@@ -1206,6 +1313,7 @@ function renderClass(){
     classConflictBtn.title=c.cloudSync?.error||'Resolve class metadata conflict';
   }
   renderClosureGate(c);
+  renderOfflineReady(c);
   const closeBtn=$('closeClassBtn'),canClose=hasClassCloseAccess();if(closeBtn){closeBtn.classList.toggle('hidden',closed||!canClose);closeBtn.disabled=!canClose;closeBtn.textContent='Verify & Close Class';}$('closedBanner').classList.toggle('hidden',!closed);
   const deleteBtn=$('deleteClassBtn');
   if(deleteBtn){
@@ -1488,6 +1596,38 @@ async function syncClassForAuthoritativeClose(c){
   }
   return client;
 }
+// ---------- Offline Ready ----------
+// One answer per class to "can this device run today's evaluations with no
+// connection?" Each check names its fix.
+function offlineReadiness(c){
+  const cloud=window.RAPS_CLOUD||{},cfg=window.RAPS_CLOUD_CONFIG||{},checks=[];
+  const add=(ok,label,fix,warn=false)=>checks.push({ok:!!ok,label,fix,warn});
+  let identityCached=false;try{identityCached=!!localStorage.getItem(cfg.identityCacheKey||'RAPS_CLOUD_IDENTITY_V1');}catch{}
+  add(cloud.user?.id&&identityCached,'Sign-in saved for offline use','Sign in while connected.');
+  add(canAccessClass('evaluate',c,{online:false}),'You can evaluate in this class','Ask a Program Manager to assign you to this class.');
+  add(!('serviceWorker' in navigator)||!!navigator.serviceWorker.controller,'App saved for offline use','Reload RaPS once while connected.');
+  add(!!c?.tierSnapshot?.sections?.length,'Curriculum on this device','Open the class while connected.');
+  const synced=!c?.cloudSync?.enabled||(c.cloudSync.status==='synced'&&(c.students||[]).length>0);
+  add(synced,'Class and roster downloaded','Tap Sync Classes while connected.');
+  add(!idbUnavailable&&!window.rapsDeviceStorage?.error,'Records protected by durable storage','Use a normal (not private) browser window, or the installed app.');
+  if(window.rapsStoragePersisted===false)add(false,'Browser will keep this app\'s data','Install RaPS to the Home Screen.',true);
+  const last=Math.max(Number(c?.cloudSync?.lastSyncedAt||0),Number(c?.cloudRosterSync?.lastSyncedAt||0));
+  if(c?.cloudSync?.enabled)add(last&&now()-last<18*3600000,'Synced within the last 18 hours','Tap Sync Classes before leaving the connection.',true);
+  const conflicts=(c?.students||[]).reduce((n,s)=>n+Object.values(s.attempts||{}).filter(a=>a?.syncConflict).length,0);
+  if(conflicts)add(false,`${conflicts} sync conflict${conflicts===1?'':'s'} to review`,'Review conflicts on the roster.',true);
+  const blocking=checks.filter(x=>!x.ok&&!x.warn),warnings=checks.filter(x=>!x.ok&&x.warn);
+  return {ready:!blocking.length,blocking,warnings,checks};
+}
+function renderOfflineReady(c){
+  const el=$('offlineReadyPanel');if(!el)return;
+  if(!c||isClassClosed(c)||!canAccessClass('evaluate',c,{online:false})){el.classList.add('hidden');el.innerHTML='';return;}
+  const r=offlineReadiness(c);el.classList.remove('hidden');
+  el.dataset.state=r.ready?(r.warnings.length?'warn':'ready'):'blocked';
+  const head=r.ready?(r.warnings.length?'OFFLINE READY · CHECK WARNINGS':'OFFLINE READY'):'NOT OFFLINE READY';
+  const lines=[...r.blocking,...r.warnings].map(x=>`<li>${x.warn?'⚠':'✕'} ${esc(x.label)} — ${esc(x.fix)}</li>`).join('');
+  el.innerHTML=`<b>${head}</b>${lines?`<ul>${lines}</ul>`:'<span>Evaluations can be started, graded, and finalized on this device without a connection.</span>'}`;
+}
+
 // ---------- Multi-device closure gate ----------
 function closureTime(value){if(!value)return '—';const d=new Date(value);return Number.isFinite(d.getTime())?d.toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—';}
 function renderClosureGate(c){
@@ -1520,7 +1660,7 @@ async function refreshClosureGate(classId,{report=false,quiet=false}={}){
     const status=await window.RAPS_CLOSURE_GATE.status(classId);
     const live=db.classes.find(x=>x.id===classId);if(!live)return null;
     live.closureGateStatus={...status,fetchedAt:now()};
-    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    writeDbSnapshot(db);
     if(currentClassId===classId&&!$('classView')?.classList.contains('hidden'))renderClass();
     return status;
   }catch(error){if(!quiet)alert('Phone status is unavailable: '+(error?.message||error));return null;}
@@ -3077,7 +3217,7 @@ window.RAPS_CLASS_STORE = Object.freeze({
   patchCloudState:(id,patch)=>{
     const c=db.classes.find(x=>x.id===id);if(!c)return null;
     c.cloudSync={...(c.cloudSync||{}),...(patch||{})};
-    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    writeDbSnapshot(db);
     renderHome();
     if(currentClassId===id&&!$('classView')?.classList.contains('hidden'))renderClass();
     return c;
@@ -3085,14 +3225,14 @@ window.RAPS_CLASS_STORE = Object.freeze({
   patchRosterCloudState:(id,patch)=>{
     const c=db.classes.find(x=>x.id===id);if(!c)return null;
     c.cloudRosterSync={...(c.cloudRosterSync||{}),...(patch||{})};
-    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    writeDbSnapshot(db);
     renderHome();
     if(currentClassId===id&&!$('classView')?.classList.contains('hidden'))renderClass();
     return c;
   },
   persistCloudMerge:()=>{
     discardExcludedCleanCopies();
-    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    writeDbSnapshot(db);
     renderHome();
     if(currentClassId&&!$('classView')?.classList.contains('hidden'))renderClass();
   },
@@ -3108,7 +3248,7 @@ window.RAPS_CLASS_STORE = Object.freeze({
       db.classes[idx]={...current,...remote,students};
       ensureLocationFields(db.classes[idx]);
     }
-    localStorage.setItem(DB_KEY,JSON.stringify(db));
+    writeDbSnapshot(db);
     if(excluded)clearLocalCopyHidden(remote.id);
     if(remote.deletedAt&&currentClassId===remote.id){releaseEvalWakeLock();showHome();}
     renderHome();
@@ -3135,7 +3275,7 @@ renderHome();
 
 // Web/PWA bootstrap only. Evaluator/data logic above is shared with APK v3.0.0.
 (function initRapsPwaUpdateManager(){
-  const UPDATE_BUILD = '3.4.13-web.1';
+  const UPDATE_BUILD = '3.4.13-web.2';
   const MIN_CHECK_INTERVAL_MS = 60 * 1000;
   const PERIODIC_CHECK_MS = 15 * 60 * 1000;
 
@@ -3374,4 +3514,8 @@ renderHome();
   });
 })();
 
-if (navigator.storage?.persist) navigator.storage.persist().catch(() => false);
+// Ask the browser to keep this site's storage, and remember the answer for the
+// Offline Ready check (installed Home Screen apps are normally granted).
+window.rapsStoragePersisted=null;
+if (navigator.storage?.persisted) navigator.storage.persisted().then(granted => granted || (navigator.storage.persist ? navigator.storage.persist() : false))
+  .then(granted => { window.rapsStoragePersisted = !!granted; }).catch(() => { window.rapsStoragePersisted = false; });

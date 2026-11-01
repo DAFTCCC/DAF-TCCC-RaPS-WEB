@@ -59,13 +59,18 @@ function fixture() {
     'syncClassForAuthoritativeClose','closeClass','prepareBackupClass','unverifiedLocalClasses',
     'renderLocalRecoveryNotice','guardClassExport','scrubPrivateViews','refreshPrivateViewAccess','importRoster',
     'attemptBelongsToCurrentEvaluator','findActiveEvaluationLock','resumeActiveEvaluation','renderLearnerPracticeHistory',
-    'cloudReachable','attemptAwaitingSync','refreshClosureGate'];
+    'cloudReachable','attemptAwaitingSync','refreshClosureGate',
+    'idbOpen','idbDone','idbMirror','readRosterWithdrawals','classArchivableFromCache','compactCacheSnapshot','writeDbSnapshot'];
   const storeStart = app.indexOf('window.RAPS_CLASS_STORE = Object.freeze({');
   const storeEnd = app.indexOf("\n\nwindow.addEventListener('raps-evaluation-tombstoned'", storeStart);
   assert.ok(storeStart >= 0 && storeEnd > storeStart);
   vm.runInContext(`
     const DB_KEY='TCCC_SUITE_DB';
     const LOCAL_COPY_EXCLUSION_PREFIX='RAPS_CLASS_LOCAL_EXCLUDED:';
+    // Real device-storage write path; no IndexedDB exists in this harness.
+    const IDB_NAME='raps-local-v1',IDB_CLASSES='classes',IDB_META='meta',ROSTER_WITHDRAWAL_PREFIX='RAPS_ROSTER_WITHDRAWALS_V1:';
+    const idbPendingHydration=new Set();
+    let idbHandle=null,idbWriteChain=Promise.resolve(),idbUnavailable=true,idbHydrationGate=Promise.resolve(),idbQueued=null;
     const now=()=>Date.now(),deep=value=>JSON.parse(JSON.stringify(value));
     const esc=value=>String(value);
     const APP_VERSION='synthetic-test';
