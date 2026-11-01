@@ -127,3 +127,47 @@ team should agree on this convention before the next release.
   to `supabase/migrations/` when that work is re-applied.
 - **Open:** the four lifecycle RPCs exist only in the production database.
   Capture them from the NUC.
+
+## 6. Findings from the NUC session on 2026-10-31
+
+**OFFLINE TEST 01 was not overwritten.** The class's audit history (`public.audit_log`,
+entity `acc5483d-…`) shows only two content changes:
+
+- On 10-09 06:16 the class was created with a blank scenario name, a blank
+  profile, and `standard` difficulty.
+- At 06:18 the same account and device (`e3f6b7b5…`, `device-02aa6dd2…`) saved
+  95 of the 96 Tier 3 non-critical criteria as not-tested through
+  Configure Scenario NT.
+
+Later writes were no-op updates (timestamps and device only), which the audit
+filter ignores. Neither the offline work nor sync changed it. The no-baseline
+full-metadata overwrite path in `cloud-sync.js` remains a hardening item, but it
+was not the cause.
+
+**Live lifecycle contract confirmed.** The captured definitions
+(`~/raps-capture-20261101-0021/functions.sql` on the NUC) match the 3.4.13
+offline reconciliation:
+
+- The claim returns `alreadyClaimed` and refuses Attempt 2 without a finalized Attempt 1.
+- Finalize returns `finalized:true` for an already finalized record.
+- Close returns `jsonb`.
+
+The `20261101_offline_field_finalization.sql` migration was rehearsed on a
+restored copy of production. It was then applied to production after the
+verified backup `raps-pre-3.4.13-20261101-0022.dump` (sha256 `cef43c31…`). A
+rollback script is at `~/raps-backups/rollback-3.4.13.sql`.
+
+**NUC exposure snapshot:**
+
+- **Databases and poolers:** loopback-only. There is no global IPv6 address.
+  Caddy publishes 80/443.
+- **SSH:** listens on all interfaces with password login enabled. There were no
+  failed logins in 14 days, which suggests port 22 is not forwarded from the
+  internet. Key login has been added for `FIL-AMAZING` (192.168.50.73).
+  Remaining: keys for 192.168.50.190 and .5, then turn off password login.
+  The `homelabmon` key account logs in from .5 about every 6 seconds; confirm it
+  is expected.
+- **SMB (139/445):** open on all interfaces with no host restriction. Restrict it
+  to the LAN, or disable it.
+- **Host firewall:** UFW is inactive and the IPv4/IPv6 INPUT policy is ACCEPT.
+  Plan default-deny with LAN allowances. Docker-published ports bypass UFW.
