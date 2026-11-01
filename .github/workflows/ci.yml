@@ -53,7 +53,7 @@ jobs:
                        browser-phase-navigation browser-unresolved-navigation \
                        browser-auth-layout browser-auth-flows browser-admin-accounts \
                        browser-test-majcom browser-remove-student browser-offline-startup \
-                       browser-offline-evaluation; do
+                       browser-offline-evaluation browser-device-storage; do
             echo "::group::$suite"
             python "tests/$suite.py"
             echo "::endgroup::"

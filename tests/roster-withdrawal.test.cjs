@@ -239,9 +239,12 @@ test('a removal is queued durably on the device and cleared only by acknowledgem
   const sandbox = {
     localStorage: { getItem: k => storage.has(k) ? storage.get(k) : null, setItem: (k, v) => storage.set(k, String(v)), removeItem: k => storage.delete(k) },
     window: { RAPS_CLOUD: { user: { id: 'manager-1' } } }, now: () => instant, DB_KEY: 'db',
-    ROSTER_WITHDRAWAL_PREFIX: 'RAPS_ROSTER_WITHDRAWALS_V1:', db: { deviceId: 'device-a', classes: [] }
+    ROSTER_WITHDRAWAL_PREFIX: 'RAPS_ROSTER_WITHDRAWALS_V1:', db: { deviceId: 'device-a', classes: [] },
+    idbPendingHydration: new Set(), idbQueued: null, idbUnavailable: true, idbHandle: null,
+    idbWriteChain: Promise.resolve(), idbHydrationGate: Promise.resolve(), readTrashOutbox: () => null, isClassClosed: () => false
   };
-  vm.runInNewContext(['currentCloudUserId', 'readRosterWithdrawals', 'writeRosterWithdrawals', 'resolveRosterWithdrawal', 'removeStudentFromRoster']
+  vm.runInNewContext(['currentCloudUserId', 'readRosterWithdrawals', 'writeRosterWithdrawals', 'resolveRosterWithdrawal', 'removeStudentFromRoster',
+    'idbOpen', 'idbDone', 'idbMirror', 'classArchivableFromCache', 'compactCacheSnapshot', 'writeDbSnapshot']
     .map(functionSource).join('\n') + '\nthis.api={readRosterWithdrawals,resolveRosterWithdrawal,removeStudentFromRoster};', sandbox);
   const { api } = sandbox;
   const c = { id: 'class-1', cloudSync: { enabled: true }, students: [learner('a'), learner('b')] };

@@ -1,0 +1,8 @@
+# v3.4.13-web.2 — durable device storage and Offline Ready
+
+- **Durable device storage.** Every save now also writes each class as its own record in IndexedDB. Previously the whole local database lived in a single ~5 MB browser storage slot and was rewritten on every save. The slot stays as a fast startup cache. When it is full, saving no longer fails: closed and fully synced classes are kept in IndexedDB only, while anything with unsynced or in-progress work always stays in both stores. Startup opens from the cache and restores IndexedDB-only classes moments later. If the cache is wiped, the whole database and the device identity are recovered from IndexedDB.
+- Durable writes wait for startup restore to finish, so an early save can never erase the durable copy. Rapid saves (each grading tap) are coalesced into one write. All 15 database writes now go through one function.
+- **Offline Ready.** Each class screen shows **OFFLINE READY** or **NOT OFFLINE READY**, and names the fix for anything missing. Required: a saved sign-in, permission to evaluate in the class, the app saved for offline use, curriculum on the device, the class and roster downloaded, and durable storage. Warnings: browser storage not guaranteed (install to the Home Screen), last sync older than 18 hours, and unresolved sync conflicts.
+- The app asks the browser to keep its storage, and remembers whether the browser agreed.
+
+No server change. Validation: 809/809 Node tests (10 new Offline Ready tests). 13/13 Chromium suites, including the new `browser-device-storage.py`, which uses real IndexedDB to cover a full cache, a reload, a wiped cache with device identity recovery, and a deletion that stays deleted.

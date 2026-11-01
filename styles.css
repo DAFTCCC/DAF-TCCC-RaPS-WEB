@@ -953,3 +953,12 @@ textarea#overallNotes{width:calc(100% - 24px);font-size:var(--font-body);line-he
 .closureDevice>div{display:flex;flex-direction:column;gap:2px;min-width:0}.closureDevice b{overflow-wrap:anywhere}.closureDevice span{font-size:12px;color:var(--amber)}
 .closureDevice.ready span{color:var(--green)}
 :root[data-field-display="daylight"] .closureGate{background:#fff;border-color:#607889;color:#0a1721}
+
+/* Offline Ready */
+.offlineReady{margin:12px 12px 0;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#121a21}
+.offlineReady b{display:block;letter-spacing:.04em}.offlineReady span{font-size:12px;color:var(--muted)}
+.offlineReady ul{margin:6px 0 0;padding-left:18px;font-size:12px;line-height:1.5}
+.offlineReady[data-state="ready"]{border-color:#2e7a49}.offlineReady[data-state="ready"] b{color:var(--green)}
+.offlineReady[data-state="warn"]{border-color:#a87825}.offlineReady[data-state="warn"] b{color:var(--amber)}
+.offlineReady[data-state="blocked"]{border-color:#8d3d43}.offlineReady[data-state="blocked"] b{color:var(--red)}
+:root[data-field-display="daylight"] .offlineReady{background:#fff;color:#0a1721}

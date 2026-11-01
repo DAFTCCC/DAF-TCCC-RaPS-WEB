@@ -98,6 +98,11 @@ def main():
         enter()
         page.evaluate('window.__offlineTest.setup()')
         assert page.evaluate('window.__offlineTest.reachable()') is False, 'Fixture must be offline'
+        panel = page.locator('#offlineReadyPanel')
+        expect(panel).to_be_visible()
+        expect(panel).to_contain_text('NOT OFFLINE READY')
+        expect(panel).to_contain_text('Reload RaPS once while connected')
+        checks.append('the Offline Ready panel names what is missing (app not saved for offline use in this fixture)')
 
         # Start A1 with no connection.
         page.locator('[data-start="s1"][data-attempt="1"]').click()
