@@ -972,3 +972,12 @@ textarea#overallNotes{width:calc(100% - 24px);font-size:var(--font-body);line-he
 .assignRow{display:grid;grid-template-columns:1fr minmax(120px,45%);gap:8px;align-items:center;padding:6px 0;border-top:1px solid #2c3943;font-size:13px}
 .assignRow select{min-height:44px;background:#121a21;color:inherit;border:1px solid #3d4d59;border-radius:9px;padding:6px}
 :root[data-field-display="daylight"] .myGroupPicker select,:root[data-field-display="daylight"] .assignRow select{background:#fff;color:#0a1721}
+
+/* Missed Trends */
+.trendKpis{grid-template-columns:repeat(3,minmax(0,1fr))}
+.trendTable td small{color:var(--muted)}
+.calibrationFlag{display:inline-block;padding:2px 6px;border-radius:6px;background:#4b3a12;color:#ffe3a0;font-size:11px;font-weight:800}
+.trendBar{display:grid;grid-template-columns:64px 1fr 44px 32px;gap:8px;align-items:center;font-size:12px;padding:3px 0}
+.trendBar>div{height:10px;border-radius:5px;background:#26333d;overflow:hidden}.trendBar i{display:block;height:100%;background:var(--blue)}
+.trendBar small{color:var(--muted)}
+@media(max-width:520px){.trendKpis{grid-template-columns:1fr}}

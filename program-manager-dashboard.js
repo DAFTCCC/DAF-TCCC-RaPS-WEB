@@ -145,6 +145,11 @@ function inject() {
         </div>
       </details>
 
+      <details class="analyticsDetails" open>
+        <summary>Missed Trends</summary>
+        <div id="pmBaseTrends"></div>
+      </details>
+
       <p class="helper pmBaseFoot">Operational metrics are descriptive. Pass/fail rates use finalized evaluations only; incomplete evaluations remain visible separately.</p>
     </section>
   `;
@@ -325,6 +330,7 @@ function buildModel(data) {
 }
 
 function renderModel(model) {
+  window.RAPS_TRENDS?.render($('pmBaseTrends'), model.trends);
   const k = model.kpis;
   $('pmBaseKpis').innerHTML = [
     ['Classes', k.classes, 'Cloud classes in window'],
@@ -484,22 +490,29 @@ async function loadDashboard(force=false) {
     if (eventIds.length) {
       evaluations = await readChunks(
         'evaluations',
-        'id,event_id,participant_id,evaluator_id,status,overall_result,score_numerator,score_denominator,started_at,completed_at,updated_at',
+        'id,event_id,participant_id,evaluator_id,attempt_number,status,overall_result,score_numerator,score_denominator,started_at,completed_at,updated_at',
         'event_id',
         eventIds
       );
     }
 
     const evaluationIds = evaluations.map(x => x.id);
-    let failures = [];
+    let failures = [], results = [], criteria = [];
     if (evaluationIds.length) {
-      failures = await readChunks(
+      // All graded results (PASS/FAIL) with the criterion, for Missed Trends.
+      results = await readChunks(
         'criterion_results',
-        'evaluation_id,result,failure_mode,primary_contributor',
+        'evaluation_id,criterion_id,result,failure_mode,primary_contributor',
         'evaluation_id',
         evaluationIds,
-        q => q.eq('result','fail')
+        q => q.in('result',['pass','fail']).order('id')
       );
+      failures = results.filter(r => r.result === 'fail');
+      const criterionIds = [...new Set(results.map(r => r.criterion_id).filter(Boolean))];
+      if (criterionIds.length) {
+        try { criteria = await readChunks('criteria','id,criterion_code,critical','id',criterionIds); }
+        catch (error) { console.warn('Criteria catalog unavailable for Missed Trends.', error); }
+      }
     }
 
     const evaluatorIds = [...new Set(evaluations.map(x => x.evaluator_id).filter(Boolean))];
@@ -535,6 +548,7 @@ async function loadDashboard(force=false) {
 
     access.assert();
     const model = buildModel({ classes, events, evaluations, failures, profileRows, participantRows });
+    model.trends = window.RAPS_TRENDS?.build({ evaluations, results, criteria, profiles: profileRows }) || null;
     renderModel(model);
     lastLoadedBaseId = baseId;
 
